@@ -1768,10 +1768,16 @@ func _draw_match() -> void:
 ## `alpha_fn(part) -> float`     填充透明度（缺省 0.22，与试驾/对局页旧行为一致）
 ## `offset_fn(part) -> Vector2`  该部件所有格的额外偏移（缺省零）
 ## `cell_hook(box, colour, part)` 每格额外装饰，例如履带纹（缺省无）
-func _draw_hull_shared(hull: TankBody, origin: Vector2, heading: float, scale_factor: float, colour_fn: Callable, alpha_fn: Callable = Callable(), offset_fn: Callable = Callable(), cell_hook: Callable = Callable()) -> void:
+## `effects` 逐模块特效（可选，缺省空字典）：
+##   `effects["parts"]` : part_key → {fill, fill_colour, bar, bar_colour, outline, outline_colour}
+##   `effects["links"]` : [{from: Vector2i, to: Vector2i, colour: Color}] 局部格坐标连线（维修）
+## **缺省 `{}` 时一个绘制分支都不会走，像素与旧版逐字节相同**——这是截图基线可比的前提。
+func _draw_hull_shared(hull: TankBody, origin: Vector2, heading: float, scale_factor: float, colour_fn: Callable, alpha_fn: Callable = Callable(), offset_fn: Callable = Callable(), cell_hook: Callable = Callable(), effects: Dictionary = {}) -> void:
 	if hull == null or hull.parts.is_empty():
 		return
 	var cell: float = hull.cell_size()
+	var effect_parts: Dictionary = effects.get("parts", {})
+	var effect_links: Array = effects.get("links", [])
 	draw_set_transform(origin, heading, Vector2(scale_factor, scale_factor))
 	for part in hull.parts:
 		var colour: Color = colour_fn.call(part)
@@ -1789,7 +1795,164 @@ func _draw_hull_shared(hull: TankBody, origin: Vector2, heading: float, scale_fa
 			draw_rect(box, colour, false, maxf(1.0 / scale_factor, 1.0))
 			if cell_hook.is_valid():
 				cell_hook.call(box, colour, part)
+		var part_key := String(part.get("key", ""))
+		if effect_parts.has(part_key):
+			_draw_part_effect(part, effect_parts[part_key], cell, -hull.centroid_local + offset, scale_factor)
+	## 维修连线：从维修装置首格指向「下一次真正会被修的那一件」首格。
+	## 画在格之后、变换复位之前，所以自动随车体旋转与缩放。
+	if not effect_links.is_empty():
+		var link_pulse := 0.5 + 0.5 * sin(_time * MODULE_PULSE_SPEED)
+		for raw_link in effect_links:
+			var link: Dictionary = raw_link
+			var link_from: Vector2 = (Vector2(Vector2i(link["from"])) + Vector2(0.5, 0.5)) * cell - hull.centroid_local
+			var link_to: Vector2 = (Vector2(Vector2i(link["to"])) + Vector2(0.5, 0.5)) * cell - hull.centroid_local
+			var link_colour: Color = link.get("colour", Palette.ACCENT_LIME)
+			draw_line(link_from, link_to, Color(link_colour, 0.30 + 0.45 * link_pulse), maxf(1.0 / scale_factor, 1.0))
 	draw_set_transform(Vector2.ZERO, 0.0, Vector2.ONE)
+
+## 逐模块特效的常量。
+## 进度条高度用**局部像素**，再夹一个最小**屏幕**厚度：生存页缩放系数只有 0.594，
+## 纯局部 3 px 在屏幕上不足 2 px，会被霓虹格线淹掉；最小屏幕厚度保证任何缩放下都看得见。
+const MODULE_BAR_LOCAL_HEIGHT := 3.2
+const MODULE_BAR_MIN_SCREEN := 2.0
+## 护盾/维修脉冲频率（rad/s）。相位取自 `_time`，不用 randf，截图冻结时 `_time` 不动。
+const MODULE_PULSE_SPEED := 6.0
+
+## 逐模块特效的唯一装配点（战场与镜像共用同一份结果）。
+##
+## 返回 `{parts: {part_key: {...}}, links: [{from, to, colour}]}`。每个部件的覆盖字段：
+##   `fill` / `fill_colour`       整块格的覆盖填充（护盾生效时用，比例 = 护盾剩余血量）
+##   `bar` / `bar_colour`         底部进度条 0..1（制造 / 存量 / 加工 / 装填 / 充能 / 维修）
+##   `outline` / `outline_colour` 脉冲描边强度与颜色
+##   `word` / `word_colour`       镜像面板用的 2–3 字状态词
+##
+## **所有比例都由数据层算好**：`module_states()` 用 `craft_time_s` / `reload_s` /
+## `processing_time_s`，`shields()` 用 `recharge_s`，`repair_states()` 用 `period_s`。
+## 页面层只做乘法和 clamp，不做任何时长除法——否则同一套分母会在两处各写一遍，迟早走偏。
+func _hull_effects(hull: TankBody, damage: DamageSystem, net: AmmoNetwork) -> Dictionary:
+	var parts_map: Dictionary = {}
+	var links: Array = []
+	if hull == null:
+		return {"parts": parts_map, "links": links}
+	var cell_index := _hull_cell_index(hull)
+	if net != null:
+		for raw in net.module_states():
+			var entry: Dictionary = raw
+			var cells: Array = entry["cells"]
+			if cells.is_empty():
+				continue
+			var key := String(cell_index.get(Vector2i(cells[0]), ""))
+			if key.is_empty():
+				continue
+			var role := String(entry["role"])
+			var ratio := float(entry["ratio"])
+			var overlay: Dictionary = parts_map.get(key, {})
+			if role == AmmoNetwork.ROLE_FACTORY:
+				overlay["bar"] = ratio
+				overlay["bar_colour"] = Palette.ACCENT_AMBER
+				overlay["word"] = "制造"
+				overlay["word_colour"] = Palette.ACCENT_AMBER
+			elif role == AmmoNetwork.ROLE_DEPOT:
+				overlay["bar"] = ratio
+				overlay["bar_colour"] = Palette.WIRE
+				overlay["word"] = "存量"
+				overlay["word_colour"] = Palette.WIRE
+			elif role == AmmoNetwork.ROLE_MODIFIER:
+				if ratio >= 0.0:
+					overlay["bar"] = ratio
+					overlay["bar_colour"] = Palette.ACCENT_AMBER
+				overlay["word"] = "加工"
+				overlay["word_colour"] = Palette.ACCENT_AMBER
+			elif role == AmmoNetwork.ROLE_CANNON:
+				var loaded := bool(entry["loaded"])
+				overlay["bar"] = 1.0 if loaded else ratio
+				overlay["bar_colour"] = Palette.ACCENT_LIME if loaded else Palette.ACCENT_AMBER
+				overlay["word"] = "已上膛" if loaded else "装填"
+				overlay["word_colour"] = Palette.ACCENT_LIME if loaded else Palette.ACCENT_AMBER
+			parts_map[key] = overlay
+	if damage != null:
+		for raw in damage.shields():
+			var shield: Dictionary = raw
+			var shield_key := String(shield["key"])
+			var shield_overlay: Dictionary = parts_map.get(shield_key, {})
+			if String(shield["state"]) == DamageSystem.SHIELD_ACTIVE:
+				shield_overlay["fill"] = clampf(float(shield["hp"]) / maxf(float(shield["hp_max"]), 0.001), 0.0, 1.0)
+				shield_overlay["fill_colour"] = Palette.ACCENT_LIME
+				shield_overlay["outline"] = 0.85
+				shield_overlay["outline_colour"] = Palette.ACCENT_LIME
+				shield_overlay["word"] = "护盾"
+				shield_overlay["word_colour"] = Palette.ACCENT_LIME
+			else:
+				shield_overlay["bar"] = clampf(1.0 - float(shield["charge"]) / maxf(float(shield["recharge_s"]), 0.01), 0.0, 1.0)
+				shield_overlay["bar_colour"] = Palette.ACCENT_LIME
+				shield_overlay["outline"] = 0.55
+				shield_overlay["outline_colour"] = Palette.ACCENT_RED
+				shield_overlay["word"] = "充能"
+				shield_overlay["word_colour"] = Palette.ACCENT_RED
+			parts_map[shield_key] = shield_overlay
+		for raw in damage.repair_states():
+			var repair: Dictionary = raw
+			var repair_key := String(repair["key"])
+			var repair_overlay: Dictionary = parts_map.get(repair_key, {})
+			repair_overlay["bar"] = float(repair["ratio"])
+			repair_overlay["bar_colour"] = Palette.ACCENT_LIME
+			repair_overlay["word"] = "维修"
+			repair_overlay["word_colour"] = Palette.ACCENT_LIME
+			parts_map[repair_key] = repair_overlay
+			var own_cells: Array = repair["cells"]
+			var target_cells: Array = repair["target_cells"]
+			if not own_cells.is_empty() and not target_cells.is_empty():
+				links.append({
+					"from": Vector2i(own_cells[0]),
+					"to": Vector2i(target_cells[0]),
+					"colour": Palette.ACCENT_LIME,
+				})
+	return {"parts": parts_map, "links": links}
+
+## 格坐标 → 部件 key。数据层导出的是格列表，页面层要用它把状态对回 `TankBody` 的部件。
+## 用首格做键：同一辆车的部件不会共享格，而 `part_cells()` 的顺序在两条路径上一致。
+func _hull_cell_index(hull: TankBody) -> Dictionary:
+	var index: Dictionary = {}
+	for part in hull.parts:
+		var key := String(part["key"])
+		for raw_cell in part["cells"]:
+			index[Vector2i(raw_cell)] = key
+	return index
+
+## 单部件特效：覆盖填充 / 脉冲描边 / 底部进度条。
+## 调用时车体变换已设好（原点 + 朝向 + 缩放），所以这里一律用**局部格坐标**，
+## 随车体一起旋转与缩放，不需要再算一次世界坐标。
+## `base` = `-centroid_local + offset`，把格坐标换算到车体局部系。
+func _draw_part_effect(part: Dictionary, effect: Dictionary, cell: float, base: Vector2, scale_factor: float) -> void:
+	var low := Vector2(INF, INF)
+	var high := Vector2(-INF, -INF)
+	for raw_cell in part["cells"]:
+		var value := Vector2(Vector2i(raw_cell))
+		low = Vector2(minf(low.x, value.x), minf(low.y, value.y))
+		high = Vector2(maxf(high.x, value.x), maxf(high.y, value.y))
+	if low.x > high.x:
+		return
+	var box := Rect2(low * cell + base, (high - low + Vector2.ONE) * cell)
+	var pulse := 0.5 + 0.5 * sin(_time * MODULE_PULSE_SPEED)
+	var line_width := maxf(1.0 / scale_factor, 1.0)
+	## ① 覆盖填充：护盾生效时整块格泛绿，强度随剩余护盾血量。
+	if float(effect.get("fill", -1.0)) >= 0.0:
+		var fill_colour: Color = effect.get("fill_colour", Palette.ACCENT_LIME)
+		var fill_ratio := clampf(float(effect["fill"]), 0.0, 1.0)
+		draw_rect(box, Color(fill_colour, 0.10 + 0.22 * fill_ratio), true)
+	## ② 脉冲描边：护盾生效是绿，充能中是红。
+	if float(effect.get("outline", 0.0)) > 0.0:
+		var outline_colour: Color = effect.get("outline_colour", Palette.ACCENT_LIME)
+		var strength := float(effect["outline"]) * (0.55 + 0.45 * pulse)
+		draw_rect(box, Color(outline_colour, strength), false, line_width * 1.6)
+	## ③ 底部进度条：制造 / 存量 / 加工 / 装填 / 充能 / 维修共用这一条。
+	if float(effect.get("bar", -1.0)) >= 0.0:
+		var bar_colour: Color = effect.get("bar_colour", Palette.ACCENT_AMBER)
+		var bar_height := maxf(MODULE_BAR_LOCAL_HEIGHT, MODULE_BAR_MIN_SCREEN / maxf(scale_factor, 0.001))
+		var bar := Rect2(Vector2(box.position.x + 0.5, box.end.y - bar_height - 0.5), Vector2(maxf(box.size.x - 1.0, 1.0), bar_height))
+		draw_rect(bar, Color(Palette.BG_BASE, 0.85), true)
+		draw_rect(Rect2(bar.position, Vector2(bar.size.x * clampf(float(effect["bar"]), 0.0, 1.0), bar.size.y)), bar_colour, true)
+		draw_rect(bar, Color(bar_colour, 0.55), false, maxf(0.5, line_width * 0.5))
 
 ## 对局页每部件颜色：驾驶舱恒为琥珀，其余按队伍色。`bind(base)` 后签名为 (part, base)。
 func _match_part_colour(part: Dictionary, base: Color) -> Color:
@@ -1804,7 +1967,8 @@ func _draw_match_hull(tag: String, scale_factor: float) -> void:
 		return
 	var base := Palette.ACCENT_CYAN if tag == Duel.TAG_PLAYER else Palette.ACCENT_MAGENTA
 	var origin: Vector2 = DRIVE_VIEW.position + (hull.position - duel.arena.position) * scale_factor
-	_draw_hull_shared(hull, origin, hull.heading, scale_factor, _match_part_colour.bind(base))
+	var effects := _hull_effects(hull, duel.damage_of(tag), duel.network_of(tag))
+	_draw_hull_shared(hull, origin, hull.heading, scale_factor, _match_part_colour.bind(base), Callable(), Callable(), Callable(), effects)
 
 func _draw_match_fx(scale_factor: float) -> void:
 	for raw_entry in _match_fx.entries:
@@ -1922,7 +2086,8 @@ func _draw_drive_hull() -> void:
 	var tilt := 0.0
 	if _motion_enabled:
 		tilt = clampf(tank.angular_velocity * deg_to_rad(0.7), -deg_to_rad(2.0), deg_to_rad(2.0))
-	_draw_hull_shared(tank, _drive_to_screen(tank.position), tank.heading + tilt, scale_factor, _drive_part_color, Callable(), _drive_part_offset, _drive_cell_hook)
+	var effects := _hull_effects(tank, damage, network)
+	_draw_hull_shared(tank, _drive_to_screen(tank.position), tank.heading + tilt, scale_factor, _drive_part_color, Callable(), _drive_part_offset, _drive_cell_hook, effects)
 
 ## 加速时行进机构整体向后拖一点，纯视觉量（design §5.5）。
 func _drive_part_offset(part: Dictionary) -> Vector2:
@@ -2828,7 +2993,8 @@ func _draw_survival_hull(tag: String, scale_factor: float) -> void:
 	if hull == null or hull.parts.is_empty():
 		return
 	var origin := _survival_to_screen(hull.position, scale_factor)
-	_draw_hull_shared(hull, origin, hull.heading, scale_factor, _survival_part_colour.bind(tag), _survival_hull_alpha)
+	var effects := _hull_effects(hull, survival.duel.damage_of(tag), survival.duel.network_of(tag))
+	_draw_hull_shared(hull, origin, hull.heading, scale_factor, _survival_part_colour.bind(tag), _survival_hull_alpha, Callable(), Callable(), effects)
 
 ## 命中 / 击毁 / 脱落的瞬时动效。所有半径用 `sin(_time)` 脉动，不用 `randf`。
 func _draw_survival_fx(scale_factor: float) -> void:
@@ -2950,6 +3116,10 @@ func _draw_survival_mirror() -> void:
 	var hull: TankBody = survival.duel.tank_of(Duel.TAG_PLAYER)
 	if hull == null:
 		return
+	## 逐模块特效只算一次，镜像本体与状态行共用同一份结果。
+	## 这与战场上用的是同一个 `_hull_effects()`，所以两边显示的进度必然一致。
+	var effects := _hull_effects(hull, survival.duel.damage_of(Duel.TAG_PLAYER), survival.duel.network_of(Duel.TAG_PLAYER))
+	var effect_parts: Dictionary = effects.get("parts", {})
 	var panel := _survival_mirror_panel_rect()
 	draw_rect(panel, Color(Palette.BG_BASE, 0.88), true)
 	draw_rect(panel, Color(Palette.WIRE, 0.55), false, 1.0)
@@ -2957,7 +3127,7 @@ func _draw_survival_mirror() -> void:
 	_draw_text("坦克镜像", Vector2(x, panel.position.y + 20.0), 14, Palette.ACCENT_CYAN, false)
 	## ② 镜像本体：把坦克格用局部坐标画到面板上部，正北朝上（heading 固定为 0）。
 	var mirror_rect := Rect2(x, panel.position.y + 30.0, panel.size.x - 24.0, 132.0)
-	_draw_survival_mirror_hull(hull, mirror_rect)
+	_draw_survival_mirror_hull(hull, mirror_rect, effect_parts)
 	## ③ 汇总行：平台格总血量 + 模块数量。
 	var platform_hp := 0.0
 	var platform_hp_max := 0.0
@@ -2984,6 +3154,8 @@ func _draw_survival_mirror() -> void:
 	draw_rect(bar, Color(Palette.WIRE, 0.30), true)
 	draw_rect(Rect2(bar.position, Vector2(bar.size.x * platform_ratio, bar.size.y)), _survival_ratio_colour(platform_ratio), true)
 	## ④ 逐模块状态行：按血量比升序，最残的排前面；只列模块与行进机构（平台已汇总）。
+	## 每行现在是**两行条**：上面是 HP，下面是模块进度（制造/存量/加工/装填/护盾/维修），
+	## 右端有一个 2–3 字的状态词。行高仍是 `MIRROR_ROW_HEIGHT = 22`，没有把面板撑高。
 	var rows: Array = []
 	for part in hull.parts:
 		var kind := String(part["kind"])
@@ -2996,6 +3168,7 @@ func _draw_survival_mirror() -> void:
 	_draw_text("部件状态", Vector2(x, row_y), 13, Palette.ACCENT_CYAN, false)
 	row_y += 6.0
 	var shown := mini(rows.size(), MIRROR_ROW_VISIBLE)
+	var row_width := panel.size.x - 24.0
 	for index in range(shown):
 		var entry: Dictionary = rows[index]
 		var part: Dictionary = entry["part"]
@@ -3006,11 +3179,23 @@ func _draw_survival_mirror() -> void:
 		if bool(definition.get("core", false)):
 			label = "★ " + label
 		var colour := _survival_ratio_colour(ratio)
+		var effect: Dictionary = effect_parts.get(String(part.get("key", "")), {})
 		_draw_text(label.substr(0, 6), Vector2(x, row_y), 12, colour, false)
-		var row_bar := Rect2(x + 118.0, row_y - 9.0, panel.size.x - 190.0, 6.0)
-		draw_rect(row_bar, Color(Palette.WIRE, 0.28), true)
-		draw_rect(Rect2(row_bar.position, Vector2(row_bar.size.x * ratio, row_bar.size.y)), colour, true)
-		_draw_text("%d%%" % int(roundf(ratio * 100.0)), Vector2(panel.position.x + panel.size.x - 62.0, row_y), 12, colour, true)
+		## 状态词：只有真的拿到模块状态时才画，否则留空（不编造“正常”字样）。
+		var word := String(effect.get("word", ""))
+		if not word.is_empty():
+			var word_colour: Color = effect.get("word_colour", Palette.TEXT_LO)
+			_draw_text(word, Vector2(x + 96.0, row_y), 11, word_colour, false)
+		_draw_text("%d%%" % int(roundf(ratio * 100.0)), Vector2(panel.position.x + panel.size.x - 44.0, row_y), 11, colour, true)
+		## HP 条（上）与模块进度条（下）。模块条只在有进度语义时画。
+		var hp_bar := Rect2(x, row_y + 4.0, row_width, 2.5)
+		draw_rect(hp_bar, Color(Palette.WIRE, 0.28), true)
+		draw_rect(Rect2(hp_bar.position, Vector2(hp_bar.size.x * ratio, hp_bar.size.y)), colour, true)
+		if float(effect.get("bar", -1.0)) >= 0.0:
+			var module_bar := Rect2(x, row_y + 8.0, row_width, 2.5)
+			var module_colour: Color = effect.get("bar_colour", Palette.ACCENT_AMBER)
+			draw_rect(module_bar, Color(Palette.WIRE, 0.22), true)
+			draw_rect(Rect2(module_bar.position, Vector2(module_bar.size.x * clampf(float(effect["bar"]), 0.0, 1.0), module_bar.size.y)), module_colour, true)
 	if rows.size() > shown:
 		row_y += MIRROR_ROW_HEIGHT
 		_draw_text("…另有 %d 件完好" % (rows.size() - shown), Vector2(x, row_y), 12, Palette.TEXT_LO, false)
@@ -3024,7 +3209,11 @@ func _survival_ratio_colour(ratio: float) -> Color:
 	return Palette.ACCENT_RED
 
 ## 把坦克格画进面板：正北朝上、等比缩放并居中；逐格填充透明度随血量降低。
-func _draw_survival_mirror_hull(hull: TankBody, area: Rect2) -> void:
+##
+## v3.21：除 HP 底色外，有模块状态的格再叠一层**特效色**（护盾绿 / 装填琥珀 / 维修绿）
+## 并在格底部画一条 2 px 迷你进度条——镜像窗口小，单靠颜色分不出“在装填”还是“在制造”，
+## 进度条长度才能表达“还差多少”。
+func _draw_survival_mirror_hull(hull: TankBody, area: Rect2, effect_parts: Dictionary = {}) -> void:
 	if hull.cells.is_empty():
 		return
 	var min_local := Vector2(INF, INF)
@@ -3046,6 +3235,7 @@ func _draw_survival_mirror_hull(hull: TankBody, area: Rect2) -> void:
 	for part in hull.parts:
 		var ratio := clampf(float(part["hp"]) / maxf(float(part["hp_max"]), 0.001), 0.0, 1.0)
 		var colour := _survival_hull_colour(Duel.TAG_PLAYER, part)
+		var effect: Dictionary = effect_parts.get(String(part.get("key", "")), {})
 		for raw_cell in part["cells"]:
 			var cell_value: Vector2i = raw_cell
 			var centre_local: Vector2 = (Vector2(cell_value) + Vector2(0.5, 0.5)) * cell
@@ -3053,6 +3243,12 @@ func _draw_survival_mirror_hull(hull: TankBody, area: Rect2) -> void:
 			var box := Rect2(at - Vector2(cell, cell) * 0.5 * fit, Vector2(cell, cell) * fit)
 			draw_rect(box, Color(colour, 0.16 + 0.26 * ratio), true)
 			draw_rect(box, colour, false, 1.0)
+			if float(effect.get("bar", -1.0)) >= 0.0:
+				var mini_colour: Color = effect.get("bar_colour", Palette.ACCENT_AMBER)
+				var mini_height := maxf(2.0, box.size.y * 0.22)
+				var mini := Rect2(Vector2(box.position.x, box.end.y - mini_height), Vector2(box.size.x, mini_height))
+				draw_rect(mini, Color(Palette.BG_BASE, 0.7), true)
+				draw_rect(Rect2(mini.position, Vector2(mini.size.x * clampf(float(effect["bar"]), 0.0, 1.0), mini.size.y)), mini_colour, true)
 	## 质心十字与朝头箭头：镜像与场上姿态的对应关系靠这两个标记维持。
 	var centre_at := origin + (hull.centroid_local) * fit
 	draw_line(centre_at + Vector2(-4, 0), centre_at + Vector2(4, 0), Color(Palette.TEXT_HI, 0.7), 1.0)

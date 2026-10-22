@@ -215,6 +215,69 @@ func cannon_states() -> Array:
 		})
 	return result
 
+## 逐模块的可视化状态（页面层唯一入口，**绝不导出原始 `state` 字典**）。
+##
+## 每项：`{part, role, module_id, cells, ratio, detail, loaded, queued}`。
+## `ratio` 是**这一件模块当前进度的 0..1 比例**，语义按角色而定：
+##   制造 = 1 - craft/craft_time_s（缓存满时 `craft` 不再递减，进度会诚实地停住）；
+##   存量 = stored/capacity_slots；
+##   加工 = 1 - work_remaining/(processing_time_s × processing_factor)；
+##   装填 = 已上膛则 1.0，否则 1 - reload_remaining/reload_s。
+## `-1.0` 表示该角色当前没有可画的进度（例如改进器空转）。
+##
+## 为什么由数据层算：`reload_s` / `craft_time_s` / `processing_time_s` 都是模块定义里的量，
+## 页面层若自己拿 `reload_remaining` 去除，必须再去查一次模块表，等于把同一套算术写两遍。
+## 管路件（conveyor）与其它件没有进度语义，直接跳过——传送带上的弹药由
+## `strand_positions()` 提供位置。
+func module_states() -> Array:
+	var result: Array = []
+	for part in parts:
+		var role := String(part["role"])
+		if role == ROLE_CONVEYOR or role == ROLE_OTHER:
+			continue
+		var state: Dictionary = part["state"]
+		var entry := {
+			"part": int(part["index"]),
+			"role": role,
+			"module_id": String(part["module_id"]),
+			"cells": (part["cells"] as Array).duplicate(),
+			"ratio": -1.0,
+			"detail": "",
+			"loaded": false,
+			"queued": false,
+		}
+		match role:
+			ROLE_FACTORY:
+				var craft_period := maxf(float(part["craft_time_s"]), 0.001)
+				var buffer: Array = state["buffer"]
+				entry["ratio"] = clampf(1.0 - float(state["craft"]) / craft_period, 0.0, 1.0)
+				entry["detail"] = "%d/%d" % [buffer.size(), int(part["buffer_slots"])]
+			ROLE_DEPOT:
+				var stored: Array = state["stored"]
+				var capacity := maxi(int(part["capacity_slots"]), 1)
+				entry["ratio"] = clampf(float(stored.size()) / float(capacity), 0.0, 1.0)
+				entry["detail"] = "%d/%d" % [stored.size(), capacity]
+			ROLE_MODIFIER:
+				var work := String(state["work"])
+				var pending := (state["queue"] as Array).size() + (state["output"] as Array).size()
+				if not work.is_empty():
+					var work_total := maxf(float(part["processing_time_s"]) * _processing_factor(work), 0.001)
+					entry["ratio"] = clampf(1.0 - float(state["work_remaining"]) / work_total, 0.0, 1.0)
+					pending += 1
+				entry["detail"] = "%d" % pending
+			ROLE_CANNON:
+				var reload := maxf(float(part["reload_s"]), 0.001)
+				var loaded := bool(state["loaded"])
+				entry["loaded"] = loaded
+				entry["queued"] = bool(state["queued"])
+				if loaded:
+					entry["ratio"] = 1.0
+				else:
+					entry["ratio"] = clampf(1.0 - float(state["reload_remaining"]) / reload, 0.0, 1.0)
+				entry["detail"] = "%.2fs" % reload
+		result.append(entry)
+	return result
+
 func rounds_in_flight() -> int:
 	return _rounds.size()
 

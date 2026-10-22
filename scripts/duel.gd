@@ -227,6 +227,13 @@ func builder_of(tag: String) -> GridBuilder:
 		return null
 	return (sides[tag] as Dictionary)["builder"]
 
+## 某侧的弹药网络。逐模块进度（制造 / 存量 / 加工 / 装填）全在这里，
+## 页面层必须经由这个查询拿，不要伸手进 `sides` 字典。
+func network_of(tag: String) -> AmmoNetwork:
+	if not sides.has(tag):
+		return null
+	return (sides[tag] as Dictionary)["network"]
+
 ## 驾驶舱被毁即该方判负（design §3.3）。
 func defeated(tag: String) -> bool:
 	if not sides.has(tag):

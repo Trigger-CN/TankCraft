@@ -187,6 +187,36 @@ func shields() -> Array:
 		})
 	return result
 
+## 逐维修装置的可视化状态（页面层唯一入口）。
+##
+## 每项：`{key, module_id, cells, ratio, period_s, repair_hp, target_key, target_module_id, target_cells}`。
+## `ratio = 已累积周期时间 / period_s`：这一格进度条跑到 1 的瞬间就是一次治疗落地。
+## `target_*` 是**下一次真正会被修的那一件**——用与 `_repair_once()` 完全相同的判据算出，
+## 所以画出来的连线不会指向一个实际不会被修的目标。没有可修目标时 `target_key` 为空串。
+func repair_states() -> Array:
+	var result: Array = []
+	if _tank == null:
+		return result
+	for part in _tank.parts:
+		var def := definitions.get_module(String(part["module_id"]))
+		if not def.has("repair_hp") or not def.has("period_s"):
+			continue
+		var key := String(part.get("key", ""))
+		var period := maxf(float(def.get("period_s", 1.0)), 0.05)
+		var target := _repair_candidate(part)
+		result.append({
+			"key": key,
+			"module_id": String(part["module_id"]),
+			"cells": (part["cells"] as Array).duplicate(),
+			"ratio": clampf(float(_repair_clock.get(key, 0.0)) / period, 0.0, 1.0),
+			"period_s": period,
+			"repair_hp": float(def.get("repair_hp", 0.0)),
+			"target_key": String(target.get("key", "")),
+			"target_module_id": String(target.get("module_id", "")),
+			"target_cells": (target.get("cells", []) as Array).duplicate(),
+		})
+	return result
+
 func statuses() -> Array:
 	var result: Array = []
 	var keys: Array = _burn.keys()
@@ -726,11 +756,22 @@ func _tick_repair(dt: float) -> void:
 			_repair_once(part, def)
 		_repair_clock[key] = clock
 
-func _repair_once(repair_part: Dictionary, def: Dictionary) -> void:
-	var module_id := String(repair_part["module_id"])
-	var radius := _repair_field_radius
-	if module_id == "repair_small":
-		radius = _repair_small_radius
+## 维修作用半径：小型维修 1 格，其余走区域维修半径（design §6.7）。
+func _repair_radius(repair_part: Dictionary) -> float:
+	if String(repair_part["module_id"]) == "repair_small":
+		return _repair_small_radius
+	return _repair_field_radius
+
+## 选出这个维修装置下一次会修的那一件（只读，不改任何 hp）。
+##
+## **抽出来的理由**：`repair_states()` 要把它画成连线，而连线必须指向**真正会被修的那一件**。
+## 如果页面层另写一份筛选逻辑，两边一旦走偏（例如漏了 hp 已满的排除），
+## 屏幕上就会出现一条指向永远不会被修的部件的绿线——比不画更误导。
+## 候选：同车、非自身、未满血、在半径内；排序 hp 比例升序 → y → x，取第一个。
+func _repair_candidate(repair_part: Dictionary) -> Dictionary:
+	if _tank == null:
+		return {}
+	var radius := _repair_radius(repair_part)
 	var pool: Array[Dictionary] = []
 	for part in _tank.parts:
 		if String(part.get("key", "")) == String(repair_part.get("key", "")):
@@ -741,9 +782,14 @@ func _repair_once(repair_part: Dictionary, def: Dictionary) -> void:
 			continue
 		pool.append(part)
 	if pool.is_empty():
-		return
+		return {}
 	pool.sort_custom(func(a: Dictionary, b: Dictionary) -> bool: return _repair_less(a, b))
-	var best: Dictionary = pool[0]
+	return pool[0]
+
+func _repair_once(repair_part: Dictionary, def: Dictionary) -> void:
+	var best := _repair_candidate(repair_part)
+	if best.is_empty():
+		return
 	var target_def := definitions.get_module(String(best["module_id"]))
 	var amount := float(def.get("repair_hp", 0.0))
 	var is_core := bool(target_def.get("core", false))
