@@ -1,0 +1,11 @@
+{
+  "schema":"tankcraft.arena",
+  "version":1,
+  "id":"arena_pit",
+  "name":"空洞竞技场",
+  "size":[128,72],
+  "spawns":[{"pos":[20,36],"rot":0},{"pos":[108,36],"rot":180}],
+  "expedition_spawns":{"player":{"pos":[20,36],"rot":0},"waves":[[{"pos":[108,36],"rot":180}],[{"pos":[108,18],"rot":180},{"pos":[108,54],"rot":180}]]},
+  "obstacles":[{"circle":[64,36,10],"hp":800,"armor":5},{"rect":[44,32,8,8],"hp":250,"armor":4},{"rect":[76,32,8,8],"hp":250,"armor":4}],
+  "theme":{"accent":"#00F0FF","grid":"#0E1A24"}
+}

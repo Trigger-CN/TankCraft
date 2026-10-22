@@ -1,0 +1,11 @@
+{
+  "schema": "tankcraft.module_catalog",
+  "version": 1,
+  "category": "mobility",
+  "items": [
+    {"id":"track_light","name":"轻型履带","layer":"mobility","footprint":1,"price":45,"mass":2.0,"hp_max":40,"armor":0,"rotatable":true,"power_draw":0,"thrust":4500,"grip":1.0},
+    {"id":"track_heavy","name":"重型履带","layer":"mobility","footprint":2,"price":95,"mass":5.0,"hp_max":90,"armor":0,"rotatable":true,"power_draw":0,"thrust":7000,"grip":0.85},
+    {"id":"armored_wheel","name":"防弹轮组","layer":"mobility","footprint":1,"price":60,"mass":2.5,"hp_max":80,"armor":0,"rotatable":true,"power_draw":0,"thrust":2600,"grip":0.6},
+    {"id":"speed_wheel","name":"机动轮组","layer":"mobility","footprint":1,"price":50,"mass":1.2,"hp_max":25,"armor":0,"rotatable":true,"power_draw":0,"thrust":3600,"grip":1.15}
+  ]
+}

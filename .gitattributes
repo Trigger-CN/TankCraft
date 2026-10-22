@@ -1,0 +1,9 @@
+# 本工程的验证方法依赖文件字节稳定（`--check-only` 输出字节数、截图逐字节比对），
+# 而 Git for Windows 的 core.autocrlf=true 会在检出时把 LF 静默改成 CRLF。
+# 这里显式钉死 LF，让仓库在任何平台上检出的行尾都与当前工作区一致。
+* text=auto eol=lf
+
+# 二进制/生成物：不做行尾转换。
+*.png binary
+*.apk binary
+*.uid text eol=lf

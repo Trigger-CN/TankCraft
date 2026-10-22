@@ -1,0 +1,32 @@
+; TankCraft — 视觉验证原型（M0.5）
+; 本文件对应的设计约束见 docs/design.md §2；改动前先改文档（agent_note.md M1）。
+
+config_version=5
+
+[application]
+
+config/name="TankCraft Visual Prototype"
+run/main_scene="res://scenes/main.tscn"
+config/features=PackedStringArray("4.7", "GL Compatibility")
+
+[display]
+
+window/size/viewport_width=1920
+window/size/viewport_height=1080
+window/size/window_width_override=1280
+window/size/window_height_override=720
+; 2 = WINDOW_MODE_MAXIMIZED：启动即最大化，但仍可拖拽/还原（用户 2026-10-17 要求）。
+; override 保留 1280×720 作为还原后的窗口尺寸。
+window/size/mode=2
+window/size/resizable=true
+window/stretch/mode="viewport"
+window/stretch/aspect="keep"
+
+[rendering]
+
+renderer/rendering_method="gl_compatibility"
+renderer/rendering_method.mobile="gl_compatibility"
+; 关键开关：不开 hdr_2d 则所有 2D 颜色被钳到 1.0，
+; glow_hdr_threshold=0.8 永不触发，霓虹只剩「亮线」（design.md §2.3）
+viewport/hdr_2d=true
+environment/defaults/default_clear_color=Color(0.019608, 0.027451, 0.039216, 1)

@@ -1,0 +1,135 @@
+{
+  "format": "tankcraft.blueprint",
+  "version": 2,
+  "name": "Bot·新兵·蚱蜢（十字轻车）",
+  "size": [
+    24,
+    24
+  ],
+  "economy": {
+    "credits_total": 2400,
+    "credits_spent": 457,
+    "mass_cap_level": 0
+  },
+  "platform_cells": [
+    [
+      2,
+      1
+    ],
+    [
+      3,
+      1
+    ],
+    [
+      4,
+      1
+    ],
+    [
+      5,
+      1
+    ],
+    [
+      1,
+      2
+    ],
+    [
+      2,
+      2
+    ],
+    [
+      3,
+      2
+    ],
+    [
+      4,
+      2
+    ],
+    [
+      5,
+      2
+    ],
+    [
+      6,
+      2
+    ],
+    [
+      2,
+      3
+    ],
+    [
+      3,
+      3
+    ],
+    [
+      4,
+      3
+    ],
+    [
+      5,
+      3
+    ]
+  ],
+  "platform_shapes": [],
+  "mobility": [
+    {
+      "id": "track_light",
+      "pos": [
+        3,
+        1
+      ],
+      "rot": 0
+    },
+    {
+      "id": "track_light",
+      "pos": [
+        3,
+        3
+      ],
+      "rot": 0
+    }
+  ],
+  "modules": [
+    {
+      "id": "engine_small",
+      "pos": [
+        1,
+        2
+      ],
+      "rot": 0
+    },
+    {
+      "id": "cockpit_light",
+      "pos": [
+        2,
+        2
+      ],
+      "rot": 0
+    },
+    {
+      "id": "ammo_factory_20",
+      "pos": [
+        3,
+        2
+      ],
+      "rot": 0
+    },
+    {
+      "id": "conveyor_straight",
+      "pos": [
+        4,
+        2
+      ],
+      "rot": 0
+    },
+    {
+      "id": "cannon_20",
+      "pos": [
+        5,
+        2
+      ],
+      "rot": 0,
+      "aim": 0
+    }
+  ],
+  "routes": []
+}

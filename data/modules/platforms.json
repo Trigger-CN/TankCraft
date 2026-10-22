@@ -1,0 +1,14 @@
+{
+  "schema": "tankcraft.module_catalog",
+  "version": 1,
+  "category": "platform",
+  "items": [
+    {"id":"platform_cell","name":"手绘平台格","layer":"platform","footprint":1,"price":4,"mass":1.0,"hp_max":45,"armor":3,"rotatable":false,"shared_health":false},
+    {"id":"plat_1x1","name":"单格板","layer":"platform","footprint":1,"price":4,"mass":1.0,"hp_max":50,"armor":3,"rotatable":false,"shared_health":true},
+    {"id":"plat_1x2","name":"长板","layer":"platform","footprint":2,"price":8,"mass":2.0,"hp_max":90,"armor":3,"rotatable":true,"shared_health":true},
+    {"id":"plat_2x2","name":"方板","layer":"platform","footprint":4,"price":16,"mass":4.0,"hp_max":175,"armor":4,"rotatable":false,"shared_health":true},
+    {"id":"plat_l3","name":"L形板","layer":"platform","footprint":3,"price":12,"mass":3.0,"hp_max":120,"armor":3,"rotatable":true,"shared_health":true},
+    {"id":"plat_t4","name":"T形板","layer":"platform","footprint":4,"price":16,"mass":4.0,"hp_max":165,"armor":4,"rotatable":true,"shared_health":true},
+    {"id":"plat_wedge","name":"楔形板","layer":"platform","footprint":2,"price":10,"mass":2.0,"hp_max":80,"armor":5,"rotatable":true,"shared_health":true}
+  ]
+}

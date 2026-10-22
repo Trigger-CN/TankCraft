@@ -1,0 +1,563 @@
+# agent_note.md — TankCraft 项目须知
+
+> **任何 AI 或新成员进入本仓库后，第一个必须完整读完的文件就是本文件。**
+> 版本：v3.16 · 2026-10-21 · 当前阶段：**正式实现阶段（M2 建造编辑器与运行期 BUILD_MODE、M3 坦克物理与操控（v3.1 已修正转向手感缺陷）、M4 弹药输送网络、M5 战斗结算与可拆解摧毁、M6 机器人 AI 与完整对局、**M9 波次生存单人玩法**均已实现并验证（M5 的六条有意简化写入 `docs/design.md` §8.9，其中自击与“撞墙不连锁”两项已在 M6 修掉；M6 的三层 AI / 四档难度 / 12 张 Bot 蓝图已实现，实现记录在 §10.5、常量在 §14.11；M9 的实现记录在 `docs/design.md` §3.4.6，改装页在 §3.4.7，起始坦克在 §3.4.8；v3.11 完成 P3 清理与 P2 第一段（抽 `FxLayer`），`main.gd` 160536 → 142618 B；v3.12 修正文件计数为 `scripts/` 18 个 `.gd`、清理 5 个孤儿 `.uid`、并修复了截图取图时刻不固定的证据链缺陷；v3.13 完成 7 个截图钩子的可复现性重验与历史差异归因；v3.14 新增 `--steps=N` 预热步数参数化，`main.gd` 146185 B，战场区渲染回归已可验证；v3.15 按用户要求重做生存模式坦克阵容——起始车 8×2 单履带 → 6×4 双履带、13 张 Bot 蓝图全部重写为每档三种不同轮廓且招募级 30 格 → 12–20 格、新增 `enemy_quota_for()` + 本波内按间隔补兵并把通过条件改为「配额耗尽且场上无敌人」）**；**v3.16 更正 v3.15 的两个数字（弹药库殉爆 21.8 s → 36.4 s、瞄准命中 12–22/1–2 → 8–22/0–2），仅改注释与文档文字**；**v3.17 修用户报告的栈溢出：`_handle_mouse()` 与 `_handle_survival_mouse()` 自 v3.8 起双向互调，生存页改装模式点网格就无限递归——已单向化，并新增走真实 `_input()` 的 `tests/mouse_input_smoke.gd` 作永久回归，`tests/` 11 → 12 个 `.gd`，`main.gd` 147659 B**；**v3.18 按用户要求把编辑器三层做成「看得见的分层」：非选中层降到 22% alpha、光标件随层切换、坦克默认在建造区居中，并修掉层级行压面板分隔线与「工具」标签压按钮两处重叠，`main.gd` 151611 B**）。
+
+> **v3.4 重要变更（必读）**：用户 2026-10-17 新描述把单人模式重定义为 **肉鸽波次生存**——每波限时生存；地图房屋（撞击/炮击）与残骸（碾过）；敌人分级；升级三选一 + 改装按钮；**战斗时不允许改装**；波间商店（6 商品/刷新/卖配件/改装）；每 5 波 Boss。此条 **推翻了 A26 的“5 层×3 波 / `scrap` 双货币 / 允许原地建造”三项**（见 A35）。设计已写入 `docs/design.md` v3.4（§3.4、§14.8、ADR-017）。
+
+> **v3.6：M9 已实现并接入主场景（`scripts/survival_run.gd` + `SCREEN_SURVIVAL` 四张页面）**，`tests/survival_smoke.gd` 输出 `SURVIVAL_OK`。另有四项缺口：商店稀有度权重被当作价格倍率（方向反）、`safe_radius` 未被读取、`boss_armor` 未实现、房屋撞击摧毁无专项断言。**`expedition_run.gd` 与 `runtime_builder.gd` 已从主菜单断连，且因 `expedition` 块被删而回退到代码内默认值——`EXPEDITION_OK` / `RUNTIME_OK` 仍通过但不再验证真实数值来源。**
+
+> **v3.7：改装 UI 入口已补齐**——升级页与商店页各一个「M 改装坦克」按钮，新增 `SurvivalRun.STAGE_MODIFY` 子阶段与整页改装界面（库存 / 网格 / 金钱·支出·质量·校验）；`enter_modification()` 只接受 `LEVEL_UP` / `SHOP`，**`STAGE_BATTLE` 期间一律拒绝**；花费按**净增建造支出**结算。**至此八点需求 ①—⑧ 全部兼现。** 仍剩三项缺口：商店稀有度权重方向反、`safe_radius` 未被读取、`boss_armor` 未实现。（该段末尾原有「改装页还有两项手感简化：无矩形/直线铺平台工具、无撤销重做按钮」——**已由 v3.8 撤回**，见下条。）
+
+> **v3.8：修用户报告的界面四项**（用户原话：「游戏打开时默认最大窗口，各种菜单交互非常难用，鼠标都没有良好适配，而且菜单中很多元素位置错误产生重叠，生存模式中的建筑模式为什么没有复用主菜单的建造系统」）。① **窗口启动即最大化**：`project.godot` 的 `window/size/mode=2`（`WINDOW_MODE_MAXIMIZED`）+ `resizable=true`，1280×720 override 仅作还原尺寸；`_ready()` 再显式确认并打印实测值，实测 **`WINDOW_MODE mode=2 size=(1842, 1057)`**。注意：用户澄清的是「**应该**默认最大窗口」，**不要把窗口改回 1280×720 小窗**。② **鼠标支持**：主菜单难度按钮、升级页三张卡、商店页六个商品格、两处改装按钮均可 hover + 左键；**v3.8 之前升级页/商店页/改装页完全没有鼠标路径**。③ **重叠**：主菜单「难度」原在 y=654、提示在 y=700，压在「退出」行（616–688）上；现难度改为菜单下方独立按钮（y=712），提示下移 y=800。④ **改装页复用建造系统**：抽出 `_editor_model()` / `_in_modify_mode()` / `_in_build_editor()`，改装页直接用 `_draw_build()` / `_handle_build_key()` / `_handle_mouse()`，删掉整套独立实现（约 183 行、15 个 `_survival_modify_*` 函数与六个 `SURVIVAL_MODIFY_*` 常量）；**因此矩形/直线铺平台、拖动铺、`Ctrl+Z`/`Ctrl+Y` 撤销重做在改装页也都有了，v3.7 那两项「手感简化」不再成立。**
+
+> **v3.9：修「炮弹似乎不能对敌人造成伤害」+ 生存页战斗 UI 重做**（用户原话：「优化战斗系统，发射炮弹似乎不能对敌人造成伤害，生存模式的 UI 也需要优化，要有一个小窗口显示一个坦克的镜像，展示坦克每个模块的状态」）。① **先拿数字再改**：命中链路本身是**正常的**（探针 `PROBE impact_tank tag=enemy_1 part_index=28`，单发 `damage_dealt_player=5.00`）；真正原因是两层——**数值**（旧起始车 20mm，`cal_20` 对 armor 3 平台只有 5 伤/发，而招募级 Bot 总血量 1835，`cal_20_ttk_s=128.4` > 波次上限 45 s ⇒ 数学上不可能击毁）+ **反馈**（敌车整台只画一种颜色不看 HP、命中坦克时「最近事件」不更新、HUD 无累计伤害读数，打中了屏幕上什么都不变）。② **起始坦克改为 76mm**：`SurvivalRun.STARTER_*` + `static func build_starter(model)` 成为**唯一布局来源**，`main.gd` 与 `tests/survival_smoke.gd` 都转调它（不再各写一份）。实测一波内 `hits=25 destroyed=21 kills=1`。③ **表现层**：逐部件按血量着色、命中/击毁/脱落动效、命中闪光、事件文案区分敌我、「总输出」读数。④ **坦克镜像面板**：右 HUD 下半部（`SURVIVAL_MIRROR_RECT`）显示俯视镜像 + 平台/模块/行进计数 + 存活格均血条 + 逐部件状态行（按血量比升序，最残的排前面）。⑤ **新增永久回归** `_check_player_fire_damage()`（含 `fire_kill_within_wave`）。**仍缺**：敌人没有自己的镜像面板；`boss_armor` / `safe_radius` / 商店稀有度权重三项旧缺口未动。
+
+> **v3.10：架构审查 + 修复两处真实缺陷**（用户原话：「检查整体代码架构是否是模块化实现」，随后「继续」）。① **审查结论**：领域层是真模块化——54 条 preload 边构成单向 DAG（数据层 → 领域层 9 脚本 → 页面层），**无循环依赖**，**反向引用（任何脚本 preload `main.gd`）零命中**，且每个领域脚本都被独立 headless smoke 直接驱动；但**页面层不是**：`main.gd` 160536 B / 187 函数 / 69 const / 约 84 var = `scripts/` 的 **61.7%**，一个类承载菜单、设置、建造编辑器、试驾页、对战页、生存页 5 个子页、输入总路由、7 个截图钩子，页面间靠命名前缀而非语言机制隔离。② **修 P0（真实 bug）**：`_match_step()` 结尾误调 `_drive_tick_fx()`，而它只递减 `_drive_fx`，`_match_fx` 的 `left` **从无递减点**，导致对战页脱落环一旦生成就永久常驻满亮度。新增 `_match_tick_fx()` 并改调。③ **修 P1（重复实现）**：三份逐行相同的 FX 衰减合并为 `static func _fx_decay(list, step_time)`；三段同构的坦克绘制合并为 `_draw_hull_shared(hull, origin, heading, scale_factor, colour_fn, alpha_fn, offset_fn, cell_hook)`，差异由 4 个回调表达。**行为等价性由像素级证据坐实**：生存页新截图 sha256 `bfa0382d…52a77c` 与重构前 canonical `ui_surv4.png` **逐字节完全相同**。④ **回归**：11 项 smoke 全绿且数值与基线**逐字一致**。⑤ **审查还查出但本轮未修的**（见 `docs/roadmap.md` §2 M9 缺口）：`main.gd` 上帝类本身、旧远征页约 183 行绘制副本、`expedition` 死块读取 + 硬编码 `* 4.0`、死依赖 `runtime_builder`/`expedition_run`、死代码 `tank_visual`/`hud`/`grid_field`（13907 B / 310 行，零引用）、两个遗留 `tests/_tmp_*.gd`。**如实声明**：对战页动效「随时间真的淡出」仍只有**代码层证据**，截图是单帧、无法证明时间维度；本轮**未做人工桌面交互验证**。
+> **v3.11：P3 清理死代码与死依赖 + P2 抽取 FX 层**（用户指示：「继续P2P3」）。① **P3a 删 5 个零引用文件**（删前经全量搜索确认代码零命中、`project.godot` 无 autoload 引用）：`tank_visual.gd` 9284 B / `hud.gd` 3171 B / `grid_field.gd` 1452 B（共 13907 B / 310 行）+ `tests/_tmp_capture_check.gd` 2208 B + `tests/_tmp_drive_page.gd` 4094 B。② **P3b 删旧远征页**：`main.gd` 162148 → 143127 B（−401 行）——`RuntimeBuilder`/`Expedition` 两个死 preload、`SCREEN_EXPEDITION`/`EXP_PANEL`/`EXP_STATUS`、`var runtime` + 5 个 `_exp_*`、**16 个控制函数 + 7 个绘制函数**、全部 `SCREEN_EXPEDITION` 分支全部移除；**顺带消除读已删除 `expedition` 块 + 硬编码 `* 4.0` 的两处死代码与那句假文案**。③ **P2 新建 `scripts/fx_layer.gd`**（2291 B / 68 行，零依赖）：三页各持一份的 FX 生命周期合并为 `push()`/`step()`/`clear()`/`ratio()`；`main.gd` 删掉 `static _fx_decay()`。**「忘记递减 `left`」在结构上不再可能**。④ **顺带修两个真实缺陷**：`_update_hover()` 一整段重复代码（两次初始化 + 两次 `SCREEN_MAIN` 分支）已合并；删远征分支时误吞 `_process()` 里 `if` 的块体已补回。⑤ **像素级等价**：`p2_surv.png` sha256 `bfa0382d…52a77c` 与 canonical `ui_surv4.png` **逐字节相同**（P3b、P2 两阶段各验一次）。⑥ **回归**：三轮各 11 项全绿且数值与基线逐字一致。⑦ **规模**：`main.gd` 160536 → **142618 B（−11.2%）**，函数 187 → 170，`scripts/` 20 → **18** 文件（本条 v3.12 已修正：原文误写为 16）。⑧ **未做**：按页面拆文件经评估属**架构级改造**（需页面状态容器、74 个 `var` 重新归属、`_editor_model()` 跨页分流重设计、`_draw`/`_input`/`_process` 必须留在 `Node2D`、7 个预热钩子需重新定位），风险高于本轮清理项且无像素级等价证据可依。**如实声明**：对战页动效「随时间真的淡出」仍只有**代码层证据**，**未做连续帧观察、未做人工桌面交互验证**；`expedition_run.gd`/`runtime_builder.gd` **脚本本体仍存**且各自 smoke 仍过，但已无玩法调用方。
+
+> **v3.12：P2/P3 收尾审计——修正计数 + 清理孤儿 `.uid` + 修复截图证据链缺陷**。① **纠正 v3.11 的算术错误**：`scripts/` 是 **20 → 18**（P3a 删的 5 个文件中只有 3 个在 `scripts/`，另 2 个在 `tests/`；再 +1 为 P2 新建的 `fx_layer.gd`），不是 20 → 16。实测 18 个 `.gd` / `tests/` 11 个 `.gd`。② **清理 5 个孤儿 `.uid`**（`.gd` 已删但 `.uid` 残留）：`grid_field.gd.uid` / `hud.gd.uid` / `tank_visual.gd.uid` / `_tmp_capture_check.gd.uid` / `_tmp_drive_page.gd.uid`。③ **发现并修复截图证据链的真实缺陷**：同一命令两次截图字节不同（177682 B vs 177340 B，差 12993 像素），因为预热跑完固定 420 步后 `_capture_next_frame()` 还要等 30 帧，期间 `_process()` 仍按真实 delta 推进模拟。**此前所有「sha256 逐字节等价」论证因此不成立。** ④ **修复**：新增 `_capture_frozen`，`_process()` 开头早退，取图前设冻结并把 `_screen_opacity`/`_focus_rail_alpha` 置终值。⑤ **验证**：连续两次截图逐字节相同（178280 B / `e56ce92f…`）；11 项 smoke 全绿且数值与基线逐字一致；三页 `CAPTURE_OK` 且目视确认正常。⑥ **代价**：新截图与旧 canonical 不再相同（剩余时间 38.0 s vs 37.3 s），**旧 canonical 作废**，以 `g5_surv.png` 为新基线。**如实声明**：截图仍为脚本驱动 + 像素检查，非人工交互验证；无 Android 验证、任何 APK 均不存在。
+
+> **v3.13：截图证据链重验——7 个钩子的可复现基线 + 历史差异归因**（用户对上一轮建议回复「按你说的做」）。① **先确认不可逆限制**：工作区**没有 git 仓库**（实测 `NO_GIT_DIR`、`git rev-parse` 报 `fatal: not a git repository`），v3.10/v3.11 的旧代码已不存在，**无法重做真正的 before/after**——这一点必须先说清楚，不能宣称重做了真正的对比。② **可复现基线**：7 个 `--capture` 钩子各连拍两次，**7/7 逐字节相同**——`drive` 213476 / `match` 135548 / `survival` 178280 / `survival_levelup` 203203 / `survival_shop` 236008 / `survival_summary` 196813 / `survival_modify` 253691；其中三个又在**不同进程**重跑，仍 `SAME`。③ **差异归因**：新基线 vs 历史截图做**分区**比对，静态 UI 区**零差异**（生存页右 HUD `0` / 状态栏 `0`；对战页右 HUD `0` / 状态栏 `0`）；非零部分全在会随模拟变化的区域（左 HUD 的计时/速度/总输出，战场区的坦克位置与弹道）。④ **决定性证据**：生存页两张图的 `SURVIVAL_MIRROR_RECT`（1560,436,312,400）裁切后**逐字节相同**（均 56256 B，sha256 `df09e63e6f56025a…`）——镜像面板整套绘制逻辑一字未变。⑤ **试驾页右 HUD 的 16379 像素差异已目视核对**：布局与文字完全一致，差异仅在于装填状态「装填 0.25s」vs「待发」及进度条长度——**模拟状态差，非渲染逻辑差**。⑥ **结论**：全部差异可归因于**模拟多推进了若干步**，而非渲染回归；这比原先「sha256 相同」的论证更强（原先是碰巧，现在是已知差异来源、且静态区逐字节相同）。⑦ **新增局限声明**：只证明了静态 UI 区渲染未变，**不等于所有像素未变**；战场区无法用整图 hash 验渲染回归，需先把预热步数参数化，而**该参数化仍未做**。新增 `docs/design.md` §11.4.9.1。**如实声明**：所有截图仍为**脚本驱动 + 像素检查，非人工交互验证**；对战页动效「随时间真的淡出」仍只有**代码层证据**；**无 Android 验证、任何 APK 均不存在**。
+
+> **v3.14：`--steps=N` 预热步数参数化——战场区渲染验证盲区已补齐**（用户「继续」）。① **动机**：v3.13 声明「战场区无法用整图 hash 验渲染回归」，因为预热步数写死在各页 `for ... in range(N)` 里，没法在同一模拟状态下截两次。② **实现**（`main.gd` 143963 → 146185 B）：新增 `var _capture_steps := -1`（-1 = 用默认值）、`_requested_capture_steps()`（解析 `--steps=N`，非整数或 ≤0 打 `CAPTURE_BAD_STEPS` 回退）、`_warmup_steps(default_steps)`；三个预热函数改为调它，默认值仍写在调用处（试驾 90 / 对局 150 / 生存 420）；对局页开火时机由写死的第 60 步改为 `maxi(total_steps * 2 / 5, 1)`。③ **三个对照全部成立**：`--steps=420` 两次 **SAME**（178280 B / `e56ce92f…`）；`--steps=200` **DIFF**（173254 B / `0ac8f3d1…`，证明参数真生效）；**不传参数与改前基线逐字节相同**（证明默认值未被破坏、v3.13 的 7 张基线仍有效）。④ **盲区补齐的关键证据**：战场区（320,168,1216,684）裁切后，`--steps=420` 两次均 **92207 B / `b16c7e15aaebbd6a` 逐字节相同**，`--steps=200` 为 91959 B（不同）——**战场区渲染本身是确定性的**，之前的「不可验证」只是缺了步数参数化。⑤ **今后渲染回归流程**：改动前后各跑同一 `--steps=N`，裁战场区比 sha256。⑥ **回归**：`--check-only` 78 B / `6ca5b6ba`；11 项 smoke 全绿且数值与基线逐字一致。**如实声明**：本轮交付的是**能力**，**未做具体的「改动前后」对比**（旧代码不存在、无 git）；`--steps` 只影响 `drive` / `match` / `survival` 三个跑预热的钩子，另四个页面钩子直接构造状态、不受影响；截图仍为**脚本驱动 + 像素检查，非人工交互验证**；对战页动效「随时间真的淡出」仍只有**代码层证据**；**无 Android 验证、任何 APK 均不存在**。
+
+> 其他状态：Android 导出预设已写入工程，但本机缺导出模板与 Android SDK，APK 尚未产出且导出推进已按用户指示暂停；移动端触屏操控已有设计（§11.6）、Q24–Q26 已裁定，但**零代码实现**（M8）。M7 视觉打磨为下一个里程碑。
+
+> **R17 已修复（v3.5）**：碰撞与损坏链路的 9 个缺陷已全部修完（撞墙选件改 `dot(outward)`、矩形障碍改四面最小穿透、圆形障碍分两分支、墙角合并单次结算、新增坦克互撞、护盾剪枝、AOE 后按 `part_key` 定位、延迟爆炸上报过护甲伤害、取消重复 `destroyed`）。**修复过程中又发现并修掉 3 个实现级 bug**：矩形障碍在长条墙包含车身时会选错轴直接穿墙（实测旧 `final_x=800.00` → 新 `final_x=186.86`）、圆形障碍圆心在 AABB 内时少推 1 px（旧 53.00 → 新 54.00）、互撞接近判定符号反了（旧 `-relative.dot(axis)` 使任何对撞都返回 0）。**`ram_damage_base` 矛盾已裁定**：`30 + 0.06×Δv` 只属于 §6.8 的**喷射冲撞**（JSON 键已更名为 `thruster_ram_damage_base` / `thruster_ram_damage_per_speed`），§8.7 的坦克对撞**无基数项**。永久回归已并入 `physics_smoke`（+5 项）与 `combat_smoke`（+4 项），十项 smoke 逐字通过。
+> **R18 已解决（v3.6）**：`duel` 已从固定两侧扩为任意 tag + team；`projectile_field` 同队不误伤；`match_smoke` 新增 3 个多侧阶段。
+> 维护者：所有参与者（人类与 AI 同等负责）
+
+---
+
+## 0. 一句话说明项目
+
+**TankCraft** 是一款基于 **Godot 4** 的 2D **垂直上帝视角**坦克建造对战游戏：玩家在网格上以**三层结构**（行进机构层 / 平台层 / 功能模块层）自由搭建属于自己的坦克，然后与**机器人或真人玩家**对战。
+视觉风格：**极简 · 霓虹 · 荧光（minimal / neon / glow）**。
+
+详细玩法见 `docs/design.md`，开发计划与实时进度见 `docs/roadmap.md`。
+
+---
+
+## 1. 元规则（最高优先级，优先于任何其他约定）
+
+以下规则对**人类与 AI 一视同仁**，冲突时以本节为准。
+
+### M1 文档同步强制（本项目最重要的规则）
+
+**任何**改动、决定、或与用户达成的共识，都必须在**同一次改动中**同步更新所有受影响的文档。文档没更新 = 改动未完成 = 改动无效。
+
+改完代码/设计后，必须自问："哪几份文档现在说的是错的？" 然后立刻改掉。
+
+| 发生了什么事 | 必须同步更新 |
+| --- | --- |
+| 修改角色/模块/系统机制（哪怕只是措辞澄清） | `docs/design.md` 对应章节 + 其"变更记录" |
+| 修改任何数值（伤害、产能、血量、速度…） | `docs/design.md` §14 数值基线表 |
+| 做出新的技术/架构/取舍决策 | `docs/design.md` §15 决策记录（ADR，追加新条目，不删旧条目） |
+| 改变文档结构、新增/重命名文档 | 本文件 §2 文档地图 |
+| 改变术语、命名、目录、单位、坐标约定 | 本文件 §4 / §5 |
+| 开始、完成、阻塞、放弃、调整某个里程碑 | `docs/roadmap.md` 状态表 + 该里程碑正文 |
+| 与用户达成新的共识或偏好（如"暂不做联机"） | 本文件 §7 共识与约束 + 相关文档 |
+| 新发现的坑、限制、Godot 版本差异 | 本文件 §8 已知陷阱 |
+
+### M2 单一事实源（Single Source of Truth）
+
+每个事实只能有一处权威定义，其他文档**引用**而不复制：
+
+- 术语定义 → 本文件 §5
+- 玩法机制 → `docs/design.md`
+- 数值 → `docs/design.md` §14
+- 进度与范围 → `docs/roadmap.md`
+- 工程约定 → 本文件 §4
+
+若发现两处说法不一致，先判断哪一处是权威源，修正另一处，并在"变更记录"里写明。
+
+### M3 不臆测（No silent invention）
+
+不确定的地方**不要自己拍板实现**。要么写进 `docs/design.md` §16 开放问题，要么直接问用户。已做的合理假设必须显式写成"假设"，并标注在文档里，等待确认。
+
+### M4 数值必须集中
+
+所有可调数值（伤害、血量、产能、速度、质量…）只能出现在 `docs/design.md` §14 数值基线表 或未来的 `data/*.json` 中。
+**禁止**在代码、注释、UI 文案里散落魔法数字。代码只能引用具名常量或数据表字段。
+
+### M5 变更记录（不可删改历史）
+
+三份文档各有一个"变更记录"表。规则：
+- **只追加，不修改、不删除**历史行。
+- 每行格式：`日期 | 版本 | 摘要 | 影响章节`。
+- 版本号：文档内容语义化，大改 `v2.0`、结构调整 `v1.1`、措辞修正 `v1.0.1`。
+
+### M6 术语一致
+
+同一个概念在文档、代码、数据、UI 中必须使用同一名称。中文叫法 + 英文 id 的权威对照在本文件 §5，写文档和起类名/字段名时**必须查表**。
+
+### M7 阶段纪律
+
+**已解除**（2026-10-17，用户指示：“先实现简单 demo 来确认视觉效果”）。当前进入**正式实现阶段（下一里程碑 M4 弹药输送网络）**：
+- M0.6 交互原型、M1 核心数据层、M2 建造编辑器与运行期 `BUILD_MODE`、M3 坦克物理与操控均已完成；后续实现按 `docs/roadmap.md` 依次推进。
+- 当前允许创建正式系统脚本；坦克刚体（`scripts/tank_body.gd`）、炮管（`scripts/cannon_bank.gd`）与弹道（`scripts/projectile_field.gd`）已落地，弹药网络、AI 与战斗伤害结算仍按 roadmap 排序实现。
+- 所有正式运行时数值必须来自 `data/*.json`；代码只消费加载后的字段或具名结构常量，禁止把 `design.md` §14 数值复制到脚本。阶段变更时同步更新本节与 §7 共识表。
+
+> 历史：本约束最初对应用户 "先生成文档，完善设计，不实现代码" 的阶段要求；该阶段已由 2026-10-17 的用户指示结束。
+
+### M8 可执行性
+
+设计文档必须写到"另一个 AI 读完能直接开工"的程度：公式、数据结构、校验规则、结算顺序都要明确，避免"合理的""适当的"这类模糊词承载关键逻辑。
+
+---
+
+## 2. 文档地图
+
+| 文档 | 职责 | 谁改 |
+| --- | --- | --- |
+| `agent_note.md`（本文件） | 项目须知：元规则、技术栈、工程约定、术语表、AI 上手流程、共识与约束、已知陷阱 | 任何人都可改，改后必须自检 M1 |
+| `docs/design.md` | 游戏设计 + 系统规格 + 数值基线 + 架构草案 + ADR + 开放问题 | 设计/实现者 |
+| `docs/roadmap.md` | 里程碑、交付物、验收标准、风险、**实时状态表** | 推进工作的人（每完成一项就勾） |
+
+三条阅读路径：
+
+- **刚接手，想快速开工** → 本文件 §6 上手流程。
+- **想知道机制怎么运作** → `docs/design.md` §3–§12。
+- **想知道现在该做什么** → `docs/roadmap.md` 状态表。
+
+---
+
+## 3. 技术栈与环境
+
+| 项 | 值 | 说明 |
+| --- | --- | --- |
+| 引擎 | **Godot 4.7.2 stable**（已验证：本机 `godot --version` 返回 `4.7.2.stable.official.ed1daf0bf`） | 用 4.x 特性，勿用 3.x 写法 |
+| 渲染 | Forward+（桌面）/ Mobile（可选低配） | 2D 场景 + `WorldEnvironment` 的 Glow 做霓虹辉光 |
+| 脚本语言 | **GDScript（静态类型尽量写全）** | 类型标注强制：函数参数/返回值/packed 容器元素 |
+| 物理 | Godot 内置 `PhysicsServer2D` + 自定义坦克运动解算 | 坦克不是单个 RigidBody2D，见 design §5 |
+| 目标平台 | 首发 Windows 桌面；架构上保留 Linux/macOS | 不承诺移动端 |
+| 分辨率 | 基准 **1920×1080**，`canvas_items` 拉伸，网格基准 16 px/格 | 像素对齐 |
+| 数据 | `data/*.json`（模块、弹药、竞技场、升级） | 便于 AI 与 diff 审查 |
+| 版本控制 | git，工作区根目录 | 提交信息见 §4.9 |
+| 本地化 | 首发简体中文，所有 UI 文案走 `tr()`，字符串表预留英文 | 代码内不硬写中文文案 |
+
+---
+
+## 4. 工程约定
+
+### 4.1 语言
+- 文档、UI 文案、提交信息：**简体中文**。
+- 代码标识符、数据字段、类名、文件名、commit 前缀：**英文**（snake_case / PascalCase / UPPER_SNAKE）。
+- 注释：中文，只解释"为什么"，不解释"是什么"。
+
+### 4.2 命名
+
+| 对象 | 规则 | 示例 |
+| --- | --- | --- |
+| 脚本文件 | `snake_case.gd` | `tank_grid_builder.gd` |
+| 类 | `PascalCase` + `class_name` | `TankGridBuilder` |
+| 变量/函数 | `snake_case` | `total_thrust`、`apply_damage()` |
+| 常量 | `UPPER_SNAKE_CASE` | `CELL_SIZE` |
+| 信号 | 过去式 `snake_case` | `module_destroyed` |
+| 数据 id | `snake_case`，全局唯一，前缀=类别 | `track_heavy_mk1`、`ammo_76` |
+| 场景文件 | 与主脚本同名 | `tank_grid_builder.tscn` |
+
+### 4.3 目录结构（视觉原型阶段已开始落地）
+
+```
+tankcraft/
+├─ agent_note.md
+├─ project.godot             Godot 4.7 工程（gl_compatibility + hdr_2d）
+├─ export_presets.cfg        Android 导出预设（name="Android"，arm64-v8a，debug 签名）
+├─ docs/                     design.md, roadmap.md
+├─ scenes/                   main.tscn（单场景：主菜单 + 建造编辑器 + 远征施工页 + M3 试驾沙盒）
+├─ scripts/                  palette.gd / main.gd / module_defs.gd / grid_builder.gd / runtime_builder.gd
+├─ scripts/                  tank_body.gd / cannon_bank.gd / projectile_field.gd（M3 物理与弹道）
+├─ scripts/                  ammo_network.gd（M4 弹药网络：端口推导 / 自动连接 / 20 Hz 四步定序 / 装填与拒绝）
+├─ scripts/                  data_registry.gd / data_validator.gd
+├─ data/                     modules/, ammo/, upgrades/, arenas/, blueprints/, globals.json
+├─ tests/                    data_smoke.gd / data_error_smoke.gd / build_smoke.gd / runtime_build_smoke.gd
+├─ tests/                    physics_smoke.gd / cannon_smoke.gd（M3）
+├─ tests/                    ammo_net_smoke.gd（M4：端口几何 + 七条验收）
+└─ assets/                   sprites/, fonts/, shaders/, audio/      （按需创建）
+```
+
+**已实际落地的文件**：`data/` JSON 数据目录；`scripts/data_registry.gd`、`data_validator.gd`、`module_defs.gd`、`grid_builder.gd`、`runtime_builder.gd`；M3 的 `scripts/tank_body.gd`、`cannon_bank.gd`、`projectile_field.gd`；M4 的 `scripts/ammo_network.gd`；主场景的建造编辑器、远征施工页与 `DRIVE_LAB` 试驾沙盒入口；以及 `tests/` 下七个 smoke：`build_smoke.gd`、`runtime_build_smoke.gd`、`data_smoke.gd`、`data_error_smoke.gd`、`physics_smoke.gd`、`cannon_smoke.gd`、`ammo_net_smoke.gd`。
+
+**M4 弹药网络状态（v2.8）**：`scripts/ammo_network.gd` 已实现并接入驾驶页 —— `_enter_drive()` 建网（`setup` / `rebuild` / `bind_bank`），`_drive_step()` 走 `network.step()` + `network.fill_cannons()`，**两处 `bank.load_all()` 已删除**，炮管不再自动装满。`tests/ammo_net_smoke.gd` 覆盖端口几何 + §7 七条验收共九阶段，打印 `AMMO_OK`。**但显式路由面板未实装**（`grid_builder.routes` 仍是死代码，由端口自动连接 + 可达性 BFS 顶替，推迟到 M6），且**远征页（`SCREEN_EXPEDITION`）尚未接入弹药网络**。详见 `docs/design.md` §7.8 与 `docs/roadmap.md` M4 段。
+
+**Android 导出状态（v2.5）**：工程根目录已有 `export_presets.cfg`（预设名 `Android`，`arm64-v8a`，debug 签名，`gradle_build/use_gradle_build=false` 走预构建模板路径，`export_filter="all_resources"` 使 `data/` 随 PCK 打包，输出路径 `.me/tmp/main/tankcraft-debug.apk`）。Godot 能正确识别该预设，但**本机缺 Godot 导出模板（`%APPDATA%\Godot\export_templates\4.7.2.stable\` 为空目录）与 Android SDK（无 `build-tools` / `platform-tools` / adb / apksigner），且编辑器设置 `export/android/java_sdk_path` 为空**，因此 `--export-debug` 返回 `EXITCODE=1` 并报 7 条配置错误，**没有产出任何 APK**。补齐这三项属于工作区外安装，必须先取得用户明确授权。详见 §8 与 `docs/roadmap.md` M3.5。
+**移动端触屏设计状态（v2.7）**：用户已指示“后面要考虑移动端的支持，在设计中加入虚拟摇杆、虚拟按键等”，并已裁定三个开放问题：**Q24 不需要**右侧瞄准摇杆（炮管 `aim` 安装后锁定，靠车身转向）、**Q25 暂不支持**外接手柄、**Q26 仅横屏**（不做竖屏布局，因此只需一套上下分区）。完整方案已入 `docs/design.md` §11.6（输入抽象层 + 虚拟摇杆 + 虚拟按键 + 建造页手势 + HUD 重排与安全区 + UI 缩放 + 常量落点 + 实现顺序），触屏常量表在 §14.10。对应 roadmap 里程碑为 **M8（⬜ 未开始，仅设计）**。**`scripts/*.gd` 无任何触摸处理，`data/globals.json` 也没有 `touch` 块**。导出环境三件套仍缺且用户已指示“先不导出 apk”，故 M8 的真机验收部分也同时被阻塞。
+
+
+### 4.4 坐标与单位（全项目统一，禁止各自为政）
+
+- 世界坐标：**Y 轴向下**（Godot 原生），原点在竞技场左上角。
+- 角度：内部一律**弧度**，正方向为**顺时针**（Godot 原生 `rotation`）；UI 显示可用角度制。
+- 长度单位：**世界像素**。`CELL_SIZE = 16 px`。所有格子坐标用 `Vector2i`。
+- 速度：px/s。质量：`u`，其中 **1 u = 1 格平台的质量**（因此 `PLATFORM_CELL_MASS = 1.0 u`；design §14 中一切模块质量都以平台格为基准换算）。时间：秒，帧内用 `delta`。
+- 时间步：物理 **60 Hz** 固定步长；**弹药网络逻辑 20 Hz**（每 3 物理帧一次），两者不可混用。
+
+### 4.5 三层坐标模型（关键概念，务必记牢）
+
+同一个 `Vector2i` 格子坐标在三个层上各有独立的占用状态：
+
+```
+layer 2  module_layer     功能模块（炮管、引擎、护盾…）
+layer 1  platform_layer   平台/甲板（承载格，决定坦克外形）
+layer 0  mobility_layer   行进机构（履带、轮组）
+```
+
+- 一个格子在每一层**最多被一个占位者占据**。
+- 行进机构与功能模块**都必须压在自己正下方的平台格上**（即 `mobility/x,y` 或 `module/x,y` 存在的前提是 `platform/x,y` 存在）。
+- 同一格可以同时有三种占位（如履带 + 平台 + 引擎叠在一起），这是合法的。
+- 完整规则见 `docs/design.md` §4。
+
+### 4.6 数据驱动
+模块、弹药、升级、竞技场全部由 `data/*.json` 定义，代码只写行为。新增一种模块**不应**需要改核心逻辑；若必须改，说明抽象没做好，先在 design §15 记 ADR。
+
+### 4.7 确定性与可回放
+战斗逻辑只能依赖固定步长与有序遍历（遍历顺序必须稳定，用排序后的 key），保证：同输入 → 同结果。目标是为联机与机器人训练留路。
+
+### 4.8 测试
+- 纯逻辑（弹药调度、伤害结算、建造校验、质量/惯量计算）必须可脱离场景单测。
+- 每次改动数值后，跑一遍 `tests/` 回归，并在 `docs/roadmap.md` 状态表记录。
+
+### 4.9 提交信息
+
+```
+<type>(<scope>): <中文摘要>
+
+类型: feat|fix|docs|balance|refactor|test|chore
+范围: build|tank|ammo|combat|net|ui|docs
+示例: balance(ammo): 76mm 制造时间 1.8s → 2.0s
+```
+若提交涉及机制或数值变化，正文必须写明"已同步更新：docs/design.md §14"（M1 的落地方式）。
+
+### 4.10 视觉常量
+调色板、线宽、辉光强度等属于设计常量，权威定义在 `docs/design.md` §2，代码通过 `data/theme.json` 或主题资源引用，禁止散落。
+
+---
+
+## 5. 术语表（权威，中英对照）
+
+写文档、起类名、写 JSON 时**必须查此表**。新增术语先在此登记再使用。
+
+| 中文 | 英文 id | 类名前缀 | 定义 |
+| --- | --- | --- | --- |
+| 坦克 | `tank` | `Tank*` | 玩家搭建的整台载具；由三层格子数据 + 运行时节点树组成 |
+| 建造网格 | `grid` | `Grid*` | 承载建造的格子坐标系，`CELL_SIZE = 16 px` |
+| 行进机构层 | `mobility_layer` (layer 0) | — | 安装履带/轮组的图层 |
+| 平台层 | `platform_layer` (layer 1) | — | 甲板/地基图层，决定外形与承载 |
+| 功能模块层 | `module_layer` (layer 2) | — | 安装功能模块的图层 |
+| 平台格 | `platform_cell` / `PlatformCell` | `PlatformCell*` | 单格平台，独立生命值 |
+| 行进机构 | `mobility_module` | `Mobility*` | 履带、防弹轮组、机动轮组 |
+| 功能模块 | `function_module` | 各自前缀 | 引擎、工厂、弹药库、改进、炮管、护盾、管路、喷射、维修 |
+| 履带 | `track` | `Track*` | 行进机构：推力大、抓地强、转向笨重 |
+| 防弹轮组 | `armored_wheel` | `ArmoredWheel*` | 行进机构：高耐久、慢 |
+| 机动轮组 | `speed_wheel` | `SpeedWheel*` | 行进机构：高转速、低耐久 |
+| 动力引擎 | `engine` | `Engine*` | 提供动力与转向增益 |
+| 弹药制造装置 | `ammo_factory` | `AmmoFactory*` | 按口径制造炮弹 |
+| 弹药库 | `ammo_depot` | `AmmoDepot*` | 按"占位"容量暂存炮弹 |
+| 弹药改进装置 | `ammo_modifier` | `AmmoModifier*` | 为炮弹叠加"改进"增益 |
+| 发射炮管 | `cannon` | `Cannon*` | 存 1 发；弹道方向由 `aim` 决定，**建造期可调、安装后固定**，瞄准靠转动整车 |
+| 护盾 | `shield` | `Shield*` | 有独立生命值与充能周期的保护罩 |
+| 弹药输送管路 | `conveyor` | `Conveyor*` | 运送炮弹的管路图，含直/弧/分叉/汇合件 |
+| 喷射系统 | `thruster` | `Thruster*` | 提供瞬时推力/冲刺 |
+| 维修装置 | `repair_unit` | `RepairUnit*` | 修复邻接平台格或模块 |
+| 口径 | `caliber` | — | 炮弹规格枚举：`20/40/76/120/155` |
+| 炮弹实例 | `ammo_instance` | `AmmoInstance` | 一枚待输送/已装填的炮弹（含口径与改进列表） |
+| 装填 | `load` | — | 把炮弹送入炮管/改进装置/弹药库 |
+| 占位 | `slot` | — | 弹药库容量单位，大弹占更多 |
+| 改进（增益） | `upgrade` | `Upgrade*` | 弹药改进装置叠加到炮弹上的效果 |
+| 端口 | `port` | — | 模块上的输入/输出接口，管路连接点 |
+| 质量 | `mass` | — | 单位 `u`，影响速度与转向 |
+| 推力 | `thrust` | — | 行进机构提供的推进力，单位 **`u·px/s²`** |
+| 抓地 | `grip` | — | 推力的有效性系数，轮组低于履带 |
+| 转弯辅助 | `turn_assist` | — | 引擎提供的扭矩倍数加成，叠加为 `1.0 + effective_turn` |
+| 差速驱动 | `differential_drive` | — | 两侧行进机构推力不等时产生扭矩的转向方式（design §5.2） |
+| 转动惯量 | `inertia` | — | 绕质心的转动惯量，单位 `u·px²`，决定转向快慢 |
+| 连通块 | `body_island` | `BodyIsland*` | 由平台格 4 邻接连成的整块甲板 |
+| 击毁 | `destroyed` | — | 模块/平台格血量归零 |
+| 断连脱落 | `detach` | — | 平台格被摧毁后，与**驾驶舱所在格**不连通的部分立即摧毁（锚点不是质心） |
+| 竞技场 | `arena` | `Arena*` | 固定大小带边界的地图 |
+| 对局 | `match` | `Match*` | 一次完整的建造+战斗流程 |
+| 机器人 | `bot` | `Bot*` | AI 对手 |
+| 蓝图 | `blueprint` | `Blueprint*` | 序列化保存的坦克建造数据 |
+| 驾驶舱 | `cockpit` | `Cockpit*` | **唯一必需核心模块**，每台坦克恰好一个；被摧毁即判负，同时是 `detach` 的连通锚点（design §6.10） |
+| 信用点 | `credit` / `cr` | — | 建造期唯一货币，用于购买平台/模块与升级质量上限；不可透支，未花完不结算（design §3.2） |
+| 价格 | `price` | — | 每个占位者（平台格 / 行进机构 / 功能模块）的信用点造价；唯一汇总表在 design §14.7 |
+| 质量上限等级 | `mass_cap_level` | — | 0–5 级；`mass_cap = BASE_MASS_CAP + level × MASS_CAP_STEP`，用信用点逐级购买（design §3.2.2） |
+| 瞄准角 | `aim` | — | 炮管**弹道方向**相对机体朝向的偏角，45° 步进共 8 向；建造期可调，进入战斗后锁定（design §6.5） |
+| 单人 run | `expedition` | `Expedition*` | 单人 roguelike 的一次完整 run。**v3.4 起为波次生存**：在限时波次里活下来，波间进商店，每 5 波一个 Boss（design §3.4） |
+| 波次 | `wave` | — | 单人 run 里的一个限时生存阶段；计时归零且驾驶舱存活即通过（不再有 `sector` 层概念） |
+| 经验 | `experience` / `xp` | — | 战斗期产出的成长资源，满级触发升级菜单；与金钱分离、不可互换，run 结束清零（design §3.4.1） |
+| 升级菜单 | `level_up` | — | 经验满级弹出的界面：三选一赠配件 + 一个改装入口（design §3.4.2、§11.4.4） |
+| 商店 | `shop` | — | 波间商店：固定 6 个商品位、刷新、出售库存、改装入口；**唯一的常规消费场景**（design §3.4.3、§11.4.4） |
+| 重新排列 | `reroll` | — | 花 `SHOP_REROLL_COST` 重掷全部商品位；价格不递增 |
+| 房屋 | `house` | — | 地图上的可摧毁建筑，有独立 HP/护甲，撞击或炮击可摧毁并给奖励；是**硬碰撞体**（design §3.4.4） |
+| 坦克残骸 | `debris` / `wreck` | — | 地图上的可碾过物体，碾过即得金钱或经验、概率掉配件；**不是**碰撞体（design §3.4.4） |
+| 地图道具 | `prop` | — | 房屋与残骸的统称；由竞技场 `props` 字段定义，不参与坦克刚体解算（design §9.2） |
+| Boss 波 | `boss_wave` | — | 每 `SURVIVAL_BOSS_EVERY = 5` 波替换的一次强化战；结构庞大、火力防御更强、奖励必掉（design §3.4.5） |
+| 库存 | `inventory` | `Inventory*` | 存放已获得但尚未安装的配件；不计入 `M`/`mass_cap`，可在商店出售，run 结束销毁（design §3.4.2） |
+| 废料（已废弃） | `scrap` | — | **v3.4 起废弃**。原为战斗期货币，随原地建造停用而失去唯一消费场景，统一为 `credit`。仅在旧代码/旧测试输出中见到（如 `RUNTIME_OK scrap=751.0`），不代表当前玩法 |
+| 层间整备（已废弃） | `intermission` | — | **v3.4 起废弃**，被 `shop` 取代。历史文档中的 `INTERMISSION` 阶段不再属于当前流程 |
+| 原地建造（已停用） | `runtime_build` | `RuntimeBuilder*` | **v3.4 起停用**：战斗中不允许改装（design §4.7）。代码 `runtime_builder.gd` 仍在但无玩法入口 |
+| run 结算 | `run_summary` | — | 单人 run 结束时的统计界面（到达波次、击毁数、累计金钱/经验、结束原因） |
+| 菜单路由器 | `menu_router` | `MenuRouter*` | 管理菜单界面树（显隐 + 焦点栈）与暂停语义的单一入口；禁止 `change_scene()`（design §11.4、ADR-014） |
+| 暂停面板 | `pause_panel` | `PausePanel*` | `BATTLE_PHASE` 内的**子状态**，暂停即停表；不占顶层阶段（design §11.4.6） |
+| 升级三选一 | `reward_choice` | — | 历史名，v3.4 起统一称 `level_up`（升级菜单）；旧 `REWARD_CHOICE` 阶段名已废止（design §11.4.4） |
+| 界面树 | `ui_screen` | `UiScreen*` | 同一场景内 `CanvasLayer` 上的 `Control` 子树；全部菜单都是它的子节点（design §11.4.1） |
+
+---
+
+## 6. AI 上手流程（照做即可）
+
+1. 读完本文件，尤其 §1 元规则、§4.4–§4.5 坐标与三层模型、§5 术语表。
+2. 打开 `docs/roadmap.md` 状态表，找到当前进行中的里程碑与下一个可做任务。
+3. 打开 `docs/design.md`，定位到该任务对应章节，读全相关小节（不要只读半段）。
+4. 若设计文档里没有答案：
+   - 与玩法相关 → 先补 `docs/design.md`（标为假设或写进开放问题），再动手；
+   - 与工程相关 → 按 §4 约定办，必要时加 ADR。
+5. 动手（遵守 M7 的阶段纪律）。
+6. 收尾自检清单：
+   - [ ] 改了机制吗？→ `design.md` 对应章节已改。
+   - [ ] 改了数值吗？→ `design.md` §14 已改，且代码里没有魔法数字。
+   - [ ] 做了取舍吗？→ `design.md` §15 加了 ADR。
+   - [ ] 推进了里程碑吗？→ `roadmap.md` 状态表已更新。
+   - [ ] 新增/改动了术语、约定、目录吗？→ 本文件 §4/§5 已改。
+   - [ ] 三份文档的"变更记录"都追加了吗？
+   - [ ] 文档之间有没有互相矛盾的说法？
+
+---
+
+## 7. 共识与约束（用户明确表达的要求）
+
+| # | 共识 | 来源 |
+| --- | --- | --- |
+| A1 | 使用 **Godot** 引擎，做 **2D** 游戏 | 用户 |
+| A2 | 视角为**垂直上帝视角**（top-down，非斜 45° 伪 3D） | 用户 |
+| A3 | 玩法核心：用众多模块**搭建自己的坦克**，与**机器人或玩家**对战 | 用户 |
+| A4 | 视觉风格：**极简、霓虹、荧光** | 用户 |
+| A5 | 建造分三层：行进机构层 / 平台层 / 功能模块层，**网格建造** | 用户 |
+| A6 | 每个行进机构与功能模块体积为 **1 格或 2 格** | 用户 |
+| A7 | 平台层用**矩形工具或直线工具**绘制，且**必须跟随建造网格** | 用户 |
+| A8 | 平台层另有**不同形状的平台模块**可选，用于拼出不同外形的坦克 | 用户 |
+| A9 | 功能模块种类：动力引擎、弹药制造装置、弹药库、弹药改进装置、发射炮管、护盾、弹药输送管路、喷射系统、维修装置 | 用户 |
+| A10 | 炮管只能存 1 发；**安装时可调整方向（45° 步进），安装后方向固定**，瞄准仍靠玩家转动坦克 | 用户（2026-10-17 修订） |
+| A11 | 炮弹必须经**弹药输送管路**从制造装置/弹药库送入改进装置或炮管 | 用户 |
+| A12 | 护盾有生命值，归零后**消失并进入充能**，充能结束后重新出现 | 用户 |
+| A13 | 每个模块、每一格平台都有生命值，可被**逐块击毁**，其余完好模块继续工作 | 用户 |
+| A14 | 地图为**固定大小、有边界**的竞技场 | 用户 |
+| A15 | 阶段要求变更：原为"只写文档、不写实现代码"，**2026-10-17 用户指示改为先实现简单 demo 确认视觉效果** → 当前为**视觉原型阶段**（详见 M7） | 用户 2026-10-17 修订 |
+| A16 | 必须存在**文档同步元规则**：任何改动或共识都要更新相关文档 | 用户 |
+| A17 | 三份文档需**实时维护**（设计与 roadmap 随工作推进更新） | 用户 |
+| A18 | 引擎"提供动力"**包含给其他模块供能**（动力单元 `PU`）；PU 不足时全模块统一降速 | 用户 2026-10-17 |
+| A19 | 建造引入**信用点金钱系统**：用信用点购买模块/平台，并可花信用点**升级质量上限** | 用户 2026-10-17 |
+| A20 | 加入**核心部件驾驶舱**：与驾驶舱有连接的平台**不会**摧毁，没有连接的**会**摧毁（分离即摧毁，无宽限）；驾驶舱被毁即判负 | 用户 2026-10-17 |
+| A21 | 炮管**安装时可以调整方向，安装后方向固定**（实现为独立的 `aim` 字段，与安装朝向 `rot` 解耦） | 用户 2026-10-17 |
+| A22 | 驾驶舱**双方默认可视**（无战争迷雾）；难度差异体现在 Bot **用不用**这个信息，而不是看不看得见 | 用户 2026-10-17 |
+| A23 | 维修装置**能修复驾驶舱**（用户仅确认“能修”，未指定修复量）；**修复量减半**（`repair_small` 6 hp/周期、`repair_field` 4 hp/周期）是**实现假设**，仍待 `design.md` §16.2 的 Q15 裁定；已被摧毁的驾驶舱不可修 | 用户 2026-10-17（减半为假设） |
+| A24 | 质量上限**不跨局保留**，每局从 Lv.0（160 u）开始；蓝图 `mass_cap_level` 仅为记录值，读入不自动购买 | 用户 2026-10-17 |
+| A25 | 先做**视觉验证 demo** 确认风格可行，再推进玩法实现；原型阶段仍不写物理/弹药网络/AI/建造编辑器 | 用户 2026-10-17 |
+| A26 | **（⛔ 已被 A35 覆盖）单人模式是 roguelike 远征**（`EXPEDITION`，5 层 × 3 波，坦克跨层连续）；**打坦克收集资源**（`scrap`，双货币）；**升级可赠送模块**（入 `inventory`）；**允许原地建造**（仅单人模式）—— 此条曾推翻旧 Q8 假设。**v3.4 起仅作历史记录**：其“5 层×3 波”“`scrap` 双货币”“允许原地建造”三项均已被 A35 推翻；保留条目以解释现有代码与旧文档里的旧术语 | 用户 2026-10-17（已由 A35 覆盖） |
+| A27 | **菜单设计已纳入设计范围**（用户指示“现在开始设计菜单”）；菜单体系写入 `design.md` §11.4，采不切场景的界面树 + `Esc` 逐层返回 + 无任何倒带入口（具体形式为模型自拟，见 §16.2 Q21–Q23） | 用户 2026-10-17（具体形式为模型自拟） |
+| A28 | **重做 demo，必须包含菜单与建造系统**：旧版静态视觉 demo 废弃，改为可操作的菜单导航与轻量网格建造原型；完整战斗玩法仍不在本轮范围 | 用户 2026-10-17 |
+| A29 | 用户指示“按照 roadmap 开始正式实现游戏”：从已完成 M0.6 进入 roadmap 的 M1 核心数据层；正式运行时数值改由 `data/*.json` 提供，先实现加载/校验基础，不提前实现 M2+ 完整玩法 | 用户 2026-10-17 |
+| A30 | **M3 先实现坦克物理与操控并交付测试 demo**，目标是“建造一台坦克 → 控制它移动、攻击”；**不涉及敌人部分**（无敌方坦克、无 AI、无对敌伤害结算） | 用户 2026-10-17 |
+| A31 | **试把测试 demo 编译成 Android APK**（用户原话“测试demo尝试编译一个Android平台apk”）；本轮范围仅限导出链路本身，**不含触屏操控与移动端 UI 适配**——APK 即使产出也只能装能启动，操控仍是键鼠 | 用户 2026-10-17 |
+| A32 | **移动端支持是后续必做方向，但本轮只做设计**：用户指示“先不导出 apk，但是后面要考虑移动端的支持，在设计中加入虚拟摇杆、虚拟按键等”。因此 ① APK 导出暂停，不安装导出模板/SDK；② 触屏操控方案写入 `design.md` §11.6，不在本轮实现；③ 触屏常量拟入 `data/globals.json` 新 `touch` 块（§14.10），但**尚未写入**；④ 新增 milestone M8 承接实现 | 用户 2026-10-17 |
+| A33 | **移动端三个开放问题已裁定**：Q24 **不需要**右侧独立瞄准摇杆（炮管 `aim` 安装后锁定，射击方向靠车身转向，§6.5/ADR-012）；Q25 **暂不支持**外接手柄（输入抽象层保留接入位置但不实现）；Q26 **只做横屏**，不做竖屏布局，因此 HUD 只需一套上下分区。三项已从 `design.md` §16.2 移入 §16.1 | 用户 2026-10-17 |
+| A34 | **M4 弹药网络以“端口自动连接 + 可达性 BFS”取代显式路由面板**：`design.md` §7.2 规定的“在路由面板里拼 `from → to` 链”本轮未实装（`grid_builder.routes` 仍是 M2 留下的死代码），玩家拖出管路即自动成链、不可达的源由 HUD 画断链图标。该面板推迟到 **M6 菜单体系**一并处理，不得在文档或口头上声称面板已完成 | 实现取舍 2026-10-17 |
+| A35 | **单人玩法重定义为「肉鸽波次生存」，并推翻 A26 的「允许原地建造」与双货币**。用户 2026-10-17 指令：① 主要肉鸽生存向，**需要在每个波次的时间内生存下来**；② 地图散落**房屋**（撞击或炮击摧毁）与**坦克残骸**（碾过得金钱/经验、概率掉配件）；③ 机器人敌人**分级**，级别越低坦克越简单（最低级只有基本配件），高级结构更复杂；④ 击败敌人得经验金钱，**一定概率掉落自身已有的某个配件**；⑤ 升级时弹菜单：**三选一赠送配件 + 改装按钮**；⑥ **正常战斗时不允许改装**；⑦ 波次成功进**商店**：展示六个商品、可花钱刷新、可卖已有配件、可进改装；⑧ **每 5 波一个 Boss**（更庞大复杂、火防较强、奖励较多）。**其中⑥直接推翻了 A26 的「允许原地建造」，并连带使 `scrap` 失去唯一消费场景而废弃**（统一为 `credit` + 独立 `experience`）。全部写入 `design.md` §3.4 / §14.8 / ADR-017，对应里程碑 **M9**——**已于 v3.6 实现并接入主场景**（`scripts/survival_run.gd` + `SCREEN_SURVIVAL`，`SURVIVAL_OK`）。**⑤与⑦的「改装按钮」已于 v3.7 补齐**（`STAGE_MODIFY` + 升级页/商店页按钮 + 改装页，design §3.4.7），**至此 ①—⑧ 全部兼现** | 用户 2026-10-17 |
+| A36 | **窗口与菜单界面的四项硬要求（v3.8 已落地）**。用户 2026-10-17：① 「游戏打开时应该默认最大窗口」——`window/size/mode=2`（`WINDOW_MODE_MAXIMIZED`），**可拖拽/还原，不是独占全屏、也不是 1280×720 小窗；不得把它“修”回小窗**；② 「所有菜单都要有良好的鼠标支持」——hover 反馈 + 左键点击，键盘路径全部保留；③ 「菜单元素不得重叠」；④ **生存模式的改装页必须复用主菜单的建造系统**，不得另写一套（已实现为 `_editor_model()` / `_in_modify_mode()` 分流，两页共用 `_draw_build()` / `_handle_build_key()` / `_handle_mouse()`）。设计分辨率仍为 1920×1080 + `stretch/mode="viewport"`，界面坐标恒为设计坐标 | 用户 2026-10-17 |
+新增共识时：在此表追加一行，并检查是否需要在 `docs/design.md` 落地为机制。
+
+---
+
+## 8. 已知陷阱 / 踩坑记录
+
+- **4.x vs 3.x**：不要用 `KinematicBody2D`、`yield`、`OS.get_ticks_msec` 之外的 3.x API；4.x 是 `CharacterBody2D`、`await`。
+- **不要在 `_process` 里做弹药网络调度**：必须走 20 Hz 固定累加步，否则帧率影响产能与吞吐（违反 §4.7）。
+- **遍历顺序**：用 `Dictionary` 遍历必须 `keys()` 排序后再处理，否则跨帧顺序不稳定，联机/回放会飘。
+- **辉光（Glow）只在 `WorldEnvironment` 开启时才有**：2D 中发光色只要最大通道达到 `1.0`（§2.1 的全部强调色都是）就已高于 `glow_hdr_threshold = 0.8`，辉光自然产生，**不需要也不允许**额外乘系数提亮（实测见 D2）；`hdr_2d` 开关在本项目实测中对画面无可见影响（见 D3）。
+- **网格吸附**：`Vector2i` 与浮点混用会产生 ±1 格偏差；一切格子运算只用整数，只在渲染时 `* CELL_SIZE`。
+- **平台连通性检查不能只做一次**：每次破坏平台格后要重算连通块，否则断开的部分还在"工作"。
+- **扭矩公式里 `r` 必须用像素**：`cross(r, dir)` 里若 `r` 是格坐标，惯量（u·px²）与扭矩（u·px）会差 16 倍，坦克要么完全转不动要么疯转。
+- **对称双履带不会自动转向**：不要用“各履带推力叉积相加”当转向；那会在左右对称时正好抵消。必须用差速模型（design §5.2、ADR-009）。
+- **拆开“推力”与“转向”的控制轴**：玩家只有 `throttle`/`steer` 两个输入，不要给模块单独控制键。
+- **`detach` 的锚点是驾驶舱所在格，不是质心**：用质心会出现"驾驶舱在脱落侧但玩家还活着"的荒谬情形，且质心会随掉块移动、锚点不稳定。任何实现都必须以驾驶舱格做 4-连通搜索（design §8.5、ADR-005）。
+- **改价格必须同时改两处**：`docs/design.md` §6 对应模块表与 §14.7 价格汇总表。只改一处视为未完成（M1）。
+- **D1 `class_name` 在 headless 下不可用**：全局类注册依赖编辑器导入生成的 `.godot/global_script_class_cache.cfg`；纯命令行运行从不执行导入，该文件不存在，消费方会报 `Identifier "Palette" not declared in the current scope`。纳入版本管理的脚本一律用 `const Palette := preload("res://scripts/palette.gd")`，编译期即可解析。
+- **D2 禁止用「乘系数提亮 RGB」触发辉光**：§2.1 强调色的最大通道本就是 `1.0`，已高于 `glow_hdr_threshold = 0.8`，辉光自然产生；再乘系数只会让通道溢出被钳制、把色相推离规范值（实测 `#00F0FF`→钳成 `#00FFFF`、`#FFC400`→钳成 `#FFFF00`）。需要降低视觉权重时只调 alpha。
+- **D3 开启 glow 会整体改变色彩映射**（引擎行为，非参数问题）：`gl_compatibility` 下 glow 后处理链经 8 位线性中间缓冲往返，`#05070A` 渲染为 `#000206`、中灰 `#808080` +8.6%。与 `glow_bloom` / `glow_hdr_scale` / `glow_hdr_threshold` / `glow_blend_mode` / 各级 `glow_levels` / `glow_intensity` / `hdr_2d` **全部无关**；`forward_plus`(Vulkan) 更差（`#000101`，中灰 −14%）。验收应检验设计意图（大面积近黑、无彩色背景发光），不要断言 HEX 字面相等。
+- **D4 Godot 内置字体不含中日韩字形**：中文 HUD 会渲染成空白且像素断言查不出来。必须用 `SystemFont` 按名加载：`["Microsoft YaHei", "Noto Sans SC", "SimHei", "sans-serif"]`；等宽用 `["JetBrains Mono", "Consolas", "Cascadia Mono", "monospace"]`。
+- **`max()` / `min()` 返回 `Variant`**：表达式含这些调用时不能用 `:=`（报 `Cannot infer the type ... doesn't have a set type`），必须显式标注 `var x: float = float(max(...))`。
+- **运行期建造同样受 I1–I10 约束**：不要为"战斗中建造"开一条绕过不变量的特权路径——`BUILD_MODE` 只是把支付货币从 `credit` 换成 `scrap`、多了一个施工计时，其余校验完全一致（design §4.7）。
+- **`scrap` 与 `credit` 不可兑换**：一旦允许兑换，双货币就退化成单货币，"打得多→造得更多"的滚雪球会回来（design §3.4.1）。
+- **远征失败必须立即结束**：不进 `RESULT` 复盘、不进读档、不复活，直接转 `RUN_SUMMARY`；若发现代码里有"再来一次"的挽留路径，那是 bug（design §3.3）。
+- **菜单禁止 `change_scene()`**：全部菜单是同一场景内 `CanvasLayer` 上的 `Control` 子树，用显隐 + 焦点栈切换。`EXPEDITION` 要求坦克跨层连续演进（design §3.4），切场景极易丢损伤状态，黑屏切换也会打断霓虹观感（ADR-014）。
+- **`PAUSE_PANEL` 是 `BATTLE_PHASE` 的子状态，不是顶层阶段**：与 `BUILD_MODE` 同级，不进 design §3.1 阶段表。一旦把它写成独立阶段，就会额外长出“从暂停里钻进建造 / 从暂停里直接退出对局”的路径。
+- **暂停中不允许建造、不允许查看敌方结构**：暂停只是一个“停下来”的界面，不是第二个建造阶段；但暂停必须**同时停掉对局计时器**（计时器造压力，不是惩罚离开键盘）。
+- **菜单里不得出现任何“倒带”入口**：重开本层、继续游戏、读取存档一概没有。`EXPEDITION` 的全部张力来自“不能倒带”（战损真实、`scrap` 有限），加一个重开键就把张力归零（design §11.4.6、Q20）。
+- **`Esc` 必须逐层返回**：`BATTLE_PHASE` 里的 `Esc` 开暂停面板而不是退出对局；结算页与设置页的默认焦点落在“返回”而不是“重开”，防止连按 `Enter` 直接重开。
+- **菜单数值也要集中**：菜单动效时长、行高、安全边距、UI 缩放上下限全在 design §14.9，代码禁止内联（M4）。
+- **旧 demo 不得继续挂在主场景**：当用户要求重做 demo 时，旧版静态坦克 / HUD 脚本必须从 `main.tscn` 引用树移除；验证以实际启动场景为准，避免新旧入口并存造成误判。
+- **正式阶段禁止继续复制原型数值**：M0.6 `main.gd` 中的临时布局与演示价格只服务原型；M1+ 代码必须从 `data/*.json` 加载，发现同一数值在脚本与 JSON 双写时先修正数据源归属。
+- **蓝图回读必须重新执行 I1–I10 相关校验**：不能因为交互放置路径已拒绝重叠，就跳过读取数据后的同层占位、层归属、边界、平台覆盖与驾驶舱检查。
+- **Godot Viewport 鼠标坐标不要按窗口 override 尺寸二次缩放**：`InputEventMouse.position` 已按当前 Viewport/CanvasItem 坐标参与 `_draw()` 与 Rect 命中；再次使用 1280×720 窗口尺寸去换算 1920×1080 设计坐标会使 hover、配件点击和网格定位偏移。
+- **`budget_enabled` 是编辑器信用点与运行期 `scrap` 的分离点**：`grid_builder.gd` 的 `budget_enabled`（默认 `true`）置 `false` 后 5 处信用点预算检查全部失效，运行期改由 `scrap` 结算；编辑器实例必须保持 `true`，否则编辑器预算校验会静默消失。
+- **运行期候选校验必须用 GridBuilder 副本，且直接复制状态字段**：不要用 `load_blueprint()` 往返造校验副本——它在 `mass_cap_level` 高于目标当前等级时会拒绝（运行期买过等级就必然踩中）。`RuntimeBuilder._scratch_copy()` 直接复制 `platform_cells` / `platform_shapes` / `mobility_parts` / `module_parts` / `routes` / `mass_cap_level` / `credits_total`，并把副本 `budget_enabled` 置 `false`。
+- **`RuntimeBuilder.exit_build_mode()` 在有施工时返回非空提示串是设计行为**：`"退出建造模式，施工中断：已投入的 %.1f scrap 不返还。"` 是正确语义，不要“修”成返回 `""`；对应 smoke 断言必须是“非空”。
+- **Godot 4 没有 `KEY_RETURN`**：用 `KEY_ENTER`（或 `KEY_KP_ENTER`）。误用会直接 `Parse Error: Identifier "KEY_RETURN" not declared`。
+- **大文件编辑后必须重读并搜 `^func `**：`main.gd` 已两次出现重复函数声明（`_activate_main_menu` 重复）导致 `Parse Error`；改头部常量块后同样要复查（`LAYER_PLATFORM` 曾被静默删掉）。
+- **远征施工页不能复用 `_draw_grid()`**：该函数内部解引用编辑器的 `builder.*`，远征页须绑定 `var model: GridBuilder = runtime.builder` 自行绘制，否则会把编辑器状态画到战斗页上。
+- **`File.Edit` 必须先用 `File.Read` 建立目标范围**：成功 Edit 会清空该文件全部 `editable_ranges`；另外 `--capture=<path>` 是覆盖写，每个界面必须输出到不同路径，否则会拿两张同一页的图做对比而得到假结论。
+- **终端速度验收隐含“质量对称”前提**：两侧行进机构到质心的力臂不等时，`steer = 0` 也会产生净扭矩，坦克会持续偏转而不收敛到纯平移。那是 `design §5.2` 的**正确行为**，不是解算器缺陷。`physics_smoke.gd` 因此用对称 6×7 布局做终端速度断言，并额外断言 `centroid_cell.y ≈ 7.5` 与 `drive_metrics(0,0)["torque"] ≈ 0`；`grid_builder.reset_demo()` 只有一条 `track_heavy`，试驾沙盒会持续偏转——这些是设计结果，不要去“修”。
+- **贴墙 penetration 恰为 0 时也得清法向速度**：只用 `if penetration > 0` 做撞墙判定会让车身完全贴墙后新的向内速度清不掉（实测 `PHYSICS_FAIL_WALL_VELOCITY 400.000`）。正确做法是位置修正只在 `penetration > 0` 执行，而“法向速度清零/伤害”用 `0.001 px` 接触容差判定；同时用 `wall_impact_min_speed`（20 px/s）把静置接触的伤害关掉，否则贴墙怠速会每帧掉血。
+- **`Cannot infer the type of "x" variable` 往往不是缺类型标注，而是被调脚本根本没有那个方法**：`module_defs.gd` 缺 `get_ammo()` 时，调用方在 headless 下报的正是这条推断错误。看到它先查“被调方是否真的实现了这个方法”，不要先给它加 `: String`。
+- **不要用共享字段识别模块角色**：`caliber` 同时存在于 `ammo_factory_*` 与 `cannon_*`，用 `def.has("caliber")` 判炮管会把弹药制造装置当成第二门炮（demo 蓝图因此一次开火打出两发）。炮管专属字段是 `aim_steps`（且恰好 8 档）。同理，`_draw_drive_part_color()` 必须先判 `aim_steps` 再判 `caliber`。
+- **`--capture=<path>` 是覆盖写**：同一个归档路径被第二次截图会静默覆盖，导致“面板没画”或“对比两张同图”的假结论。每个界面必须输出到不同文件名（`drive_capture.png` / `expedition_capture.png` …）。
+- **新增页不得复用 `_draw_grid()` / `_grid_rect()` / `_mouse_to_cell()`**：三者都解引用编辑器的 `builder`。试驾页与远征页一样，必须绑定自己的状态（`tank` / `runtime.builder`）自绘，否则会把编辑器状态画到另一个页上。
+- **新页面的玩家输入必须插在 `_input()` 的“非 BUILD/EXPEDITION 就 return”之前**，否则输入被静态吞掉；而且油门/转向是持续态，必须同时处理**按下与松开**（试驾页因此把 DRIVE 分支放在 `pressed/echo` 过滤之前，并用 `_drive_held` 集合维护状态）。
+- **炮管 smoke 的每个阶段必须自己建立前置状态**：设计上冷却期内拒绝装填，所以上一阶段刚开火后必须 `bank.step(1.2)` 清冷却再 `load_round()`，不能假定上个阶段留下的弹道状态。
+- **Android 导出的三件套全在工作区外，缺一即失败**：① Godot 导出模板（`%APPDATA%\Godot\export_templates\<版本>\android_debug.apk` 与 `android_release.apk`）；② Android SDK（`build-tools` 提供 `apksigner`、`platform-tools` 提供 `adb`）；③ 编辑器设置里的 `export/android/java_sdk_path`。实测本机三者全缺时，`--export-debug` 输出 `Unable to open Android 'build-tools' directory.` 加 6 条 `Cannot export project ... due to configuration errors`，最后 `EXITCODE=1`。安装这三项都要写入工作区外，未取得用户明确授权前不得自行下载安装。
+- **`javac` 坏掉不等于 Android 导出被堵死**：走 `gradle_build/use_gradle_build=false`（预构建模板路径）时，Godot 只校验 `build-tools` / `platform-tools` / adb / apksigner 与 Java SDK 路径，**不调用 javac**。实测 `javac` 报 `无法将主类 com.sun.tools.javac.Main 加载到模块 jdk.compiler 中`，而导出错误清单里没有任何 javac 相关项。排查时不要把 javac 当成首要阻塞点；只有切到 Gradle 构建才必须能编译 Java。
+- **`export_presets.cfg` 可以纯文本手写并直接生效**，但预设名必须与命令行参数一字不差：`--export-debug "Android" <apk>` 里的 `Android` 要等于文件内的 `name="Android"`。Godot 报出「preset "Android" 的配置错误」说明预设**已被正确识别**，剩下的都是环境问题，不要再去改预设格式。
+- **触摸事件会被 Godot 同时合成为鼠标事件**：`InputEventScreenTouch` / `InputEventScreenDrag` 默认会同时产生 `InputEventMouseButton`（左键）与 `InputEventMouseMotion`。因此“菜单与建造页看起来能点”是真的，但**鼠标只有一个指针**，无法表达“油门向前 + 同时右转”——试驾页的持续键控在触屏上没有任何等价物。这就是 `design.md` §11.6.2 说虚拟摇杆是**必需项而非可选优化**的原因。不要指望“触摸当鼠标”糊过去。
+- **触屏提供者必须完全绕过 hover 分支**：因为触摸被合成为鼠标移动，手指划过按钮会触发 `mouse_entered` 类逻辑，轻则误高亮、重则误点击。触屏路径只能读 `InputEventScreenTouch` / `InputEventScreenDrag` 并直接用触点 index 做命中，不参与 hover。
+- **摇杆向量必须圆形归一化，不能逐轴 clamp**：斜推 45° 时向量长度是 `√2 ≈ 1.414`，逐轴裁剪会把这个超速值送进 §5.2 得到 `T/M` 放大 41%，实测稳态速度会越过 §5.3 的 `v_max 192.1 px/s`。正确做法是按长度缩放到单位向量再乘幅值（`design.md` §11.6.2 的伪代码）。
+- **键鼠与触屏的轴值合成取绝对值较大者，绝不相加**：相加会得到 `|vector| > 1` 的同款超速问题；另外触屏正接管某轴时必须忽略该轴的键盘输入，否则手指未松时按键会造成抽搯。
+- **摇杆死区外要重新归一，不能直接减死区值**：`(len - dz) / (1 - dz)` 是把 `[dz, 1]` 拉伸回 `[0, 1]`；直接 `len - dz` 会让最大输出只有 `1 - dz = 0.82`，满推也跑不到终端速度。
+- **`touch` 块不能经 `global_number()` / `global_int()` 读取**：这两个访问器只查 `definitions.registry.globals["global"]`，读 `touch`（以及 `menu`、`expedition`）会静默拿到 fallback 值，看起来“改了 JSON 没生效”。必须走 `definitions.registry.globals["touch"]`。
+- **移动端 UI 不是“把桌面 UI 缩小”**：1920×1080 设计空间在 `viewport` 拉伸下只保证坐标系恒定，不保证物理尺寸。以桌面 44 设计 px ≈ 12 mm 为参系，同值在 1080p 手机上只有约 1.6 mm；靠 `ui_scale 1.5` 也救不回来（上限不够）。必须重排布局（左右分栏→上下分区）+ 信息降级（`design.md` §11.6.6）。
+- **开火“按住连发”不需要额外节流器**：炮管冷却 `reload_s`（`cannon_20` 0.35 s … `cannon_155` 2.60 s）已经是天然频率上限，`CannonBank._fire_one()` 在未装填或冷却中直接拒绝。触屏每一帧尝试一次 `fire` 即可；自己再算“连发间隔”会与 `data/modules/systems.json` 的口径热调打架。
+- **菜单与按钮的 `restart` / `back` 需要二次确认，但 `fire` 不需要**：前者会丢弃当前状态（试驾重建、返回主菜单），移动端误触概率远高于键鼠；后者是高频动作，加确认会直接跱误手感。两者不能共用一套确认策略。
+- **端口几何不在数据里，必须由代码推导**：`data/modules/systems.json` 的 `ports` 只是字符串 id 数组（`["in0","out0"]`），**不含 `kind`/`side`/`offset`**（`design.md` §6.11 的对象格式从未落地）。`ammo_network.gd` 用 `_port_specs()` 只出 side、再用 `_port_cell()` 按该侧极值格（E 取 x 最大、W 取 x 最小，同值取小坐标）反推端口所在格。**不要按 `cells[index]` 取端口格** —— 对 footprint 1 恰好对，对 1/2 弧与两格炮管就错位（M4 实现期真实缺陷，表现是 `nodes` 里根本没有 `"6,4:out1"` 键）。
+- **拥塞 ≠ 路由失效**：出口“有连接但当前满”（炮管装填冷却就是典型）必须**原地等待并清零宽限**；只有 `linked == 0`（前方完全无路，含悬空出口）才累加 `conveyor_strand_grace_s` 并在到期后销毁。混为一谈会让正常等待的弹药 1 s 后被 `_lose_round()` 吃掉（M4 实现期真实缺陷）。
+- **模块角色靠专属字段识别，不能靠 `caliber` 或 `ports`**：炮管 `aim_steps`、制造装置 `craft_time_s`、弹药库 `capacity_slots`、改进装置 `upgrade_slots`、管路 `conveyor_` 前缀。`ammo_factory_*` 也带 `caliber`，用它判炮管会把制造装置当成第二门炮。
+- **投递事件种类由目标角色决定**：`_delivery_kind(role)` —— 炮管 `delivered`、弹药库 `stored`、制造装置 `returned`、其余 `queued`。全部硬写 `delivered` 会把“76mm 进弹药库”误计成炮管接收。
+- **炮管装填是两段式的**：`_accept()` 只置 `queued = true`，真正入膛由 `fill_cannons(bank)` 调 `CannonBank.load_round()`。网络若自行置 `loaded = true` 会与 `CannonBank` 永久失同步。附带结论：冷却中的炮管不会被抢跑装填，因此 `reload_s` 天然防止一段管路容量被白占。
+- **`fill_cannons(null)` 恒返回 0**：无 `CannonBank` 的测试路径不能用它计数，必须用 `drain_events()` 统计事件种类。
+- **`_probe()` 的三态语义必须保持**：`"ok"` / `"full"` / `"reject"`。只有 `"reject"`（口径不匹配）触发逆向退回；`"full"` 只让上游等待。
+- **在 `grid_builder` 上搭测试装置的两条硬约束**：① 每个平台格 1 u 质量，而 Lv.0 上限只有 160 u（`base_mass_cap`），**`budget_enabled = false` 绕不过 `mass_cap()`**，必须按部件占位的外接矩形精确铺，不能“多铺一些保险”（M4 首跑 54 条失败的根因）；② `place_platform_cell()` 要求新增平台与现有平台 **4-连通**，零散铺会被拒。
+- **`ammo_factory_76` 是 footprint 2**：布局要给它留两格，否则报 `拒绝：同层占位重叠。`
+- **`body.parts` 的键是 `"module_id"`，`grid_builder` 的部件字典键是 `"id"`**：混用会静默取到空字符串。`ammo_network._collect_parts()` 按 `source.has_method("part_cells")` 分两种形态处理。
+- **`reset_demo()` 的 `cannon_20` 现在在 (9,7)，不要挪回 (11,8)**：那会重新断开演示构建的供弹链（制造装置 (7,7) → 直管 (8,7) → 炮管 (9,7)）。
+- **`grid_builder.routes` 是死代码**：声明存在，但除 `_clear_state()` 外从未被写入或读取；`_snapshot()` / `_restore()` / `to_blueprint()` / `load_blueprint()` 都不含该键。不要以为 M4 实装了路由面板。
+- **`printerr` 的中文输出在 PowerShell PTY 下会渲染成红色 `NativeCommandError`**（带 `CategoryInfo` / `FullyQualifiedErrorId` 行）——这是渲染现象，**不是命令失败**，其后的 `AMMO_OK` 之类输出仍然有效。
+- **`File.Edit` 写重一行守卫会引发级联解析错误**：一次批量编辑把 `if not _accept(target, ammo_id):` 写重了一行，语法上“看起来合法”，实际破坏嵌套层级，报 `Could not preload resource script "res://scripts/ammo_network.gd"` 加约 20 条 `Cannot infer the type of "X"`。**教训**：跨 `if` 守卫或分支子句编辑时必须重读该区域；**“`Cannot infer the type`” 出现在被 preload 的脚本上时，根因往往是被 preload 的脚本本身解析失败** —— 顺着最早的 `Could not preload resource script` 找。
+- **绘制侧的确定性**：拥塞闪烁相位必须来自 `sin(_time * 9.0)`，**绝不用 `randf`**，否则破坏确定性验收（§7.7 验收 7）。
+- **阻尼项的量纲必须与被阻尼的量一致**：原 `tank_body.gd` 把 `k_ang_drag·ω·|ω|` 当作**扭矩**从 `τ` 里减，但实测 `τ=583200`、`I=104064`，而该项在 `ω=3` 时只有 `3.15` —— 相差 10⁵ 量级，除以 `I` 后对角速度的贡献只有 3e-5 rad/s²，**角阻尼事实上等于零**（松手后跑满 6000 步 `ω` 仍为 2.9970）。这类错误**不会让任何测试失败**，只会让手感完全不对。角阻尼必须与 `τ/I` 同为 rad/s² 量纲（`α = τ/max(I,I_MIN) - k_ang_drag·ω·|ω|`）。
+- **二次型阻尼在低速端天生无力**：`ω=0.3` 时 `0.35·ω²` 只有 `0.03 rad/s²`，靠调大系数只会让高速段更钝、长尾依旧（松手后从 3.0 到 0.1 需约 27.6 s）。需要**线性项**（本项目的 `k_ang_brake`，仅在 `steer == 0` 时生效）才能做到“松手即停”。**禁止用提高 `omega_max` 的办法“解决”自旋过长，方向相反。**
+- **验收项缺失是最危险的缺陷类型**：七条 smoke 全绿却漏掉了用户天天能感觉到的维度（原 `physics_smoke` 只测“按住 `steer=1` 到 `heading≥π` 的 `turn180_s`”，完全不覆盖松手后的衰减）。新增指标必须进**汇总行**（`spin_stop_s`）才能回归；另注意“设计如此（非对称船体本就会持续偏转）”**不能**用来否定“松手后角速度不衰减”，二者是不同现象。
+- **`File.Edit` 的 `replace` 不得在 `new_lines` 里重复包含未被替换的原尾部语句**：`tank_body.rebuild()` 因此出现两个连续 `return` —— 语法合法、测试全过，属**静默逻辑冗余**。替换范围的语义是“用这些行**取代**原范围”，范围外的行仍在。
+- **`succeeded` ≠ 字节真的改变**：仅靠缩进差异（把语句移进/移出 `if` 分支）不足以让工具判定内容不同，一次 `replace 453–462` 返回 `succeeded` 但 `previous_hash`/`hash`/`previous_size`/`size` 全部未变，而那次缩进错误会让**所有非驾驶舱部件被摧毁后不被移除**。判断生效的唯一依据是 `hash`/`size` 变化**并且重读确认落点**；仅改缩进时应顺带改一处注释文字。
+- **`replace` 必须完整覆盖被改动语句块的首尾**：`projectile_field._clip_to_aabb()` 曾只换中段，结果 `var t1`/`var t2` 两行随被替换区间消失，而旧的比较分支仍在 —— 未定义变量 + 重复赋值。跨 `if` 守卫、分支子句、`match` 分支编辑时同样必须重读该区域。
+- **不要把“插入空行”当作批量编辑的收尾动作**：`insert` 单个空字符串会在相邻行留下连续空行（`projectile_field.gd` 122–123 实证）。
+- **新写辅助函数必须沿用文件既有命名风格，且多函数 `insert` 后必须重读插入缝**：曾把颜色辅助函数写成 `Colour_lime_pulse`（首字母大写 + 蛇形混排），已改 `_drive_lime_pulse`；多段 `insert` 还会吃掉分隔空行，须在插入缝补回。
+- **`File.Edit` 可能完全不返回新 `hash` 字段**（只返回 `previous_hash` / `previous_size` / `size` / `total_lines`）。此时唯一合法结论是“hash 未知”，必须用 `File.Stat` 取得；**绝不能依据 size 变化反推或臆造**（曾把 `tests/combat_smoke.gd` 的新 hash 臆测为 `b57ba9c9`，`File.Stat` 实测是 `0909e0a7`）。
+- **绝不能凭记忆的行号用多个独立 `replace` 改同一个字典字面量**：`damage_system._upgrade_profile()` 的初值字典因此先覆盖了 `"explosive"`、随后又把自己刚搬过去的 `"slow"` 删掉。GDScript 对**重复字典键静默**（后者覆盖前者）、对**缺失键只在运行时炸**，这类失误不会被“能否解析”暴露。字典字面量必须整块读完再整块重写，修复动作本身也必须整块重写。
+- **整块 `insert` 后要专门检查两点：标题前是否缺空行、表格后是否有多余空行**（`docs/design.md` §14.1 实证：缺空行会让 Markdown 把小节标题接进表格块）。**纯空行类修正不改变字节数**（`previous_size == size` 却换了 hash），只能看 hash 与重读判断。
+- **`File.Read` 返回的 `lines` 里出现 `\ufffd`（U+FFFD）说明该处字节已损坏**：`docs/roadmap.md` 第 285 行原意的顿号「、」被写成 3 个 U+FFFD。这类损坏**不会被“能否渲染/能否解析”暴露**，只能靠重读逐字比对发现 —— 这是“整批编辑即使 size/行数符合预期也必须重读”的又一实证。
+- **跨模块的键名极易混用**：`tank.cells` 项的键是 **`local`**，而 `projectile_field._clip_to_tank()` 读 `centre_local`，必须经 `damage_system.target_payload()` 显式映射（否则静默全零）；`tank_body.parts` 的键是 `module_id`，`grid_builder` 部件字典的键是 `id` 且起点键是 `start`；`module_defs.global_number`/`global_int` **只读 `globals["global"]`**，`expedition`/`menu`/`touch` 块会静默返回 fallback，必须走 `registry.globals["…"]`；`module_defs` **没有 `get_upgrade`**，须走 `registry.get_upgrade(id)`（在带类型脚本上调不存在的方法会在**解析期**报 `Cannot infer the type of "x"`）。
+- **在 `grid_builder` 上搭测试装置的占位陷阱**：`budget_enabled = false` 只关预算，**绕不过 `mass_cap()`**（Lv.0 = 160 u，平台每格 1 u）；平台必须 4-连通且只能按需精确铺；**footprint 2 的部件会额外占 `start + (1,0)`**（`cannon_76/120/155`、`ammo_factory_76`、`ammo_depot_large`、`shield_plate/dome`、`repair_field`、`modifier_mk2/mk3`、`track_heavy`），邻格部件必须放到 `start + 2` 之外，否则报「同层占位重叠」或「模块必须安装在平台上」—— `combat_smoke.gd` 首轮的 4 类失败有 3 类源于此。
+- **语义与判据的四条纪律**：① **装填完成是边沿**（`loaded` false→true）而非电平，`cannon_bank.step(dt)` 只在 `not loaded` 时累减，`loaded` 只由 `load_round()` 成功时置真；② **JSON 的 `value` 必须先确认量纲**（系数 / 层数 / 绝对值 / 秒）再决定累加方式 —— `up_slow` 的 `0.3` 是“每层 −30%”的自然语言表述、不是可乘系数，误当层数会让一层只减 9%；③ **`bool(String)` 没有构造函数**（`Invalid call. Nonexistent 'bool' constructor.`），判断字符串非空必须写 `not String(x).is_empty()`（`apply_hit()` 返回的 `destroyed` 就是这种 String）；④ **判断“某风险是否发生”不能用间接指标** —— 自击之所以长期未被识别，是因为用“部件数仍为 46”当判据，而 `cal_20` 对 armor 3 只有 5.0 伤害本来就不足以摧毁任何件，必须直接读 `最近事件` 这类显式文案或加断言。
+- **测试失败必须做三分法归因并在文档中记明**：产品缺陷 → 改源码；**测试装置缺陷** → 改测试（`combat_smoke.gd` 首轮 4 类全是此类：`bool(String)`、装填边沿断言倒置、footprint 2 与邻格重叠、AOE 装置搭不起来）；**验收项缺失** → 补指标进汇总行。反向也成立：当用户报告真实手感缺陷而现有断言根本没覆盖该维度时，正确做法是**补断言 + 改源码**，不得用“七条 smoke 全绿”或“设计如此”敷衍。
+- **数据校验器的 `_require_vector2_int` 要求两个分量都是正整数**：`pos` 写成 `[1,0]` 会被判「必须是两个正整数的 array」。用脚本生成蓝图时必须整体平移（本项目用 `OFFSET = Vector2i(2,2)`），否则倒出来的 12 张蓝图全部过不了校验 —— 而错误信息是 `$.modules[2].pos：必须是两个正整数的 array`，不会提示“是因为有 0 分量”。
+- **`match` 是 GDScript 保留字**，不能用作变量名（`for`/`if`/`var` 同理）。写成 `var match := MatchState.new()` 会在解析期报 `Expected expression to test after "match"`，提示信息完全没提到变量名。`tests/match_smoke.gd` 统一改用 `session`。
+- **不要把“邻居数最少”当作割点**：`bot_ai._find_neck()` 初版取“连通块内邻居数 ≤ 2 的格里邻居最少者”，在一个 “主块 2×2 + 窄颈 + 远块” 的测试台上选出了 `(8,4)` —— 那是一块只有 1 个邻居的**末端格**，打掉它只会掀掉一格，完全不会触发 `detach`。真正的割点必须用“**屏蔽该格后从锚点重连，丢格数最多者**”判定（`_flood_without()`）。教训：结构分析的判据必须与被分析机制（这里是 `detach`）的触发条件同一，否则“看起来在分析结构”实际上什么也没保证。
+- **带类型的脚本变量不写类型会链式传导 `Cannot infer the type`**：`var hull = duel.tank_of(tag)` 之后写 `hull.centroid_local`，`hull` 是 Variant、`centroid_local` 也是 Variant，于是 `var centre := ... * hull.centroid_local` 报 `Cannot infer the type of "centre"`，且错误指向 `centre` 而**不是真正缺类型的 `hull`**。同理 `Vector2(obstacle["center"])` 内层是 Variant 时整句无法推断 —— 先写 `var obstacle_centre: Vector2 = obstacle["center"]` 中转。
+- **同一页面复用了另一个页面的坐标函数会把缩放弄错，而且看上去“只是画大了”**：`_draw_match()` 初版调 `_drive_scale()`，而它读的是试驾页的 `_drive_arena`；对局页从未给该变量赋值，于是 `size.x <= 0` 分支返回 **1.0**，地图按 1:1 绘制溢出画面。两个页面即使几何相似也必须各用各的缩放函数（`_match_scale()` / `_match_to_screen()`）。截图上看只是“坦克变小了”，不是报错。
+- **在 PTY 里跑 `godot --path . --capture=...` 时输出会晚于提示符返回**：命令 echo 回提示符后又过了十几秒才出现 `CAPTURE_OK`，中途轮询看不到任何新行。不要因为“没输出”就判定失败、也不要重复执行（会互相抢窗口）。正确做法是把输出重定向到文件（`> log 2>&1`）或直接 `Test-Path` 检查目标文件，并且知道 `> file` 与 `*> file` 在 PowerShell 里对原生命令 stdout 的重定向行为不同 —— 本项实测中 `> cap.txt` 产生了 0 字节文件，而直接不重定向反而能看到输出。
+- **自引脚本名作参数类型会解析失败**：`tank_body.gd` 无 `class_name`，写 `func apply_tank_collision(other: TankBody)` 报 `Could not find type "TankBody" in the current scope`，连带 `other` 退化为 Variant，后续每个 `var x := other.…` 全部报 `Cannot infer the type`。修法：参数不写类型，并对每个从它取值的局部变量显式标注（`var b: Rect2 = other.world_bounds()`、`var other_mass: float = other.mass_total`），写回也用 `other.position = ...` 而不是 `other.position +=`。
+- **AABB 碰撞的“最小平移”不能用 `overlap_x` / `overlap_y` 比较选轴**：当障碍在某轴**完全包含**车身时，两个 overlap 都等于车身尺寸，选出的轴与入撞方向无关，车身会直接从墙里穿过去（实测长条墙 128×600：旧码 `final_x=800.00` 穿墙，新码 `final_x=186.86 still_overlapping=false`）。正确做法是比较四个“抽出到各侧面”的穿透量取最小：`out_left = bounds.end.x − rect.position.x`、`out_right = rect.end.x − bounds.position.x`、`out_up = bounds.end.y − rect.position.y`、`out_down = rect.end.y − bounds.position.y`。
+- **圆心落在 AABB 内部时，圆障碍的最近点法会退化**：`closest` 等于圆心本身，`distance = 0`，旧的 `radius − distance` 少推 1 px（实测 53.00 vs 应 54.00），且法向取自中心差、完全忽略偏移。必须分两分支：圆心在 AABB 外时穿透量就是 `radius − distance`（**不需要**再叠加 AABB 支撑半径）；圆心在内时把圆看作“AABB 向外膨胀 radius”，取四个面中最大透入最小的一个面推出。
+- **两个刚体的“分离轴”方向与“是否接近”的符号必须对得上**：`axis` 由 A 指向 B 时，`closing = (v_a − v_b) · axis`，`closing > 0` 才是相互接近。写成 `−(v_a − v_b) · axis` 会让**任何**对撞都被判为“正在远离”而提前 `return 0`，互撞伤害永不结算、两车也不减速——而测试如果只断言“位置被分开了”就不会失败（位置修正发生在判定之前）。
+- **同一个量存在两套公式时，必须先确认键的归属再接线**：`data/globals.json` 里的 `ram_damage_base: 30.0` / `ram_damage_per_speed: 0.06` 是设计 §6.8 **喷射冲刺撞敌**的公式（`30 + 0.06×相对速度`），不是 §8.7 坦克对撞的基数项（后者无基数项）。混用会让每次普通碰触至少扣 30 血。现在两个键已更名为 `thruster_ram_damage_base` / `thruster_ram_damage_per_speed` 以明确归属，坦克对撞只读 `tank_collision_coefficient`。
+- **单格车体的宽度就是 `cell_size`（16 px）**：写碰撞测试时按“目测应该重叠”的间距摆两车会完全碰不到（实测 `a=992..1008 b=1022..1038 intersects=false`，因为车体宽仅 16 px 而间距给了 20 px）。必须按 `a.world_bounds().size.x` 计算摆位。
+- **修复一个缺陷前先确认它真的是缺陷**：R17 的 9 项里有 3 项（矩形方向、圆形穿透、互撞符号）在第一次修正后仍然错，因为修法本身是从错误假设出发的。可靠做法是**先写探针拿到“错误的具体数字”，改完再用同一探针拿“正确的数字”对比**，而不是改完直接跑既有回归（既有回归本来就不覆盖这些路径，所以它们一直绿）。
+- **“已经抬完等级”和“还欠几次升级”是两件事**：`survival_run._add_xp()` 的 while 循环已经把 `level` 抬完了，再写一个「按剩余经验重算待处理升级」的函数会**恒返回 0**，于是升级菜单永远弹不出来、直接跳进商店。必须用一个显式计数器（`pending_level_ups`：升级时 +1、领取时 −1）。教训：**“可以从其他状态推导出来的量”不等于“应该推导”**——当推导路径与产生路径不是同一个时刻时，推导就会错。
+- **格坐标有两套坐标系，不能混用**：残骸/房屋用**竞技场格**（`data/arenas/*.json` 的 `props`），而 `TankBody.world_position_of_cell()` 收的是**坦克建造格**（`grid_builder` 的 `0..23`）。把竞技场格直接传进去得到的位置与残骸毫无关系（旧码因此只有残骸恰好在质心附近才能被碾到）。两边都必须先换算成世界坐标再比较。
+- **用质心距离判定“压上了”对长车体不成立**：6 格长的车车头已经压在残骸上时，质心仍在 `0.75 格` 阀值外。必须按「**任一**所占地格到目标的距离」判定。
+- **`load_blueprint()` 会拒绝「蓝图需要的质量上限等级高于当前等级」**：用蓝图生成敌人/起始坦克时必须先 `builder.mass_cap_level = mass_cap_max_level`，否则 `boss_warlord.json`（`mass_cap_level: 5`）会被静默拒绝，Boss 波**一个敌人也不会生成**（不报错、只是 `alive_in_team` 为空）。
+- **`data_smoke` 的蓝图校验不检查“模块是否真的落在平台上”**：`example_assault.json` 的模块写在 `y=2`、平台只有 `y=3` 一行，`data_smoke` 一直通过，但 `GridBuilder.load_blueprint()` 会以「engine_medium 未落在平台上」拒绝。**校验器通过 ≠ 能被加载**——用到某张蓝图前必须先跑一次 `load_blueprint()`。
+- **`_blueprint_price()` 与 `GridBuilder._recalculate_spent()` 必须同口径**：后者把 `mass_upgrade_spent()`（质量上限升级累计价）也算进 `credits_spent`，前者早期漏算，于是 `mass_cap_level: 5` 的蓝图报「记录值 3454.00 与重算值 2954.00 不一致」（差 500 = 60+80+100+120+140）。这条错误会让 `data_registry.load_all()` 整体返回 false，**下游全部脚本都会以 `*_DATA_FAILED` 退出**——排查时要先看数据层而不是测试。
+- **同一文件的 `replace` 把整块旧代码又写了一遍会直接产生重复 `var`**：`main.gd` 给 `_enter_survival()` 加诊断输出时，`replace` 范围包含了本该被取代的整段蓝图加载代码，结果 `var blueprint` 重复声明 → `Parse Error: There is already a variable named "blueprint" declared in this scope.`。`replace` 的语义是“**用 `new_lines` 取代** 该范围”，范围里原有的语句不会保留；写 `new_lines` 前要确认它只包含**结果**，不是“原尾部 + 新增”。
+- **`Object.get(属性名)` 对不存在的属性返回 `null`**，所以 `not x != null` 这种写法优先级混乱且恒为真，根本测不出东西；断言“某个布尔开关不存在”必须写 `x.get("…") == null`。
+- **端到端签名对随机性不敏感**：`_check_determinism` 早期拿 600 帧后的 `kills/houses/debris/credit` 拼签名比较不同种子，但那 600 帧里玩家不动、敌人未到，所有字段都是初值，签名与种子无关 → 断言永远失败。验证确定性应该**直接比对 LCG 流**（连续取 N 个 `_next_unit()` 拼字符串），或把真正由随机决定的状态（残骸的 `payout_kind` 分配模式）压进签名。
+- **批量 `File.Edit` 的行号必须来自同一份 `File.Read` 快照**：v3.7 把「鼠标分派」补丁写成 2723–2725，而那三行实际是 `_draw_survival_hull` 的函数体，结果把三行代码换成了六行分派代码，报 `Parse Error: Expected statement, found "Indent" instead` at 2769。`File.Search` 返回的行号**不能**当作编辑坐标（它不做整文件快照校验）；批量编辑前应把每个目标区间及其上下文都从同一份 `File.Read` 里确认。
+- **`replace` 会把区间里的东西全部丢掉**：`_check_modification` 插入时误把 `_check_no_combat_modification()` 调用写了两遍（第 32/33 行），因为 `insert` 的 `new_lines` 里多包了一行已存在的调用。插入前先看一眼目标行前后到底有什么。
+- **「净增口径」下的测试要小心基线**：`modification_cost()` 用的是「当前 `credits_spent()` − 进入时的基线」，所以**「拆下再装回」本来就是零支出**。想测「余额不足就回滚」必须先 `leave_modification()` → `enter_modification()` 重置基线，且用一件**没被拆过**的配件；否则测到的是零支出而不是余额不足（v3.7 首轮 `sv4.log` 就因此失败 3 条）。
+- **`File.Edit` 的 `insert` / `replace` 边界会把下一行吃掉**：在 `_ready()` 上方插入 `_editor_model()` / `_in_build_editor()` 时，`replace` 的 `new_lines` 重写了 `_ready()` 的函数体却没有带上它的 `func _ready() -> void:` 头，报 `Parse Error: Cannot return value of type "null" because the function return type is "bool"`（函数体里的 `return` 被归给了返回 `bool` 的 `_in_build_editor()`）。教训：**大范围 `replace` 之后必须重读整段邻域**，确认函数头/尾完整、没有吃掉相邻的 `func`。
+- **`replace` 的 `end_line` 写大了会静默删掉中间的函数**：改写 `_place_current()` 与 `_option_ids()` 时把区间多框了两段，连带删掉了夹在中间的 `_selected_definition()` 与 `_placement_error()`，报 `Function "_selected_definition()" not found in base self` 并连锁引发一串 `Cannot infer the type of "hovered"`。教训：**每一条 `File.Edit` 的起止行都必须对着同一份 `File.Read` 快照核过“区间里到底有哪几个函数”**；`File.Search` 的行号不能当编辑坐标。
+- **新 `var` 必须先声明再使用**：`_hover_menu_difficulty` 的绘制代码先写、成员声明后补，报 `Parse Error: Identifier "_hover_menu_difficulty" not declared in the current scope` 加 `Cannot infer the type of "hovered"`。教训：新增 `_hover_*` 这类成员时，**先加声明再写引用**；一旦看到 `Cannot infer the type of …`，优先怀疑上一行引用了未声明的标识符而不是类型标注问题。
+- **“玩家说没伤害”不等于“命中判定坏了”——必须先把两个层拆开测**：用户报告「发射炮弹似乎不能对敌人造成伤害」时，第一反应很容易去查 `projectile_field._sweep` / `shooter_team` / 坐标系。实测结果是命中链路完全正常（`impact_tank tag=enemy_1 part_index=28`，单发 5.0 伤），真正的问题是 ① 数值上 `cal_20` 对 armor 3 平台只有 5 伤/发而敌人 1835 总血量（TTK 128 s > 波次 45 s，**数学上不可能**）；② 表现上敌车只画一种颜色、命中时事件行不更新、HUD 无伤害读数。教训：**先写探针把「单发伤害 / 整波总伤害 / 击毁数」三个数拿下来**，再判断是链路错还是数值/反馈错。只修数值或只修反馈，用户依然会说没伤害。
+- **`_survival_scale() = 0.594` 的后果：一台 10 格宽的敌人只有约 95 px**：在这个尺度下“格子颜色变了”几乎看不见，所以生存页的命中反馈必须做到**独立的命中闪光 + 中心事件文案 + 累计伤害数字**三重，而不能只靠车体上色。
+- **平台格被摧毁后整个从 `parts` 里消失**：所以“平台总血量比”只反映**存活格**的平均血量。写 UI 时若把它叫「甲板完好度 100%」，玩家会以为一格没丢（实际已丢了 5 格）。正确做法：文案写「存活格均血」，并在同一面板里把「平台 N 格」的**当前值**也显示出来。
+- **`--script` 不能用来校验 `extends Node2D` 的页面脚本——必须用 `--check-only`**：本轮开头桌面出现弹窗 `Can't load the script 'res://scripts/main.gd' as it doesn't inherit from SceneTree or MainLoop.`，终端同时无限刷 `ERROR: Stack underflow! (Engine Bug) at: exit_function (modules/gdscript/gdscript.h:529)`。根因不是 `main.gd` 有语法错（它第 1 行是 `extends Node2D`，完全正确），而是命令写成了 `godot --headless --path . --script res://scripts/main.gd`——`--script` 要求目标是 `SceneTree`/`MainLoop` 子类（程序入口），页面脚本不是。加载失败后 GDScript 退出路径栈下溢，于是刷屏。**正确做法：`godot --headless --path . --check-only --script res://scripts/X.gd`**。更严重的是：**旧日志 `p1.log`/`p2.log`/`p3.log`（各 78 B、无 `Parse Error`）曾被我当作「`main.gd` 解析通过」的证据——该结论当时并不成立**，因为脚本根本没加载成功，78 B banner 只证明 Godot 启动了。必须做反向对照才可信：故意写坏的脚本产出 895 B 并明确报 `Parse Error: Identifier "undefined_symbol_here" not declared`，而正确脚本用 `--check-only` 仍只有 78 B——两者对比才能证明「无输出 = 解析通过」。
+- **残留的 Godot 进程会静默空转数小时并弹窗污染桌面**：本轮在桌面截图上发现 4 个孤儿进程，其中 `--script res://tests/physics_smoke.gd` 与 `--script res://tests/data_smoke.gd` 已各消耗 **8385 s / 7471 s** CPU（从前一天起挂着），另一个 `--script res://tests/_tmp_probe_rig.gd` 的源文件**早已删除**、成为纯孤儿。教训：每次大批量跑完 smoke/截图后，用 `Get-CimInstance Win32_Process -Filter "Name='godot.exe'" | ForEach-Object { $_.ProcessId.ToString() + ' | ' + $_.CommandLine }` 核对命令行与存活状态，并用 `Stop-Process` 清理；**判断“命令是否失败”不能只看 PTY 有没有输出，要先查进程与产物**。
+- **`if/else` 直接接 `| Out-File` 会触发 PowerShell 解析错误**：`if ($l) { ... } else { ... } | Out-File ...` 报「不允许使用空管道元素。 / EmptyPipeElement」。先把结果赋给变量再输出：`$out = 'NO_X'; if ($l) { $out = ... }; $out | Out-File ...`。
+- **`Callable.bind()` 追加的参数在调用参数之后**：抽 `_draw_hull_shared(..., colour_fn, ...)` 时，若用 `_match_part_colour.bind(base)`，则被绑函数签名必须写成 `_match_part_colour(part: Dictionary, base: Color)`——即**接收方在前、绑定值在后**，写成 `(base, part)` 会报参数类型不符。`--check-only` 只验语法，**验不出这类绑定错误**，必须实跑一次该页面的截图（`--screen=match` 等）并确认日志无 `Invalid call` / `Nonexistent function`。
+- **删除大段代码时，`File.Edit` 的 `replace` 区间每多框一行就会静默吞掉相邻符号**：本轮删 `main.gd` 旧远征页时连坐四次自伤——① 删 `SCREEN_EXPEDITION` 时区间框到 21–27，把相邻的 `SCREEN_MATCH` / `SCREEN_SURVIVAL` 一并删掉；② 改变量区时框到 105–111，删掉了 `_status_error` / `_capture_target`，并造成 `_hover_menu_difficulty` / `_dragging` 重复声明（`Parse Error: Variable "…" has the same name as a previously declared variable.`）；③ 删 `_process()` 里的远征分支时把前面那个 `if` 的 `queue_redraw()` 体也吞了（`Parse Error: Expected indented block after "if" block.`）；④ `SCREEN_DRIVE` 分支被写成重复两行。教训：**大删除要拆成“读一小段 → 删一小段 → `--check-only`”的循环**，不要一口气删多处；每轮 `--check-only` 都是 78 B 成本，远比事后反向排查便宜。另外 `replace` 的 `new_lines` 必须把**区间内你想保留的语句重新写一遍**——`replace` 是替换而非“删除中间部分”。
+- **`--check-only` 通过 ≠ 运行时正确；反过来 `--check-only` 报错就一定要当真**：本轮抽 `FxLayer` 时把 `Array` 改成 `RefCounted` 实例，`--check-only` 对 `main.gd` 与 `fx_layer.gd` 都是 78 B 干净，但方法解析（`.push()` / `.step()` / `.entries`）与类型替换是否真跑得通只有实跑截图能证明（日志无 `Invalid call` / `Nonexistent function`）。所以**重构后的验证链必须是：`--check-only` → 11 项 smoke → 至少一页截图且比对 sha256**。生存页 `ui_surv4.png` / `ui_surv5.png` / `p3_surv.png` / `p2_surv.png` 四轮 sha256 全部为 `bfa0382d…52a77c`，这种“像素级零改变”是重构未改变可见行为的最强证据。
+- **文档声称的模块归属可能一直是错的**：`docs/design.md` 有两处写「背景沿用/复用 `grid_field.gd`」，而全量搜索证明 `grid_field.gd` **从未被任何代码引用**——背景实际由 `main.gd` 的 `_draw_background()` 自绘。删除脚本时才暴露。教训：**删文件前先看文档怎么说它**，如果文档说某脚本负责某功能而代码里零引用，那可能是“文档错”而不是“脚本该留”。
+- **「截图 sha256 逐字节等价」这条证据链曾经是假的**：v3.10/v3.11 反复引用「四张截图 sha256 完全相同 = 重构无可见变化」。实际同一条 `--capture` 命令连续两次可以产出不同字节（实测 177682 B vs 177340 B，逐像素差 12993 个、最大通道和 546）。根因：`_*_capture_warmup()` 跑完固定步数后返回，而 `_capture_next_frame()` 还要 `await` **30 帧**才取图，这 30 帧里 `_process()` 仍按**真实 delta** 推进 `_*_simulate()` 并累加 `_time`——**预热步数固定、取图时刻不固定**。历史那些 hash 相同只是碰巧撞上了相近的帧时。修法：新增 `_capture_frozen`，`_process()` 开头早退；取图前设冻结，并**必须同时把过渡量 `_screen_opacity` / `_focus_rail_alpha` 显式置终值**，否则会冻结在淡入起点（实测截图只有 8587 B、几乎全黑）。修后连续两次截图逐字节相同（178280 B）。**教训：任何“逐字节等价”论证，前提是产出过程本身可复现；不先验证可复现性就引用 hash 相等，等于拿巧合当证据。**
+- **删文件时 `.gd` 与 `.uid` 要成对处理**：Godot 4 为每个脚本生成一个 `.uid` 旁文件。v3.11 P3a 只删了 5 个 `.gd`，对应 5 个 `.uid` 全部残留（`grid_field.gd.uid` / `hud.gd.uid` / `tank_visual.gd.uid` / `_tmp_capture_check.gd.uid` / `_tmp_drive_page.gd.uid`），直到 v3.12 才清掉。**教训：清点目录时不能只数 `.gd`；`Get-ChildItem *.gd` 与 `Get-ChildItem *.uid` 要分别核，孤儿 `.uid` 是删除未完成的信号。**
+- **文件计数类事实必须实测、且要分清删除发生在哪个目录**：v3.11 写「`scripts/` 20 → 16 文件」，实际是 **20 → 18**——因为 P3a 删的 5 个文件里有 2 个在 `tests/` 而非 `scripts/`，再算上 P2 新建的 `fx_layer.gd`，正确算式是 `20 − 3 + 1 = 18`。**教训：跨目录删除时，先按目录分别记账再算总数；文档里的“文件数”属于可实测事实，写之前跑一次 `(Get-ChildItem scripts/*.gd).Count`。**
+- **文件计数类事实必须实测、且要分清删除发生在哪个目录**：v3.11 写「`scripts/` 20 → 16 文件」，实际是 **20 → 18**——因为 P3a 删的 5 个文件里有 2 个在 `tests/` 而非 `scripts/`，再算上 P2 新建的 `fx_layer.gd`，正确算式是 `20 − 3 + 1 = 18`。**教训：跨目录删除时，先按目录分别记账再算总数；文档里的“文件数”属于可实测事实，写之前跑一次 `(Get-ChildItem scripts/*.gd).Count`。**
+- **验证“可复现”要分两步：同进程内两次 + 跨进程再跑一次**：v3.13 对 7 个钩子做了重验，先每个钩子连拍两次（`r_*_a` / `r_*_b`），再抽三个钩子在**另一个 godot 进程**里重跑（`r_*_c`），两次比对都 `SAME`。只验同进程内的两次是不够的——进程内可能存在被缓存的初始化状态，跨进程才能证明「从冷启动开始也确定」。**教训：基线图必须标注它是同进程验证还是跨进程验证；只做过前者的不能当永久基线。**
+- **整图 sha256 差异不等于渲染回归，必须做分区归因**：v3.13 发现新基线 vs 历史截图的整图 diff 达 3–4 万像素，看起来像大面积渲染变化；分区统计后才发现右 HUD 与状态栏是 **0 差异**，全部差异都在会随模拟推进变化的区域（战场坦克位置、计时、速度、装填状态）。**做法：把截图按页面常量切成左 HUD / 战场 / 右 HUD / 状态栏四个区，逐区统计 diff；再对关键面板（如 `SURVIVAL_MIRROR_RECT`）做裁切后整图 hash 比对。** 裁切后逐字节相同（56256 B / `df09e63e…`）才是「该面板渲染未变」的硬证据，比“整图 hash 不同”有意义得多。
+- **没有版本控制时，“before/after”在物理上不可做，必须说清而不能模糊**：本项目工作区**无 git 仓库**（`git rev-parse` 报 `fatal: not a git repository`），旧版本代码已不存在。因此任何“重做重构前对比”的承诺都无法兑现，只能做「新基线 vs 已保存历史截图」的归因分析。**教训：接“重验历史证据”类任务前，先确认能不能回到旧状态；不能的话要当场说明，并用替代方案（分区归因、裁切对比、跨进程复现）交出可验证的结论。**
+- **没有版本控制时，“before/after”在物理上不可做，必须说清而不能模糊**：本项目工作区**无 git 仓库**（`git rev-parse` 报 `fatal: not a git repository`），旧版本代码已不存在。因此任何“重做重构前对比”的承诺都无法兑现，只能做「新基线 vs 已保存历史截图」的归因分析。**教训：接“重验历史证据”类任务前，先确认能不能回到旧状态；不能的话要当场说明，并用替代方案（分区归因、裁切对比、跨进程复现）交出可验证的结论。**
+- **参数化一个「实验条件」时，必须同时做「不同值必须不同」的反向对照**：v3.14 给截图加了 `--steps=N`，只验「同 N 两次相同」是不够的——那个结果在参数被完全忽略时也会成立。必须再验「不同 N 必须产出不同图」（实测 `--steps=420` → 178280 B，`--steps=200` → 173254 B），才能证明参数真的接上了。**还要验「不传参数时与改前基线逐字节相同」**，否则可能悄悄改了默认行为、把历史基线全部作废。三个对照缺一不可。
+- **“这个维度不可验证”往往只是缺了一个实验旋钮，不是真的不可验证**：v3.13 曾写「战场区无法用整图 hash 验渲染回归，因为坦克位置/弹道会随模拟推进变化」。实际上只要把预热步数参数化，固定同一个 N 后战场区两次渲染**逐字节相同**（92207 B / `b16c7e15…`）。**教训：在文档里写下“无法验证”之前，先问一句「是我缺一个参数，还是这件事本质上不可观测」；前者应该去补参数，而不是写进局限声明里。**
+- 待补充（遇到新的坑请追加，并更新日期）。
+
+---
+
+## 9. 变更记录
+
+| 日期 | 版本 | 摘要 | 影响章节 |
+| --- | --- | --- | --- |
+| 2026-10-17 | v1.0 | 初始创建：元规则 M1–M8、文档地图、技术栈（Godot 4.7.2）、工程约定、术语表、上手流程、共识 A1–A17、已知陷阱 | 全文 |
+| 2026-10-17 | v1.1 | 修正质量单位定义（1 u = 1 格平台）；补充术语：`grip`、`turn_assist`、`differential_drive`、`inertia`（改为 `u·px²`）；新增 3 条已知陷阱（扭矩量纲、对称履带不转向、控制轴拆分） | §4.4 §5 §8 §9 |
+| 2026-10-17 | v1.2 | 落实用户对 Q1–Q5 的确认：① 修订 A10（炮管安装时可调向、安装后固定）；② 新增共识 A18（引擎供能 PU）、A19（信用点经济与可购买质量上限）、A20（驾驶舱为唯一必需核心与 `detach` 锚点）、A21（`aim` 建造期可调）；③ 术语表新增 `cockpit`/`credit`/`price`/`mass_cap_level`/`aim`，修订 `cannon`/`detach` 定义；④ 新增 2 条已知陷阱（`detach` 锚点、价格双写） | §5 §7 §8 §9 |
+| 2026-10-17 | v1.2.1 | 格式修正：共识表 A17/A18 之间误插空行导致表格被截断，已删除 | §7 |
+| 2026-10-17 | v1.3 | 落实用户对 Q12–Q14 的确认：① 新增 A22（驾驶舱双方默认可视，难度差异体现在 Bot 用不用该信息）；② 新增 A23（维修装置能修驾驶舱但修复量减半，被摧毁后不可修）；③ 新增 A24（质量上限不跨局保留，每局从 Lv.0 起） | §7 §9 |
+| 2026-10-17 | v1.3.1 | 交叉一致性校验修正：A23 补写“用户仅确认能修，未指定修复量”，把“减半”明确标为实现假设并指向 `design.md` Q15；文件头版本号对齐 | §7 §9 |
+| 2026-10-17 | v1.4 | M7 阶段纪律解除：用户指示“先实现简单 demo 来确认视觉效果”，改为**视觉原型阶段**（可建工程与视觉脚本，仍不写物理/弹药网络/AI/建造编辑器；原型示意数值不作基准）。同步：A15 改写为阶段变更记录、新增 A25；§4.3 目录结构补实际落地文件表；§8 新增 D1–D4 与 `max()` Variant 四条实测陷阱 | §1 §4.3 §7 §8 §9 |
+| 2026-10-17 | v1.5 | 落实用户新指示（单人 roguelike / 打坦克收集资源 / 升级赠送模块 / 可原地建造）：① 新增 A26；② §5 术语表新增 `expedition`/`sector`/`wave`/`scrap`/`inventory`/`runtime_build`/`intermission`/`run_summary` 共 8 条；③ §8 新增三条陷阱（运行期建造仍受 I1–I10、`scrap` 不可兑换、远征失败无留存） | §5 §7 §8 §9 |
+| 2026-10-17 | v1.7 | 落实用户指示“舍弃之前的 demo，重新实现 demo，包含菜单和建造系统”：M7 阶段改为交互原型阶段；新增共识 A28；旧版静态视觉 demo 从主场景移除，交互原型包含菜单、设置、网格放置/旋转/拆除、预算/质量/驾驶舱连通性反馈；仍不实现完整战斗玩法 | §1 §4.3 §7 §8 §9 |
+| 2026-10-17 | v1.8 | 完成交互原型 M0.6：Godot 实际启动与桌面操作验证通过；主菜单、设置、三层建造、放置/旋转/拆除、属性校验与返回链路均已确认 | §1 §4.3 §9 |
+| 2026-10-17 | v1.9 | 落实用户指示“按照 roadmap 开始正式实现游戏”：进入 M1 正式实现阶段；新增共识 A29；更新 M7 阶段纪律、M1 数据目录与数据驱动约束 | §1 §4.3 §7 §8 §9 |
+| 2026-10-17 | v2.0 | 完成 M1 核心数据层：10 个数据文件/目录、`data_registry.gd`、`data_validator.gd`、主场景启动校验、正常/异常 smoke tests 全部通过；下一步进入 M2 建造编辑器 | §1 §4.3 §7 §8 §9 |
+| 2026-10-17 | v2.1 | M2 建造编辑器核心进入进行中：正式主场景接入 `module_defs.gd` / `grid_builder.gd`，新增三层编辑、平台工具、校验、预算质量、蓝图和 smoke 回归；运行期 `BUILD_MODE` 留待后续 | §1 §4.3 §7 §8 §9 |
+| 2026-10-17 | v2.2 | **完善菜单动画与建造页鼠标交互**：加入菜单淡入、焦点轨道、菜单/设置/建造 hover、配件滚轮、统一绘制/命中几何、鼠标网格定位与放置/拖动/右键拆除；修正 Viewport 鼠标坐标二次缩放陷阱；主场景与三项 smoke 回归通过 | §1 §4.3 §8 §9 |
+| 2026-10-17 | v2.3 | **完成 M2 运行期 `BUILD_MODE` 并关闭 M2**：新增 `scripts/runtime_builder.gd`（scrap 支付、按格施工计时 0.6s、受击中断不返还、拆解返还 0.5、运行期质量上限升级、仅 `EXPEDITION`、单施工任务）与 `tests/runtime_build_smoke.gd`（13 项）；`grid_builder.gd` 新增 `budget_enabled` 分离编辑器 credit 与运行期 scrap；主场景新增四行菜单与远征施工页（施工中 lime 虚线轮廓 + 进度弧）；`docs/design.md` v2.5、`docs/roadmap.md` v2.5 同步；§8 新增 7 条已知陷阱 | §1 §4.3 §8 §9 |
+| 2026-10-17 | v2.4 | **完成 M3 坦克物理与操控**：新增 `scripts/tank_body.gd`（§5 自建刚体：逐格 `M/C/I`、差速驱动、固定 60 Hz 积分、AABB 硬碰撞与 `4+0.05·\|v\|` 撞墙伤害、后坐冲量、部件摧毁后同帧重算）、`cannon_bank.gd`（§6.5 单发容量、`reload_s` 冷却、口径强匹配、`aim` 战斗锁定）、`projectile_field.gd`（§8.1 线段扫掠弹道）与 `tests/physics_smoke.gd` / `tests/cannon_smoke.gd`；主场景新增第五项主菜单「试驾」与 `DRIVE_LAB` 沙盒页；`data/modules/systems.json` 五门炮补 `reload_s`/`recoil_px`，`globals.json` 补三个 `wall_impact_*` 键；新增共识 A30；§4.3 目录与已落地文件表补充 M3；§8 新增 8 条已知陷阱（对称性前提、贴墙零穿透、类型推断陷阱、`aim_steps` 与 `caliber` 区分、`--capture` 覆盖写、新页不得复用 `_draw_grid()`、输入插入位置与 key-up、炮管 smoke 前置状态）；`docs/design.md` v2.6、`docs/roadmap.md` v2.6 同步 | §1 §4.3 §7 §8 §9 |
+| 2026-10-17 | v2.5 | **Android APK 导出尝试（未成功）**：新增 `export_presets.cfg`（预设名 `Android`、`arm64-v8a`、`gradle_build/use_gradle_build=false`、debug 签名、输出 `.me/tmp/main/tankcraft-debug.apk`），实测 `godot --headless --path . --export-debug "Android" ...` 返回 `EXITCODE=1` 且 APK 未生成；阻塞原因为**导出模板缺失 + Android SDK 缺失 + `java_sdk_path` 未配置**，三者均需工作区外安装、需用户授权；新增共识 A31；§4.3 目录补 `export_presets.cfg` 与 Android 导出状态段；§8 新增 3 条陷阱（导出三件套、`javac` 非阻塞点、预设名必须一字不差） | §4.3 §7 §8 §9 |
+| 2026-10-17 | v2.6 | **移动端触屏操控完成设计（零代码）**：同步 `docs/design.md` v2.8 新增的 §11.6（输入抽象层、左虚拟摇杆、右侧虚拟按键组、触屏与键盘共存规则、建造页手势、HUD 重排与安全区、UI 缩放、常量落点、五步实现顺序）与 §14.10（十个 `touch` 常量）；新增共识 A32（移动端为后续必做方向，本轮仅设计，APK 导出暂停）；§4.3 新增“移动端触屏设计状态”段；§8 新增 9 条陷阱（触摸合成为鼠标事件、触屏绕过 hover、摇杆圆形归一化与死区重归一、轴值取 max 不相加、`touch` 块不可经 `global_number` 读、移动端 UI 必须重排而非缩小、开火连发不需节流器、restart/back 需二次确认而 fire 不需）；文件头版本 v2.5→v2.6。**本轮未创建任何 `touch` 块、未写任何触摸代码** | §4.3 §7 §8 §9 |
+| 2026-10-17 | v2.7 | **落实用户对 Q24–Q26 的裁定**：Q24 不需要右侧瞄准摇杆、Q25 暂不支持外接手柄、Q26 仅横屏（不做竖屏布局，HUD 只需一套上下分区）；新增共识 A33；§4.3 “移动端触屏设计状态”段改写为已裁定并标注 Q24–Q26 结论；文件头版本 v2.6→v2.7。**本轮不创建 `touch` 块、不写触摸代码** | §4.3 §7 §9 |
+| 2026-10-17 | v2.8 | **完成 M4 弹药输送网络**：新增 `scripts/ammo_network.gd`（端口几何由代码推导、4 邻接 + 反向 side 自动连接、BFS 层级与可达性、20 Hz 四步定序、每段容量 1 发、tee 轮询 / merge in0 优先 / cross 直通优先、口径不匹配逆向退回、弹药库 slot 与改进装置槽位、拥塞与断链查询、确定性事件流）、`tests/ammo_net_smoke.gd`（九阶段覆盖端口几何 + §7 七条验收，打印 `AMMO_OK`）；`data/globals.json` 新增 `conveyor_strand_grace_s`；`scripts/main.gd` 删除两处 `bank.load_all()` 改由网络供弹并新增管路/在途/拥塞/断链绘制与真实供弹 HUD；`grid_builder.gd` 的 `reset_demo()` 把 `cannon_20` 移到 (9,7) 打通演示供弹链。新增共识 A34（自动连接取代显式路由面板，推迟到 M6）；§4.3 补 M4 落地文件与状态段；§8 新增 15 条陷阱（端口几何需代码推导、拥塞≠路由失效、角色专属字段、`_delivery_kind`、两段式装填、`fill_cannons(null)`、`_probe` 三态、测试装置质量上限与 4-连通、`ammo_factory_76` footprint、`body.parts` 键差异、`reset_demo` 位置不可挪回、`routes` 死代码、`printerr` 渲染、`File.Edit` 写重守卫、`sin` 相位）；文件头版本 v2.7→v2.8。**页面证据为脚本驱动 + 截图像素检查，非人工桌面交互验证；远征页未接入弹药网络** | §1 §4.3 §7 §8 §9 |
+| 2026-10-17 | v2.9 | **修正 M3 转向手感缺陷（角阻尼量纲错误）**：用户反馈“试驾坦克时旋转阻力过小，转一下会原地旋转很久”。根因为 `tank_body.gd` 的 `α = (τ - k_ang_drag·ω·|ω|)/max(I,I_MIN)` 把二次阻尼项当作扭矩从 `τ` 里减，量级差 10⁵，实测松手 100 s 后 `ω` 仍为 2.9970。修正为角减速度量纲并在 `steer == 0` 时叠加线性松手制动 `- k_ang_brake·ω`；`data/globals.json` 新增 `k_ang_brake: 5.0`（走 `global_number()`，未内联）；`tests/physics_smoke.gd` 新增 `_check_spin_stop()` / `_measure_spin_stop()` 并把 `spin_stop_s` 写入汇总行。实测 `spin_stop_s` 由“从未收敛”变为 **0.62 s**，`turn180_s` 1.32 → **1.35 s**（+2.5%），单侧履带战损偏转保留（0.5608 rad/s）；七条 smoke 全过、`DATA_ERROR_OK errors=17` 未变。§8 新增 3 条陷阱（阻尼量纲、二次型阻尼低速无力、验收项缺失）。**页面证据为脚本预热 + 截图像素检查（驾驶页角速度 −2.95 → −0.25 rad/s），非人工桌面交互验证**；`docs/design.md` v3.1、`docs/roadmap.md` v3.1 同步 | §8 §9 |
+| 2026-10-17 | v3.0 | **完成 M5 战斗结算与可拆解摧毁并同步三份文档**：新建 `scripts/damage_system.gd`（881 行 / 30165 字节 / `a9f93935`，命中层序 module→platform→mobility、护甲减免 + 15% 保底 + pierce、三种护盾状态机与护盾穿透分账、9 种升级与 `stack_limit`、AOE/灼烧/减速/延迟爆炸/分裂、殉爆与引擎爆炸、残骸、维修（驾驶舱 ×0.5）、以驾驶舱格为锚点的 4-连通 detach、驾驶舱判负短路）；`tank_body.gd` 补 `armor`/`key` 且 `damage_part()` 返回 `Dictionary` 并回写 `GridBuilder`；`grid_builder.gd` 新增 `force_remove()`（跳过两项建造期约束、不压撤销栈）；`projectile_field.gd` 增加坦克格集合求交与 `upgrades`/`damage_scale`；`data/globals.json` 新增 21 个 `global` 键；`main.gd` 完成驾驶页接线与 M5 HUD（护盾行、状态行、装填边沿脉冲、动效层）；新增 `tests/combat_smoke.gd`（626 行 / 28342 字节 / `0909e0a7`，11 阶段，`COMBAT_OK`，`COMBAT_LOAD shots=200 frames=30 per_frame_ms=1.65`）。本周期另修 `damage_system.gd` 缺失的 `"slow"` 键（未改变任何玩法数值）与 `combat_smoke.gd` 的 4 类**测试装置**缺陷（非产品缺陷）。§8 新增 13 条陷阱（含 U+FFFD 字符损坏、字典字面量整块重写、`succeeded` ≠ 内容正确、量纲纪律、间接指标误判）。**如实声明**：六条有意简化已写入 `docs/design.md` §8.9.6；**自击缺陷已由截图实证发生（最近事件「命中本体装甲」）但 M5 未修，列为 M6 前必修**；`detach` 动效从未被观察；第 7 条验收只能表述为“逻辑步进的帧预算内断言通过”；无人工桌面交互验证、无 Android 验证、**任何 APK 均不存在**；远征页未接入战斗；显式路由面板未实装；移动端零代码。`docs/design.md` v3.2（2327 行 / 199792 字节 / `797226e1`）、`docs/roadmap.md` v3.2（474 行 / 55566 字节 / `49ccc2e3`，并修复第 285 行 U+FFFD）同步 | §1 §2 §4.3 §7 §8 §9 |
+| 2026-10-17 | v3.1 | **完成 M6 机器人 AI 与完整对局并同步三份文档**：新建 `scripts/duel.gd`（10066 / `7ed7fcaa`，双坦克各持 builder/tank/bank/network/damage、共用弹道场、伤害按 `shooter` 归因）、`scripts/match_state.gd`（5224 / `4fc8785a`，`BUILD/DEPLOY/BATTLE/RESULT`、3 s 部署倒计时、驾驶舱被毁同帧转 `RESULT`、超时与同帧双毁均比已造成伤害）、`scripts/bot_ai.gd`（11154 / `fcca7e75`，三层 2/10/60 Hz、四档难度全读 `globals.ai`、精英与王牌用**割点**分析找断岛点、显式 LCG 不用 `randf`）、`scripts/expedition_run.gd`（10924 / `a8628539`，5 层×3 波、坦克跨层不回滚、`INTERMISSION` +600 cr、升级三选一入 `inventory` 不贴装、`scrap = price × 0.35` + 击毁 +60、驾驶舱被毁立即 `RUN_SUMMARY`、结束清零）；`data/globals.json` 新增 `ai` 块 15 键（92 行 / 2619 字节 / `4698e68c`）；`data/blueprints/` 新增 **12 张 Bot 蓝图**（四档各 3 张，均经 `load_blueprint` + `validation_report` 通过）；`scripts/module_defs.gd` 新增 `block_number` / `block_int`；**修掉 M5 两项遗留**：`projectile_field.gd` 加 `shooter_tag` 过滤治自击、`tank_body.gd` 加 `damage_router: Callable` 治“撞墙不连锁”；`scripts/main.gd` 新增 `SCREEN_MATCH`、菜单第 3 项「对人机对战」与 `--screen=match`。新增 `tests/match_smoke.gd`（`MATCH_OK`）与 `tests/expedition_smoke.gd`（`EXPEDITION_OK`），`combat_smoke.gd` 增 `_check_no_self_hit()`。其中验收 2/3 只有参数层证据、无胜率统计；验收 13 的暂停键是 `P` 而非 `Esc`；验收 15 无卡面 UI；王牌档诱骗与弹量预判未实现；远征每波仅 1 台敌方；障碍仍不可摧毁；赠品未接原地建造；**无人工桌面交互验证、无 Android 验证、任何 APK 均不存在**。`docs/design.md` v3.3、`docs/roadmap.md` v3.3 同步 | §1 §4.3 §7 §8 §9 |
+| 2026-10-17 | v3.2 | **按用户新描述把单人模式重写为「肉鸽波次生存」，本轮只改文档不改代码**。新增共识 **A35**（逐条对应用户八项要求），并把 **A26 标为“已被 A35 覆盖”**；§5 术语表重写单人相关 12 行（`expedition` 改为波次生存、`wave` 去掉 `sector` 层、新增 `experience`/`level_up`/`shop`/`reroll`/`house`/`debris`/`prop`/`boss_wave`，并将 `scrap`/`intermission`/`runtime_build` 标为废弃或停用）；文件头重写为 v3.2 并新增四段：v3.4 重要变更（必读）、其他状态、**已知缺陷 R17**（碰撞/损坏 9 个实测缺陷，M9 前置必修）。同步 `docs/design.md` v3.4（§1.1 §1.3 §3.1 §3.3 §3.4 全节 §4.7 停用 §9.2 §11.4.4 §11.4.4.1 §14.8 §15 ADR-017 §16 §17）与 `docs/roadmap.md` v3.4（§0 §1 新增 M9 行 §2 M9 全节 §2 M6 覆盖声明 §4 新增 R17/R18 §5）。**本轮未改任何代码与 `data/*.json`**——现存 `expedition_run.gd` / `runtime_builder.gd` 仍在且仍能跑通旧测试，但验证的是已废弃的旧玩法 | §1 §5 §7 §9 |
+| 2026-10-17 | v3.4 | **完成 M9 波次生存与 R18 多敌人同屏，并接入主场景**。① 数据：`data/globals.json` 删除 `expedition` 块、新增 `survival` 块 36 键；`arena_standard.json` 新增 `props`；新增 `data/blueprints/boss_warlord.json`（128 平台格 / 17 部件 / 231.8 u）。② 逻辑：新建 `scripts/survival_run.gd`（`STAGE_BATTLE / LEVEL_UP / SHOP / SUMMARY`）；`data_registry._blueprint_price()` 补算质量上限花费。③ 表现：`scripts/main.gd` 新增 `SCREEN_SURVIVAL` 与四张页面（战斗 / 升级三选一 / 商店 / 结算）+ 四个 `--screen=survival*` 钩子，主菜单第 1 项改为「生存」。④ R18：`duel` 新增 `TEAM_PLAYER` / `TEAM_ENEMY`、`add_side(…, team)`（拒绝空/重复 tag）、`team_defeated` / `team_damage` / `hostiles_of` 等；`projectile_field` 新增 `shooter_team` 与 `obstacle_index`；`match_state` 改按 team；`bot_ai._refresh_target()`。⑤ **发现并修掉 6 个缺陷**：升级菜单永远弹不出来（`_pending_level_ups()` 重算恒为 0）、碾残骸坐标系用错且质心距离不适用于长车体、Boss 波零敌人（未抬 `mass_cap_level`）、`tier_for()` 未实现「Boss 档位 ≥ 精英」、`example_assault.json` 本身是无效蓝图（改用代码现场摆放）、结算页文案与清零时机不符。⑥ 回归：新增 `tests/survival_smoke.gd`（12 阶段 + 升级菜单可达性 4 条断言）、`match_smoke` +3 阶段；11 项逐字通过（`DATA_OK files=23 … blueprints=14`、`DATA_ERROR_OK errors=30`、**`SURVIVAL_OK`**）。§8 新增 9 条陷阱（推导量不可推导、两套格坐标系、质心距离不适用、`load_blueprint` 拒高等级需求、`data_smoke` 不查平台覆盖、`_blueprint_price` 口径、`replace` 重复声明、`Object.get` 优先级、端到端签名对随机不敏感）。**如实声明**：四张页面截图（`m9_battle.png` / `m9_levelup.png` / `m9_shop.png` / `m9_summary.png`，均 1920×1080）为**脚本预热 + 像素检查，非人工交互验证**；**无 Android 验证、任何 APK 均不存在**；**用户要求的「改装按钮」仍未实现**；`boss_armor` / `safe_radius` 未实现；商店稀有度权重被当作价格倍率且方向反；`expedition_run.gd` 与 `runtime_builder.gd` 已从主菜单断连且回退到代码内默认值 | §1 §4.3 §7 §8 §9 |
+| 2026-10-17 | v3.5 | **补上改装 UI 入口（兼现八点需求第 6、7 点）**。① 逻辑：`scripts/survival_run.gd` 33633 → 38167 B（941 行）——新增 `STAGE_MODIFY` 子阶段与 `modify_return_stage` / `modify_credit_baseline` / `modify_spent_total`；`enter_modification()` 只接受 `LEVEL_UP` / `SHOP`（`BATTLE` 一律拒）；`modification_cost()` 按**净增建造支出**；`leave_modification()` 回到**进入时的阶段**；`mount_from_inventory()` 按模块 `layer` 分发 + 阶段门槛 + 余额不足 `undo()` 回滚；新增 `place_platform_at()` / `dismantle_at()`（后者用 `validation_report()` 兜底 I5/I7/I8）；`commit_modification()` 从空壳变真实扣款。② 表现：`scripts/main.gd` 131844 → 150063 B（3296 行）——升级页卡片下方与商店页标题行右侧各一个「M 改装坦克」按钮（`M` 键或左键）；新增改装页（库存列表 / 24×24 网格 / 金钱·支出·质量·校验信息栏）；`_handle_survival_mouse()` 接入 `_handle_mouse`；`--screen=survival_modify` 截图钩子；几何与坐标换算自带（`SURVIVAL_MODIFY_*`），**不复用** `_draw_grid()` / `_grid_rect()` / `_mouse_to_cell()`。③ **明确不做**：不暴露 `GridBuilder.buy_mass_upgrade()`（`budget_enabled = false` 时它免费升上限，等于绕过 `credit` 的特权路径）；不提供矩形/直线铺平台与撤销重做按钮（已写入 design §3.4.7「已知简化」）。④ 回归：`tests/survival_smoke.gd` 25107 → 30724 B（645 行），新增 `_check_modification()`（85 行 / 26 条断言）；**11 项逐字通过**（`PHYSICS_OK mass=61.0 inertia=104064 v_max=192.1 turn180_s=1.35 spin_stop_s=0.62` / `CANNON_OK shots=3 reload76=1.10 range=1400` / `AMMO_OK` / `BUILD_OK cells=43 modules=6 mobility=1 spent=698 mass=62.9` / `DATA_OK files=23 modules=45 ammo=5 upgrades=9 arenas=3 blueprints=14` / `DATA_ERROR_OK errors=30` / `COMBAT_OK` / `MATCH_OK` / `EXPEDITION_OK` / `RUNTIME_OK scrap=751.0 level=1 cells=41 modules=7 mobility=1` / `SURVIVAL_OK`）。§8 新增 3 条陷阱（批量编辑行号、`replace` 丢内容、净增口径的测试基线）。**如实声明**：三张截图（`m9_modify.png` / `m9_levelup_btn.png` / `m9_shop_btn.png`，均 1920×1080）为**脚本驱动 + 像素检查，非人工交互验证**——鼠标点按钮与键盘贴装只有 headless 断言覆盖，**从未人工点过**；**无 Android 验证、任何 APK 均不存在**；`boss_armor` / `safe_radius` 未实现；商店稀有度权重被当作价格倍率且方向反 | §1 §4.3 §7 §8 §9 |
+| 2026-10-17 | v3.6 | **修用户报告的界面四项（不新增玩法）**。用户原话：「游戏打开时默认最大窗口，各种菜单交互非常难用，鼠标都没有良好适配，而且菜单中很多元素位置错误产生重叠，生存模式中的建筑模式为什么没有复用主菜单的建造系统」，并澄清「我的意思是游戏打开时应该默认最大窗口」（注意：**不要把窗口改回 1280×720 小窗**）。① **窗口**：`project.godot` 905 → 1120 B，新增 `window/size/mode=2`（`WINDOW_MODE_MAXIMIZED`）+ `window/size/resizable=true`，1280×720 override 仅作还原尺寸；`_ready()` 再显式确认并打印实测值，实测 **`WINDOW_MODE mode=2 size=(1842, 1057)`**。`stretch/mode="viewport"` + `aspect="keep"` 保证设计坐标恒为 1920×1080，最大化不动任何页面坐标。② **鼠标**：新增 `_hover_survival_button` / `_hover_modify_button` / `_hover_menu_difficulty` 与 `_handle_survival_mouse()`——升级页三张卡点击 → `take_level_choice(index)`、商店页六个商品格点击 → `buy_shop_slot(index)`、两页的「M 改装坦克」与改装页「完成改装」按钮均可点；滚轮/拖拽门槛由 `_screen == SCREEN_BUILD` 改为 `_in_build_editor()`。**v3.8 之前升级页 / 商店页 / 改装页没有任何鼠标路径**。③ **重叠**：主菜单「难度：…」（y=654）与提示（y=700）都压在六行菜单最后一行「退出」（616–688）上；现难度改为菜单**下方**独立可点按钮（`MENU_ROW_Y + 6×56 + 16 = 712`，460×44），提示下移到 y=800；并补上 `A`/`D`/`←`/`→` 切难度（**旧提示行写了「A / D 切换难度档」，但 `_handle_key()` 的 `SCREEN_MAIN` 分支里根本没有这个键**）。改装页「完成改装」按钮由 y=96 上移到 y=80 以避开网格 `cursor NN:NN` 读数。④ **改装页复用建造系统**：抽出 `_editor_model()` / `_in_modify_mode()` / `_in_build_editor()`，将 16 个编辑器函数里的 48 处 `builder.` 改为 `_editor_model().`；`_draw_survival()` 在 `STAGE_MODIFY` 时调 `_draw_build()` + `_draw_modify_overlay()`，键盘走 `_handle_build_key()`（仅拦 `Ctrl+S`/`Ctrl+O`），鼠标转发给 `_handle_mouse()`；新增改装期支付分支 `_option_ids()`（只列库存本层件）/ `_mount_selected_inventory()` → `survival.mount_from_inventory()` / `_place_platform_cell_at()` → `survival.place_platform_at()` / `_remove_current()` → `survival.dismantle_at()`；**删掉整套独立改装页**（15 个 `_survival_modify_*` 函数 + 六个 `SURVIVAL_MODIFY_*` 常量，约 183 行），`main.gd` 150063 B / 3296 行 → **148460 B / 3261 行**。⑤ **撤回 v3.7 的两项「手感简化」**：改装页现在随建造页一起拥有矩形/直线铺平台、拖动铺、`Ctrl+Z`/`Ctrl+Y` 撤销重做与 I1–I10 错误列表格式。⑥ **自伤 4 次均已修**：`replace` 吃掉 `func _ready()` 行、`replace` 端行过大误删 `_selected_definition()` / `_placement_error()`、重复的 `SCREEN_EXPEDITION` hover 分支、`_hover_menu_difficulty` 声明晚于使用。⑦ **回归**：全套 11 项逐字通过（`AMMO_OK` / `BUILD_OK cells=43 modules=6 mobility=1 spent=698 mass=62.9` / `CANNON_OK shots=3 reload76=1.10 range=1400` / `COMBAT_OK` / `DATA_ERROR_OK errors=30` / `DATA_OK files=23 modules=45 ammo=5 upgrades=9 arenas=3 blueprints=14` / `EXPEDITION_OK` / `MATCH_OK` / `PHYSICS_OK mass=61.0 inertia=104064 v_max=192.1 turn180_s=1.35 spin_stop_s=0.62` / `RUNTIME_OK scrap=751.0 level=1 cells=41 modules=7 mobility=1` / `SURVIVAL_OK`）；`tests/survival_smoke.gd` 未改。同步 `docs/design.md` v3.8（新增 §11.4.2.1、改写 §3.4.7、§2.3 补窗口配置、§17 追加行）与 `docs/roadmap.md` v3.8（§0 新增界面/窗口行、§2 M9 状态与缺口 1、§5 追加行）。**如实声明**：三张截图（`ui_menu2.png` 161034 B / `ui_modify3.png` 251706 B / `ui_levelup2.png` 159991 B，均 1920×1080）为**脚本驱动 + 像素检查，非人工交互验证**——本轮新增的鼠标点击与键盘贴装路径只有 headless 断言与代码检查覆盖，**从未人工点过任何控件**；**无 Android 验证、任何 APK 均不存在**；`boss_armor` / `safe_radius` 未实现；商店稀有度权重被当作价格倍率且方向反 | §1 §8 §9 |
+| 2026-10-17 | v3.7 | **修「炮弹似乎不能对敌人造成伤害」+ 生存页战斗 UI 重做**。用户原话：「优化战斗系统，发射炮弹似乎不能对敌人造成伤害，生存模式的 UI 也需要优化，要有一个小窗口显示一个坦克的镜像，展示坦克每个模块的状态」。① **先拿数字再改**：三个临时探针实测——命中链路**正常**（`PROBE impact_tank tag=enemy_1 part_index=28`，单发 `damage_dealt_player=5.00`）；但整波 45 s 连续开火只有 `fired=89 hit_tank=78 player_damage_total=435.50 kills=0`。根因两层：**数值**（`PROBE3 recruit1 platform_cells=30 total_platform=1350 modules=485 grand_total=1835`；`cal_20 per_hit_vs_platform=5.0 hits_to_kill_all=367`；`cal_20_ttk_s=128.4` > 波次上限 45 s ⇒ 数学上不可能击毁）+ **反馈**（敌车整台只画一种颜色不看 HP、命中坦克时「最近事件」不更新、HUD 无累计伤害读数）。② **数值修复**：`scripts/survival_run.gd` 38167 → 40812 B，新增 `STARTER_SIZE` / `STARTER_MOBILITY` / `STARTER_MODULES` + `static func build_starter(model)`，起始车 8×2 平台 + `track_light` + `engine_small` + `cockpit_light` + `ammo_factory_76` + `conveyor_straight` + `cannon_76`；`main.gd` 的 `_build_survival_starter()` 与 `tests/survival_smoke.gd` 的 `_make_rig()` **都转调它**（唯一布局来源）。探针实测同一波内 `hits=25 destroyed=21 parts 37->14 damage=1397.5 kills=1 enemy_alive=false`。③ **表现层**：`scripts/main.gd` 148460 → 160536 B——`_draw_survival_hull()` 逐部件按血量着色（`_survival_hull_colour()`）；`_survival_step()` 新增 `impact` / `destroyed` / `core_destroyed` / `shield_hit` 分支（文案区分「命中 enemy_N」/「本体被命中」/「击毁敌 X」/「自损 X」）；新增 `_survival_fx` 瞬时动效 + `_hit_flash_at` 命中闪光（`HIT_FLASH_TIME=0.14 s`，倒计时只在固定步长里推进）；新增 `_survival_cell_world()`（事件 `cell` 是建造格坐标，须经该侧刚体转世界坐标）；HUD 左列新增「总输出 N」。④ **坦克镜像面板**：`SURVIVAL_MIRROR_RECT = Rect2(1560, 436, 312, 400)`（右 HUD 下半部，键位提示到 y=410、`DRIVE_HUD_RIGHT` 到 y=852，不重叠）+ `_draw_survival_mirror()`：俯视镜像 + 「平台 N 格 · 模块 N · 行进 N」+「存活格均血 N%」进度条 + 逐部件状态行（按血量比升序、★ 标驾驶舱、`MIRROR_ROW_VISIBLE=6`）。⑤ **截图钩子**：`_survival_capture_warmup()` 从「第 60 步开一炮」改为「原地持续开火 420 帧」（旧截图里看不到损伤，用户看到的「没伤害」有一部分就是这种截图造成的）。⑥ **回归**：`tests/survival_smoke.gd` 30724 → 32423 B，新增 `_check_player_fire_damage()`（`fire_hits_landed` / `fire_damage_dealt` / `fire_destroys_parts` / `fire_kill_within_wave`）；**11 项逐字通过**（`AMMO_OK` / `BUILD_OK cells=43 modules=6 mobility=1 spent=698 mass=62.9` / `CANNON_OK shots=3 reload76=1.10 range=1400` / `COMBAT_OK` / `DATA_ERROR_OK errors=30` / `DATA_OK files=23 modules=45 ammo=5 upgrades=9 arenas=3 blueprints=14` / `EXPEDITION_OK` / `MATCH_OK` / `PHYSICS_OK mass=61.0 inertia=104064 v_max=192.1 turn180_s=1.35 spin_stop_s=0.62` / `RUNTIME_OK scrap=751.0 level=1 cells=41 modules=7 mobility=1` / `SURVIVAL_OK`）。§8 新增 3 条陷阱（玩家报没伤害先拆数值/反馈两层、`_survival_scale()=0.594` 下上色不够、平台格被毁后从 `parts` 消失）。同步 `docs/design.md` v3.9（新增 §3.4.8 起始坦克与 §11.4.4.2 镜像面板与命中反馈、§17 追加行）与 `docs/roadmap.md` v3.9（§0 新增生存页战斗 UI 行、§2 M9 缺口第 8 条、§5 追加行）。**如实声明**：截图 `ui_surv4.png`（1920×1080）为**脚本驱动 + 像素检查，非人工交互验证**——本轮新增的命中反馈与镜像面板从未人工点过/看过；**敌人没有镜像面板**；四个临时探针跑完已删除；**无 Android 验证、任何 APK 均不存在**；`boss_armor` / `safe_radius` 未实现；商店稀有度权重被当作价格倍率且方向反 | §1 §8 §9 |
+| 2026-10-21 | v3.8 | **架构审查（只审查不改码）+ 修复审查发现的两处缺陷**。用户原话：「检查整体代码架构是否是模块化实现」，随后「继续」。① **审查实测结论**：`scripts/` 20 文件约 260 KB，`main.gd` 160536 B / 187 函数 / 69 const / 约 84 var = **61.7%**；54 条 preload 边为**单向 DAG**（`data_validator←data_registry←module_defs` → 领域层 9 脚本 → `main.gd`），**无循环依赖**、**反向引用零命中**；领域层体量 5–41 KB 且每个都被独立 smoke 直接驱动（`physics`→`tank_body`、`cannon`→`cannon_bank`+`projectile_field`、`ammo_net`→`ammo_network`、`build`→`grid_builder`、`combat`→`damage_system`、`match`→`duel`+`match_state`+`bot_ai`、`survival`→`survival_run`、`data`/`data_error`→`data_registry`+`data_validator`）；数据访问纪律良好（`block_*`/`global_*` 共 137 处，直接 `registry.globals` 仅 8 处、6 处合规）。② **修 P0（真实 bug）**：`_match_step()` 第 1134 行结尾误调 `_drive_tick_fx()`，而它只递减 `_drive_fx`——`_match_fx` 的 `left` **从无递减点**，`_draw_match_fx()` 用 `left/life` 算 alpha 故恒为 1，对战页脱落环一旦生成就永久常驻满亮度。新增 `_match_tick_fx()` 并改调。③ **修 P1（重复实现）**：三份逐行相同的 FX 衰减（`_drive_tick_fx` 11 行 / `_survival_tick_fx` 循环 9 行 / `_match_tick_fx` 9 行）合并为 `static func _fx_decay(list, step_time) -> Array`；三段同构的坦克绘制合并为 `_draw_hull_shared(hull, origin, heading, scale_factor, colour_fn, alpha_fn, offset_fn, cell_hook)`，差异由 4 个回调表达（`_draw_match_hull` 20→7 行、`_draw_drive_hull` 26→9 行、`_draw_survival_hull` 18→7 行，另新增 `_match_part_colour` / `_drive_part_offset` / `_drive_cell_hook` / `_survival_part_colour` / `_survival_hull_alpha`）。`main.gd` 160536 → 162148 B。④ **像素级等价证据**：生存页新截图 `ui_surv5.png`（177553 B）sha256 **`bfa0382d4181ada5396da6574bae50ae5ce0f3be01a73a4b3e0cc4cffc52a77c`**，与重构前 canonical `ui_surv4.png` **逐字节完全相同**；对战页 `ui_match1.png`、试驾页 `ui_drive9.png` 均正常渲染且日志无 `SCRIPT ERROR`。⑤ **回归**：11 项 smoke 全绿且数值与基线**逐字一致**（`AMMO_OK` / `BUILD_OK cells=43 modules=6 mobility=1 spent=698 mass=62.9` / `CANNON_OK shots=3 reload76=1.10 range=1400` / `COMBAT_OK` / `DATA_ERROR_OK errors=30` / `DATA_OK files=23 modules=45 ammo=5 upgrades=9 arenas=3 blueprints=14` / `EXPEDITION_OK` / `MATCH_OK`（`MATCH_RUN steps=18000 outcome=timeout_player player_dmg=500.0 enemy_dmg=313.0 player_parts=13 enemy_parts=18`）/ `PHYSICS_OK mass=61.0 inertia=104064 v_max=192.1 turn180_s=1.35 spin_stop_s=0.62` / `RUNTIME_OK scrap=751.0 level=1 cells=41 modules=7 mobility=1` / `SURVIVAL_OK`）。⑥ **修掉本轮自伤的环境事故**：桌面弹窗 `Can't load the script 'res://scripts/main.gd' as it doesn't inherit from SceneTree or MainLoop.` + 终端无限刷 `Stack underflow! (Engine Bug)`，根因是**我用了 `--script` 去跑 `extends Node2D` 的页面脚本**（`--script` 要求 `SceneTree`/`MainLoop` 子类），正确命令是 `--check-only --script`；顺带清掉 **4 个孤儿 godot 进程**（其中两个分别空转 **8385 s / 7471 s** CPU，一个源文件已删除）。§8 新增 4 条陷阱（`--script` vs `--check-only`、旧日志证据不成立、孤儿进程、`Callable.bind` 参数顺序、PowerShell `if/else | Out-File`）。**如实声明**：对战页动效「随时间真的淡出」仍只有**代码层证据**（截图是单帧，无法证明时间维度），**未做连续帧观察、未做人工桌面交互验证**；审查查出但**本轮未修**的还有：`main.gd` 上帝类本身（187 函数，页面间零语言级隔离）、旧远征页约 183 行绘制副本（`_draw_expedition_grid` / `_draw_expedition_sidebar` 是 `_draw_grid` / `_draw_build_sidebar` 的翻版）、`main.gd:195/403` 读**已删除的 `expedition` 块**并硬编码 `* 4.0`、`main.gd:1872` 文案仍宣称「价格来自 data/globals.json 的 expedition 段」（**该句当前为假**）、`MATCH_DIFFICULTY` 与 `DRIVE_ARENA_ID` 硬编码在页面层、死依赖 `runtime_builder`/`expedition_run`、死代码 `tank_visual`(9284 B)/`hud`(3171 B)/`grid_field`(1452 B) 共 13907 B / 310 行零引用、遗留测试 `_tmp_capture_check.gd`/`_tmp_drive_page.gd`；**无 Android 验证、任何 APK 均不存在** | §1 §8 §9 |
+| 2026-10-21 | v3.9 | **P3 清理死代码与死依赖 + P2 抽取 FX 层**（用户指示：「继续P2P3」）。① **P3a 删 5 个零引用文件**（删前经 `Get-ChildItem scripts,tests,scenes,docs -Recurse -File | Select-String` 确认代码零命中、`project.godot` 无 autoload 引用）：`tank_visual.gd` 9284 B / `hud.gd` 3171 B / `grid_field.gd` 1452 B（共 13907 B / 310 行）+ `tests/_tmp_capture_check.gd` 2208 B + `tests/_tmp_drive_page.gd` 4094 B，合计 20209 B。② **P3b 删旧远征页**：`main.gd` 162148 → 143127 B（−401 行）——`RuntimeBuilder` / `Expedition` 两个死 preload、`SCREEN_EXPEDITION` / `EXP_PANEL` / `EXP_STATUS` 常量、`var runtime` + 5 个 `_exp_*` 变量、**16 个远征控制函数 + 7 个远征绘制函数**（含只被远征页用的 `_draw_dashed_rect`）、以及 `_ready`/`_process`/`_input`/`_handle_key`/`_set_screen`/`_update_hover`/`_handle_mouse`/`_draw`/`_handle_capture_request` 里全部 `SCREEN_EXPEDITION` 分支全部移除；**顺带消除读已删除 `expedition` 块 + 硬编码 `* 4.0` 的两处死代码与那句「价格来自 data/globals.json 的 expedition 段」假文案**。`expedition_run.gd` / `runtime_builder.gd` 脚本本体与两个 smoke 保留（仍各自通过）。③ **P2 新建 `scripts/fx_layer.gd`**（2291 B / 68 行，`extends RefCounted`、零依赖）：把三页各持一份的 FX 生命周期合并为 `push()` / `step()` / `clear()` / `ratio()` + `entries`；`main.gd` 三处改为 `var _*_fx := FxLayer.new()`、push 与 tick 各缩为一行、删掉 `static _fx_decay()`（21 行）。**「忘记递减 `left`」在结构上不再可能**。④ **顺带修两个真实缺陷**：`_update_hover()` 有一整段重复代码（两次初始化 + 两次 `SCREEN_MAIN` 分支，早前编辑遗留）已合并；删远征分支时误吞 `_process()` 里 `if` 的块体（`Parse Error: Expected indented block after "if" block.`）已补回。⑤ **像素级等价证据**：`p2_surv.png` sha256 **`bfa0382d4181ada5396da6574bae50ae5ce0f3be01a73a4b3e0cc4cffc52a77c`**，与 canonical `ui_surv4.png` **逐字节完全相同**（P3b、P2 两阶段各验一次，均相同）。⑥ **回归**：三轮各 11 项全绿且数值与基线逐字一致（`a_*.log` / `b_*.log` / `c_*.log`）。⑦ **规模**：`main.gd` 160536 → **142618 B（−17918 B / −11.2%）**，函数 187 → 170，`scripts/` 20 → 16 文件。⑧ **未做（已评估为架构级改造）**：按页面拆文件需先定页面状态容器（74 个 `var` 重新归属、`_editor_model()` 跨页分流重设计、`_draw`/`_input`/`_process` 必须留在 `Node2D`、7 个截图预热钩子需重新定位），风险显著高于本轮清理项且无像素级等价证据可依。§8 新增 3 条陷阱（大删除要拆成小循环、`--check-only` 通过 ≠ 运行时正确、文档声称的模块归属可能一直是错的）。同步 `docs/design.md` v3.11（§11.4.7 与 §11.4.2 背景描述修正、§17 追加行）与 `docs/roadmap.md` v3.11（§0 代码状态与架构模块化度行、§2 M9 缺口第 11–14 条标为已关闭、§5 追加行）。**如实声明**：对战页动效「随时间真的淡出」仍只有**代码层证据**（单帧截图无法证明时间维度），**未做连续帧观察、未做人工桌面交互验证**；**无 Android 验证、任何 APK 均不存在**；`boss_armor` / `safe_radius` / 商店稀有度权重方向反三项旧缺口未动 | §1 §8 §9 |
+
+| 2026-10-21 | v3.10 | **P2/P3 收尾审计：修正文件计数错误 + 清理孤儿 `.uid` + 修复截图证据链的真实缺陷**（续接用户「继续P2P3」的收尾）。① **纠正上一行的算术错误**：上一行写的「`scripts/` 20 → 16 文件」是错的——P3a 删的 5 个文件里只有 **3 个在 `scripts/`**（`tank_visual.gd` / `hud.gd` / `grid_field.gd`），另 2 个在 `tests/`（`_tmp_capture_check.gd` / `_tmp_drive_page.gd`）。正确算式 `20 − 3 + 1`（P2 新建 `fx_layer.gd`）= **18**。**实测确认：`scripts/` 18 个 `.gd`、`tests/` 11 个 `.gd`**。历史行按 append-only 原则**不改动**，以本行为准。② **清理 5 个孤儿 `.uid`**：P3a 只删了 `.gd`，`.uid` 残留——`scripts/grid_field.gd.uid`（`f977200b`）/ `scripts/hud.gd.uid`（`d25e9d17`）/ `scripts/tank_visual.gd.uid`（`dc971614`）/ `tests/_tmp_capture_check.gd.uid`（`831d6747`）/ `tests/_tmp_drive_page.gd.uid`（`a80ac7da`），全部删除；删后 `.uid` 与现存 `.gd` 一一对应、无孤儿。③ **发现并修复了证据链本身的真实缺陷（本轮最重要）**：同一条 `--capture` 命令连续两次产出**不同字节**——`g1_surv.png` 177682 B vs `g2_surv.png` 177340 B，逐像素差 **12993 个**、最大通道和 **546**。根因：`_survival_capture_warmup()` 跑完固定 420 步后返回，而 `_capture_next_frame()` 还要 `await` **30 帧**才取图，这 30 帧里 `_process()` 仍按**真实 delta** 推进 `_*_simulate()` 并累加 `_time`——预热步数固定、取图时刻不固定。**这意味着此前所有「截图 sha256 逐字节等价」论证在原理上不成立，那些 hash 相同只是碰巧。** ④ **修复**：新增 `var _capture_frozen := false`；`_process()` 开头 `if _capture_frozen: return`；`_handle_capture_request()` 在预热后、取图前设 `_capture_frozen = true` 并把过渡量显式置终值（`_screen_opacity = 1.0` / `_focus_rail_alpha = 1.0`——否则冻结在淡入起点，实测截图只有 8587 B、几乎全黑）。⑤ **修复后验证**：`g5_surv.png` 与 `g6_surv.png` 连续两次**逐字节相同**（178280 B，sha256 `e56ce92faa5911e5da72d26d8aa98935597a5cd373ecac487431ce00073de6ad`）——**可复现性成立**。⑥ **代价（必须如实说）**：新截图与旧 canonical `ui_surv4.png`（177553 B）**不再相同**，剩余时间显示 38.0 s 而旧图 37.3 s，因为冻结时机比旧版晚若干帧。**旧 canonical 不再作为当前基线**，需以 `g5_surv.png` 重建。⑦ **回归**：`--check-only` 四次均 78 B / `6ca5b6ba`；11 项 smoke 全绿且数值与历史基线**逐字一致**（`g5sum.txt`）；对战页 `g7_match.png`（135548 B）、试驾页 `g7_drive.png`（213476 B）、升级页 `g7_levelup.png`（203203 B）均 `CAPTURE_OK`、无 `SCRIPT ERROR`，且**经 `Image_View` 目视确认画面完整**。⑧ **本轮自伤 1 次已修**：改 `_process()` 时 `replace` 的 `end_line` 多算，把整个函数体删掉（142509 B），重新 `File_Read` 定位后按原文完整补回（143488 B），再验证 27 行结构完整。**如实声明**：截图仍为**脚本驱动 + 像素检查，非人工交互验证**；对战页动效「随时间真的淡出」仍只有**代码层证据**；**无 Android 验证、任何 APK 均不存在**；按页面拆文件（P2 后半）仍未做 | §1 §8 §9 |
+| 2026-10-21 | v3.11 | **截图证据链重验：7 个钩子的可复现基线 + 历史差异归因**（用户对上一轮建议回复「按你说的做」）。① **先确认不可逆限制**：工作区**没有 git 仓库**（实测 `NO_GIT_DIR`、`git rev-parse` 报 `fatal: not a git repository`），v3.10/v3.11 旧代码已不存在，**无法重做真正的 before/after**。② **可复现基线**：7 个 `--capture` 钩子各连拍两次，**7/7 逐字节相同**——`drive` 213476 / `match` 135548 / `survival` 178280 / `survival_levelup` 203203 / `survival_shop` 236008 / `survival_summary` 196813 / `survival_modify` 253691；其中 `survival_shop` / `survival_summary` / `survival_modify` 又在**不同进程**重跑一次，仍 `SAME`。③ **差异归因**：新基线 vs 历史截图做**分区**比对，静态 UI 区**零差异**——生存页右 HUD `0` / 状态栏 `0`；对战页右 HUD `0` / 状态栏 `0`；非零部分为左 HUD（3068 / 2698，含计时/速度/总输出等随模拟变化的数字）与战场区（30598 / 37053）。④ **决定性证据**：生存页两张图的 `SURVIVAL_MIRROR_RECT`（1560,436,312,400）裁切后**逐字节相同**（均 56256 B，sha256 `df09e63e6f56025a…`）——镜像面板的逐格血量填充、质心十字、朝头线、部件行、条形图这一整套绘制逻辑**一字未变**。⑤ **试驾页右 HUD 的 16379 像素差异已目视核对**：布局与文字完全一致，差异仅在于装填状态「装填 0.25s」vs「待发」及进度条长度，以及左 HUD 的 `126.7` vs `145.8 px/s`、`339°` vs `330°`——**模拟状态差，非渲染逻辑差**。⑥ **结论**：冻结修复只改了「取图时刻」，未动任何绘制代码；历史与当前截图的全部差异可归因于**模拟多推进了若干步**，而非渲染回归。这比原先「sha256 相同」的论证更强：原先是碰巧，现在是已知差异来源、且静态区逐字节相同。⑦ **新增局限声明**：以上只证明「静态 UI 区渲染未变」，**不是**「所有像素都未变」；战场区无法用整图 hash 验渲染回归，需先把预热步数参数化，而**该参数化仍未做**。新增 `docs/design.md` §11.4.9.1。§8 新增 3 条陷阱（可复现性要分同进程/跨进程两步验、整图 sha 差异不等于渲染回归要分区归因、无版本控制时 before/after 不可做必须当场说明）。**如实声明**：所有截图仍为**脚本驱动 + 像素检查，非人工交互验证**；对战页动效「随时间真的淡出」仍只有**代码层证据**；**无 Android 验证、任何 APK 均不存在** | §1 §8 §9 |
+| 2026-10-21 | v3.12 | **`--steps=N` 预热步数参数化——战场区渲染验证盲区已补齐**（用户「继续」）。① **动机**：v3.11 声明「战场区无法用整图 hash 验渲染回归」——因为预热步数写死在各页 `for ... in range(N)` 里，没法在同一模拟状态下截两次。② **实现**（`main.gd` 143963 → 146185 B）：新增 `var _capture_steps := -1`、`_requested_capture_steps()`（解析 `--steps=N`，非法值打 `CAPTURE_BAD_STEPS` 回退）、`_warmup_steps(default_steps)`；三个预热函数改为调它，默认值仍写在调用处（试驾 90 / 对局 150 / 生存 420）；对局页开火时机由写死的第 60 步改为 `maxi(total_steps * 2 / 5, 1)`。③ **三个对照全部成立**：`--steps=420` 两次 **SAME**（178280 B / `e56ce92f…`）；`--steps=200` **DIFF**（173254 B / `0ac8f3d1…`）；**不传参数与改前基线逐字节相同**（v3.11 的 7 张基线仍有效）。④ **盲区补齐的关键证据**：战场区（320,168,1216,684）裁切后，`--steps=420` 两次均 **92207 B / `b16c7e15aaebbd6a` 逐字节相同**，`--steps=200` 为 91959 B（不同）——**战场区渲染本身是确定性的**，之前的「不可验证」只是缺了步数参数化。⑤ **今后渲染回归流程**：改动前后各跑同一 `--steps=N`，裁战场区比 sha256。⑥ **回归**：`--check-only` 78 B / `6ca5b6ba`；11 项 smoke 全绿且数值与基线逐字一致。§8 新增 2 条陷阱（参数化必须做「不同值必须不同」的反向对照 + 「不传参数与基线相同」的回归对照；「不可验证」往往只是缺一个实验旋钮）。同步 `docs/design.md` v3.14（新增 §11.4.9.2、§11.4.9.1 的局限改为「已解除」、§17 追加行）与 `docs/roadmap.md` v3.14（§0 新增「战场区验证能力」行、§5 追加行）。**如实声明**：本轮交付的是**能力**，**未做具体的「改动前后」对比**（旧代码不存在、无 git）；`--steps` 只影响 `drive` / `match` / `survival` 三个跑预热的钩子，另四个页面钩子直接构造状态、不受影响；截图仍为**脚本驱动 + 像素检查，非人工交互验证**；对战页动效「随时间真的淡出」仍只有**代码层证据**；**无 Android 验证、任何 APK 均不存在** | §1 §8 §9 |
+
+> **v3.15：生存模式坦克阵容重做**（用户原话：「修改生存模式初始玩家坦克和敌人的坦克，让坦克的配件、摆放更合理，初始敌人的坦克过于大应该再缩小，而且敌人不断地生成，不同等级的敌人的坦克不同，要设计多种坦克」）。① **起始车 8×2 → 6×4**：旧车只有一条 `track_light` 贴在车身最左端，`TankBody.drive_metrics()` 的 `side = signf(forward.cross(offset))` 会让单履带偏心车的 `axis = throttle − side·steer` 左右失衡、净推力与扭矩同时畸变。新布局两条 `track_heavy` @ (2,0)/(2,3)（各占 x=2..3），履带中心 x=3.0 正好压在质心横坐标上；`ammo_factory_76(0,1) → conveyor_straight(2,1) → cannon_76(3,1)` 沿 y=1 逐格相邻（factory 只出 E / 直管 W→E / 炮管只进 W），`cockpit_light(2,2)` + `engine_small(3,2)` 居中。② **不要给起始车加弹药库**：实测 `ammo_depot_small` 被摧毁时按 `capacity_slots`（8 格）殉爆 `6×8 = 48` 伤害、半径 2.5 格，带库版本 21.8 s 内被殉爆连锁 13 次直接炸死；而 `ammo_factory_76` 1.5 s/发已快过 `cannon_76` 1.1 s 装填。③ **13 张 Bot 蓝图全部重写**：招募级 30 格 → 14/20/12（十字/方块/楔形）、老兵 24/32/20（长车身/方车/四履带）、精英 33/36/23、王牌 44/40/40；**每档三张必须是三种不同轮廓**（按平台格集合判重，不是按格数）。蓝图由 `.me/tmp/main/gen_blueprints.py` 生成，脚本内置端口连通性 / 平台覆盖 / 4-连通自检，`credits_spent` 按 `_blueprint_price()` 口径重算——**手改蓝图 JSON 必须同步重算 `credits_spent`，否则 `load_all()` 整体失败**。④ **敌人持续生成**：`survival` 块新增 `enemy_quota_multiplier`（3.0）与 `enemy_reinforce_delay_s`（5.0）；新增 `enemy_quota_for(wave)`（同屏上限 × 倍数，Boss 波恒 1）、`_enemies_spawned` / `_enemy_reinforce_timer` / `_reinforce_enemies(dt)`；`start_wave()` 只出同屏上限，之后按间隔补兵。⑤ **通过条件变更（重要）**：旧规则「场上没敌人就立即通过」与持续补兵**互斥**——敌人一被杀光就过关，补兵永远来不及发生。现改为「计时归零」**或**「本波配额已全部生成完且场上无敌人」。`docs/design.md` §3.4 已同步改写。⑥ **测试**：`survival_smoke` 修 3 处因布局变化失真的断言（驾驶舱格不再写死 (2,1)，改 `rig.cockpit_cells()[0]`；`_check_wave_passes_on_timer` 改 `enemy_ai.clear()`，旧写法清一次输入会被下一帧 `brain.think()` 覆盖；`_check_player_fire_damage` 改为「车头追着最近敌人转 + 距离 < 260 px 后退」的真实打法），新增 `_check_reinforcement` 与 `_check_roster_shape`。**实测：静止开火 45 s 只命中 4 次、击杀 0；会瞄准时命中 12–22 次、击杀 1–2 台**——所以「原地按空格能不能打死」不是正确的验收方式。⑦ **回归**：`--check-only` 78 B / `6ca5b6ba`；11 项 smoke 全绿且数值与基线逐字一致；`--steps=420` 两次截图 `n_surv_a.png` / `n_surv_b.png` 均 **176395 B / `fdf2c020…`**（逐字节相同）。**如实声明**：截图仍为**脚本驱动 + 像素检查，非人工交互验证**；持续补兵只有 headless 断言，**没有人工玩一整波观察补兵**；**无 Android 验证、任何 APK 均不存在**；`boss_armor` / `safe_radius` / 商店稀有度权重方向三项旧缺口未动。
+> **v3.16：更正 v3.15 的两个数字（append-only，历史文字不改，以本段为准）**。① 「带弹药库的版本 21.8 s 内被殉爆连锁 13 次炸死」→ **36.4 s**：唯一证据 `probe_roster2.txt` 的 `PROBE_DEATH_STEP 2185` ÷ 60 Hz = 36.4 s；21.8 s 无工件支持，22.7 s 是 `probe_roster5` 里**驾驶舱放在 (5,1) 的另一套试验布局**的死亡时间。② 「会瞄准时命中 12–22 次、击杀 1–2 台」→ **命中 8–22 次、击杀 0–2 台**（`probe_gain.txt` 六次扫描：11/0、8/0、22/1、18/1、13/1、10/2）。③ **只改注释与文档文字，代码 / 常量 / 测试零改动**，v3.15 的 `SURVIVAL_OK`、11 项全绿、`n_surv_a.png` = `n_surv_b.png` 176395 B / `fdf2c020…` 继续有效。
+> **v3.17：修栈溢出——生存页鼠标处理无限递归（append-only）**。用户报告 `SCRIPT ERROR: Stack overflow`，栈形 `_handle_mouse ↔ _handle_survival_mouse` 交替，最终炸在 `data_registry.get_module()`。① **根因**：v3.8「改装页复用建造系统」时把转发做成了**双向**——`_handle_mouse()` 在 `SCREEN_SURVIVAL` 时调 `_handle_survival_mouse()`，后者结尾又调回 `_handle_mouse()`。改装页里任何一次**非「完成改装」按钮**的左/右键点击都会无限互调；每层都走 `_update_hover() → _build_option_index_at() → _option_ids()`，所以栈溢出炸在 `data_registry.get_module()` 而不是这两个函数本身。② **修法（单向化，不改交互语义）**：`_input()` 的 `InputEventMouseButton` 分支按屏幕分流；`_handle_mouse()` 删掉回跳分支；`_handle_survival_mouse()` 保留本页专属热区，其余一律单向 `_handle_mouse()`。**方向只有一条：`_input()` → `_handle_survival_mouse()` → `_handle_mouse()`。** ③ **顺带修好**：旧版把滚轮与 `pressed=false` 在开头就 `return`，所以改装页的模块列表滚动与「拖拽铺平台」的落笔从未到达 `_handle_mouse()`——**v3.8 声称的「改装页拥有矩形/直线铺平台、拖动铺」在鼠标路径上一直不成立**（键盘路径正常）。④ **新永久回归** `tests/mouse_input_smoke.gd`：实例化 `main.tscn` 并把真实 `InputEventMouseButton`/`Motion` 灌进 `_input()`，覆盖 motion/左键/松开/右键/滚轮/完成改装/战斗期点击七点。**必须走真实场景**：`main.gd` 是 `extends Node2D`，`--script` 加载不了；纯函数级测试也抓不到只在调用链上成立的缺陷。⑤ **反向对照（关键）**：把旧回跳临时加回后跑同一测试，**立刻复现** `Stack overflow` 与完全相同的交替栈形；撤回后 `MOUSE_OK`。⑥ **回归**：`--check-only` 78 B / `6ca5b6ba`；**12 项 smoke 全绿**（原 11 项数值与基线逐字一致，新增 `MOUSE_OK`）；`--steps=420` 两次截图均 **176395 B / `fdf2c020…`**，与修复前逐字节相同；`m_modify.png` 257622 B / `76b2449b…` 与历史一致——**对渲染零影响**。§8 新增 2 条陷阱（函数互调型缺陷只能靠走真实入口的测试抓到，栈溢出报的位置往往不是真凶；转发方向必须单向）。**如实声明**：修复后用脚本灌入的合成事件验证，**仍非人工桌面交互验证**；**无 Android 验证、任何 APK 均不存在**；`boss_armor` / `safe_radius` / 商店稀有度权重方向三项旧缺口未动。
+
+> **v3.18：编辑器分层隔离 + 光标件跟随 + 居中 + 两处布局重叠（append-only）**。用户原话：「坦克改装页面中，要明确坦克三个层级独立搭建，选中一个层时，其他两层要变得透明且无法操作，只能操作选中层，并且光标所持的配件也要根据选中层试试切换。坦克要默认在建造区域居中，再次检查菜单UI，层级选择和标题重叠了」。① **先澄清一个容易说错的事实**：**操作隔离本来就已经成立**——每个编辑操作（`place_*` / `remove_at` / `move_part` / `rotate_part` / `adjust_aim`）都只作用于 `_build_layer`，另两层从未被改动。缺的是**看得见**的那一半：三层此前同亮度绘制，玩家无法从画面判断在编哪一层。本轮补的是可见性，**不是**可操作性。② **非选中层 22% alpha**：新增 `const LAYER_DIM_ALPHA := 0.22`；`_draw_grid()` 为三层各算一个局部 alpha（选中 1.0、其余 0.22），`_draw_cell(cell, color, label, core, alpha := 1.0)` 与 `_draw_aim_line(part, alpha := 1.0)` 新增参数把填充 / 边框 / 核心环 / 文字 / 瞄准线一起缩放。**必须用 alpha、不能乘 RGB**：霓虹靠 `WorldEnvironment` 的 HDR glow（阈值 0.8），乘 RGB 会撞到 1.0 丢色相。③ **光标件随层切换**：`_select_layer()` 除设 `_build_layer`，还把 `_selected_index` / `_rotation` / `_aim` 归零再 `_ensure_option_visible()`，并 `_set_status("层：%s · 光标件：%s")` 回报；旧实现只把 `_selected_index` clamp 进新层列表，切层后光标手里是「碰巧同下标」的无关件，且上一层的旋转 / 射向对新层无意义。新增 `_layer_label()` 统一三处层名。④ **默认居中**：`GridBuilder` 新增 `content_bounds() -> Rect2i`（三层合并包围盒）与 `center_content() -> bool`（整块平移到网格中心、返回是否移动过），`volume_size()` 改为复用 `content_bounds().size`；调用点两处——`_activate_main_menu()` 建造分支（`reset_demo()` 后）与 `_survival_enter_modify()`（`enter_modification()` 成功后），随后 `_cursor` 落到 `cockpit_cells()[0]`。**整块搬而不是逐件摆**：三层必须保持相对位置，否则平台与模块错位。**改装期平移 `survival_builder` 安全**：`commit_modification()` 注释已说明结构由下一次 `start_wave()` 重建 Duel 时才生效，改装期 `TankBody` 不参与模拟；**战斗期绝不能搬**，因为 `TankBody.rebuild(source)` 直接从 builder 读格坐标、`duel.add_side()` 在那一瞬间建 `parts`。居中只改位置不改尺寸 / 价格 / 连通性，无需 undo、不影响净支出。⑤ **两处重叠**：`_build_layer_rect()` 由 `230.0 + index×48` 改为 `258.0 + index×44`（`_draw_panel` 标题 baseline 227、分隔线 248，旧首行 230–268 正压在分隔线上；修后三行 258 / 302 / 346）；`BUILD_TOOL_Y` 785 → 800（「工具」标签 baseline 793 落在旧按钮 785–823 内；修后按钮 800–838）。⑥ **连带修复**：`_survival_capture_modify()` 原本写死 `place_platform_at(Vector2i(6,0))`，居中后该格不在车体旁、4-连通检查拒绝、预览变红；改为按 `content_bounds()` 算 `Vector2i(bounds.end.x, bounds.position.y)`。**教训：布局一变，写死的格坐标会静默失效。** ⑦ **回归**：`--check-only` main.gd / grid_builder.gd 均 78 B / `6ca5b6ba`；**12 项 smoke 全绿且 `l6_all.txt` 638 B / `7ae7106a` 与上轮基线逐字节相同**；`build_smoke` 新增 5 条居中断言（非空 / 尺寸不变 / 花费与质量不变 / 边距差 ≤1 / 幂等）全过，`BUILD_OK` 数值不变；像素探针 `MODULE_SELECTED module=452` vs `PLATFORM_SELECTED module=191`、比值 2.37 → `DIMMING_OK`（`dim8.txt` 174 B / `8b4bb0d6`）；`--steps=420` 两次 `m_surv_a.png` = `m_surv_b.png` = 176395 B / `fdf2c020…` 与改前逐字节相同。`main.gd` 147659 → 151611 B，`grid_builder.gd` 30014 B。⑧ **探针自身错了三版**（v1 比较不同格亮度不成立——模块格压在平台格正上方，两层占同一批格；v2 「平台格应变亮」不成立——填充仅 `0.12×alpha`，在深色底上几乎不可见；v3 改用「本身够亮的一层（模块琥珀 / 行进青）被选中时必须显著更亮」才可判定，且采样需内缩 6 px 避开下层 1 px 边框），**均记录为探针缺陷、不是产品缺陷**。§8 新增 2 条陷阱（分层绘制下不能用「不同格亮度」或「本身很淡的层」做判据；布局常量变更后写死的格坐标会静默失效）。**如实声明**：分层透明只有像素探针 + 脚本驱动截图证据，**从未有人真的用鼠标点过改装页的层按钮**；居中只在 `survival_modify` 与建造页入口验证，**未逐页回归**；截图仍为**脚本驱动 + 像素检查，非人工交互验证**；**无 Android 验证、任何 APK 均不存在**；`boss_armor` / `safe_radius` / 商店稀有度权重方向三项旧缺口未动。
+
+| 2026-10-21 | v3.13 | **生存模式坦克阵容重做**（用户：「修改生存模式初始玩家坦克和敌人的坦克，让坦克的配件、摆放更合理，初始敌人的坦克过于大应该再缩小，而且敌人不断地生成，不同等级的敌人的坦克不同，要设计多种坦克」）。① **起始车 8×2 → 6×4**：旧车只有一条 `track_light` 贴在车身最左端，`drive_metrics()` 的 `side = signf(forward.cross(offset))` 让单履带偏心车的净推力与扭矩同时畸变。新布局两条 `track_heavy` @ (2,0)/(2,3)（各占 x=2..3），履带中心压在质心横坐标上；`ammo_factory_76(0,1) → conveyor_straight(2,1) → cannon_76(3,1)` 沿 y=1 逐格相邻，`cockpit_light(2,2)` + `engine_small(3,2)` 居中。**不放弹药库**：实测 `ammo_depot_small` 殉爆 `6×8 = 48` 伤害、半径 2.5 格，带库版本 21.8 s 内被连锁 13 次炸死（`probe_roster2`）；工厂 1.5 s/发已快过炮管 1.1 s 装填。② **13 张 Bot 蓝图全部重写**：招募级 30 格 → 14/20/12（十字/方块/楔形）、老兵 24/32/20（长车身/方车/四履带）、精英 33/36/23、王牌 44/40/40；每档三张是**三种不同轮廓**（按平台格集合判重）。蓝图由 `.me/tmp/main/gen_blueprints.py` 生成，脚本内置端口连通性 / 平台覆盖 / 4-连通自检，`credits_spent` 按 `_blueprint_price()` 口径重算。③ **敌人持续生成**：`survival` 块新增 `enemy_quota_multiplier`（3.0）与 `enemy_reinforce_delay_s`（5.0）；新增 `enemy_quota_for(wave)` / `_enemies_spawned` / `_enemy_reinforce_timer` / `_reinforce_enemies(dt)`；`start_wave()` 只出同屏上限。④ **通过条件变更（重要）**：旧规则「场上没敌人就立即通过」与持续补兵互斥，现改为「计时归零」**或**「本波配额已全部生成完且场上无敌人」。⑤ **测试**：`survival_smoke` 修 3 处因布局变化失真的断言（驾驶舱格不再写死 (2,1)；`_check_wave_passes_on_timer` 改 `enemy_ai.clear()`；`_check_player_fire_damage` 改为真实打法），新增 `_check_reinforcement` 与 `_check_roster_shape`。**实测：静止开火 45 s 命中 4 次、击杀 0；会瞄准时命中 12–22 次、击杀 1–2 台**——「原地按空格能否打死」不是正确验收方式。⑥ **回归**：`--check-only` 78 B / `6ca5b6ba`；11 项 smoke 全绿且数值与基线逐字一致；`--steps=420` 两次截图 `n_surv_a.png` / `n_surv_b.png` 均 **176395 B / `fdf2c020…`**（逐字节相同）。§8 新增 3 条陷阱（弹药库殉爆在自己车里是自杀配置；`_spawn_enemy` 的配额计数只能认真实加入的结果；改测试断言前先确认它测的是产品行为还是写死坐标）。**如实声明**：截图仍为**脚本驱动 + 像素检查，非人工交互验证**；持续补兵只有 headless 断言，**没有人工玩一整波观察补兵**；**无 Android 验证、任何 APK 均不存在**；`boss_armor` / `safe_radius` / 商店稀有度权重方向三项旧缺口未动 | §1 §8 §9 |
+| 2026-10-21 | v3.14 | **更正 v3.13 行的两个数字（append-only：历史行不改，以本行为准）**。① 「带库版本 21.8 s 内被殉爆连锁 13 次炸死」→ **36.4 s**：唯一证据 `probe_roster2.txt` 的 `PROBE_DEATH_STEP 2185` ÷ 60 Hz = 36.4 s；21.8 s 无工件支持，22.7 s 是 `probe_roster5` 里**驾驶舱放 (5,1) 的试验布局**的死亡时间。② 「会瞄准时命中 12–22 次、击杀 1–2 台」→ **命中 8–22 次、击杀 0–2 台**（`probe_gain.txt`：11/0、8/0、22/1、18/1、13/1、10/2）。③ 改动仅限 `scripts/survival_run.gd` 注释块 + 三份文档文字，**代码 / 常量 / 测试零改动**，v3.13 行的回归结论（`SURVIVAL_OK`、11 项全绿、`n_surv_a.png` = `n_surv_b.png` 176395 B / `fdf2c020…`）继续有效 | §5 §9 |
+| 2026-10-21 | v3.15 | **修栈溢出：生存页鼠标处理无限递归**（用户报告 `SCRIPT ERROR: Stack overflow`，栈形 `_handle_mouse(main.gd:587) ↔ _handle_survival_mouse(main.gd:3107)` 交替）。① **根因**：v3.8 把转发做成双向——`_handle_mouse()` 在 `SCREEN_SURVIVAL` 时调 `_handle_survival_mouse()`，后者结尾又调回 `_handle_mouse()`，无终止条件。改装页里任何一次非「完成改装」按钮的点击都会无限互调；每层都走 `_update_hover() → _build_option_index_at() → _option_ids()`，故最终炸在 `data_registry.get_module()`。② **修法**：`_input()` 入口分流 + `_handle_mouse()` 删回跳分支，转发单向化。③ **顺带修好**：改装页的模块列表滚轮与拖拽落笔因同一原因从未到达 `_handle_mouse()`——v3.8 声称的「改装页有矩形/直线铺平台、拖动铺」在鼠标路径上一直不成立。④ **新永久回归** `tests/mouse_input_smoke.gd`（4763 B / `548952e4`）：实例化 `main.tscn` 灌入真实 `InputEventMouseButton`/`Motion` 走 `_input()`；**反向对照已验证它能抓到旧 bug**。⑤ **回归**：`--check-only` 78 B / `6ca5b6ba`；**12 项 smoke 全绿**（`m_sum.txt` 638 B / `7ae7106a`）；截图与修复前逐字节相同（176395 B / `fdf2c020…`、`m_modify.png` 257622 B / `76b2449b…`）。`main.gd` 146185 → 147659 B；`tests/` 11 → 12 个 `.gd`。**如实声明**：合成事件验证，非人工桌面交互验证；**无 Android 验证、任何 APK 均不存在** | §1 §8 §9 |
+| 2026-10-21 | v3.16 | **编辑器分层隔离 + 光标件跟随 + 坦克默认居中 + 两处布局重叠**（用户原话：「坦克改装页面中，要明确坦克三个层级独立搭建，选中一个层时，其他两层要变得透明且无法操作，只能操作选中层，并且光标所持的配件也要根据选中层试试切换。坦克要默认在建造区域居中，再次检查菜单UI，层级选择和标题重叠了」）。① **先澄清边界**：**操作隔离本来就已经成立**——每个编辑操作都只作用于 `_build_layer`，另两层从未被改动。缺的是**看得见**的那一半：三层此前同亮度绘制，玩家无法从画面判断在编哪一层。本轮补的是可见性，不是可操作性。② **非选中层 22% alpha**：新增 `LAYER_DIM_ALPHA = 0.22`；`_draw_grid()` 为三层各算局部 alpha，`_draw_cell(..., alpha := 1.0)` 与 `_draw_aim_line(part, alpha := 1.0)` 新增参数把填充 / 边框 / 核心环 / 文字 / 瞄准线一起缩放；绘制顺序仍 平台 → 行进 → 模块。**用 alpha 不用 RGB 乘算**：霓虹靠 HDR glow（阈值 0.8），乘 RGB 会撞到 1.0 丢色相。③ **光标件随层切换**：`_select_layer()` 把 `_selected_index` / `_rotation` / `_aim` 归零再 `_ensure_option_visible()`，并回报「层：%s · 光标件：%s」；旧实现只 clamp `_selected_index`，切层后光标手里是「碰巧同下标」的无关件。新增 `_layer_label()` 统一三处层名。④ **默认居中**：`GridBuilder` 新增 `content_bounds() -> Rect2i` 与 `center_content() -> bool`，`volume_size()` 改为复用 `content_bounds().size`；调用点两处——`_activate_main_menu()` 建造分支与 `_survival_enter_modify()`，随后 `_cursor` 落到 `cockpit_cells()[0]`。**整块搬而不是逐件摆**：三层必须保持相对位置。**改装期平移安全**来自 `commit_modification()` 注释的「结构由下一次 `start_wave()` 重建 Duel 时才生效」；**战斗期绝不能搬**，因为 `TankBody.rebuild(source)` 直接从 builder 读格坐标。⑤ **两处布局重叠**：`_build_layer_rect()` 230→258（步长 48→44；`_draw_panel` 标题 baseline 227、分隔线 248，旧首行 230–268 正压在分隔线上）；`BUILD_TOOL_Y` 785→800（「工具」标签 baseline 793 落在旧按钮 785–823 内）。⑥ **连带修复**：`_survival_capture_modify()` 写死的 `(6,0)` 落点改为按 `content_bounds()` 算，否则居中后预览变红非法。⑦ **回归**：`--check-only` main.gd / grid_builder.gd 均 78 B / `6ca5b6ba`；**12 项 smoke 全绿且 `l6_all.txt` 638 B / `7ae7106a` 与上轮基线逐字节相同**；`build_smoke` 新增 5 条居中断言（非空 / 尺寸不变 / 花费与质量不变 / 边距差 ≤1 / 幂等）全过，`BUILD_OK` 数值不变；像素探针 `MODULE_SELECTED module=452` vs `PLATFORM_SELECTED module=191`、比值 2.37 → `DIMMING_OK`（`dim8.txt` 174 B / `8b4bb0d6`）；`--steps=420` 两次 `m_surv_a.png` = `m_surv_b.png` = 176395 B / `fdf2c020…` 与改前逐字节相同（生存页零影响）；改装页 `l_mod2.png` 254891 B、`l_plat.png` 230518 B。`main.gd` 147659 → 151611 B，`grid_builder.gd` 30014 B。⑧ **探针自身错了三版**（比较不同格亮度不成立——模块格压在平台格正上方；「平台格应变亮」不成立——填充仅 0.12 alpha 几乎不可见；最终改用「本身够亮的一层被选中时必须显著更亮」才可判定），**记录为探针缺陷、不是产品缺陷**。**如实声明**：分层透明只有像素探针 + 脚本驱动截图证据，**从未有人真的用鼠标点过改装页的层按钮**；居中只在 `survival_modify` 与建造页入口验证，**未逐页回归**；截图仍为**脚本驱动 + 像素检查，非人工交互验证**；**无 Android 验证、任何 APK 均不存在**；`boss_armor` / `safe_radius` / 商店稀有度权重方向三项旧缺口未动 | §5 §8 §9 |
