@@ -341,7 +341,7 @@ func _settings_index_at(position: Vector2) -> int:
 
 func _build_option_index_at(position: Vector2) -> int:
 	var options: PackedStringArray = _option_ids()
-	var visible_count := mini(options.size() - _option_scroll, BUILD_OPTION_VISIBLE)
+	var visible_count := maxi(mini(options.size() - _option_scroll, BUILD_OPTION_VISIBLE), 0)
 	for visible_index in range(visible_count):
 		if _build_option_rect(visible_index).has_point(position):
 			return _option_scroll + visible_index
@@ -497,6 +497,12 @@ func _cycle_selection(step: int) -> void:
 
 func _ensure_option_visible() -> void:
 	var count := _option_ids().size()
+	## `_selected_index` 是 **`_option_ids()` 的下标**，不是库存下标、也不是模块总数。
+	## 库存会变（贴装 -1、拆解 +1、商店购买 +1），而 `_option_ids()` 在改装期是
+	## 「按当前层过滤 + 去重」后的结果，**长度与库存不一致**。任何一处漏钳制，
+	## 下一帧 `_draw_grid()` 里的 `_preview_cells()` 就会越界（用户报告的崩溃）。
+	## 这里是所有「选项集合变化」之后的统一收口点，所以钳制放在最前面。
+	_selected_index = clampi(_selected_index, 0, maxi(count - 1, 0))
 	var max_scroll := maxi(count - BUILD_OPTION_VISIBLE, 0)
 	_option_scroll = clampi(_option_scroll, 0, max_scroll)
 	if _selected_index < _option_scroll:
@@ -702,17 +708,33 @@ func _place_platform_cell_at(cell: Vector2i) -> String:
 		return survival.place_platform_at(cell)
 	return _editor_model().place_platform_cell(cell)
 
-## 改装期把库存第 `_selected_index` 件贴到光标处。
+## 改装期把光标选中的那一件（`_selected_index` 指向 `_option_ids()` 的某个 id）贴到光标处。
+##
+## **为什么不能直接拿 `_selected_index` 当库存下标**：`_option_ids()` 在改装期是
+## 「按当前层过滤 + 去重」后的结果，与 `survival.inventory` **长度不同、顺序也不同**。
+## 旧实现写的是 `clampi(_selected_index, 0, inventory.size() - 1)`，于是：
+## ① 下标 8 在库存 12 件时「合法」，但可选件只有 8 个 → 绘制时越界崩溃（用户报告）；
+## ② 就算不越界，也会贴装**另一件**配件（下标语义错位）。
+## 现在先用 `_option_ids()` 把下标翻成 module_id，再到库存里找它的**实际位置**。
 func _mount_selected_inventory() -> String:
 	if survival == null:
 		return "拒绝：无生存 run。"
 	if survival.inventory.is_empty():
 		return "拒绝：库存为空。先购买或领取配件。"
-	var index := clampi(_selected_index, 0, survival.inventory.size() - 1)
-	var module_id := String(survival.inventory[index])
+	var options: PackedStringArray = _option_ids()
+	if options.is_empty():
+		return "拒绝：当前层没有可选配件。"
+	var module_id := String(options[clampi(_selected_index, 0, options.size() - 1)])
+	var index := survival.inventory.find(module_id)
+	if index < 0:
+		return "拒绝：库存里找不到 %s。" % module_id
 	var reason := survival.mount_from_inventory(index, _cursor, _rotation, _aim)
 	if reason.is_empty():
-		_selected_index = clampi(_selected_index, 0, maxi(survival.inventory.size() - 1, 0))
+		## 库存少了一件，**可选件列表也跟着少一件**——但两者长度不等（`_option_ids()`
+		## 是按层过滤并去重后的结果）。旧代码把 `_selected_index` 钳制到
+		## `inventory.size() - 1` 是错的：库存 12 件、模块层 9 个不同 id 时，
+		## 贴装后库存 11、可选件 8，下标 8 就越界。统一交给 `_ensure_option_visible()`
+		## 按**可选件数量**钳制，不要在这里再写一套口径。
 		_ensure_option_visible()
 		return "已贴装：%s" % module_id
 	return reason
@@ -1477,7 +1499,7 @@ func _draw_build_sidebar() -> void:
 			draw_rect(rect, Color(Palette.ACCENT_CYAN, 0.55 if hovered and not selected else 1.0), false, 2.0)
 		_draw_text(layer_names[index], rect.position + Vector2(14, 26), 16, Palette.ACCENT_CYAN if selected or hovered else Palette.TEXT_LO, true)
 	var options: PackedStringArray = _option_ids()
-	var visible_count := mini(options.size() - _option_scroll, BUILD_OPTION_VISIBLE)
+	var visible_count := maxi(mini(options.size() - _option_scroll, BUILD_OPTION_VISIBLE), 0)
 	for visible_index in range(visible_count):
 		var option_index := _option_scroll + visible_index
 		var option_rect := _build_option_rect(visible_index)
@@ -1556,9 +1578,13 @@ func _preview_cells() -> Array[Vector2i]:
 	var options: PackedStringArray = _option_ids()
 	if options.is_empty():
 		return []
-	var definition: Dictionary = definitions.get_module(String(options[_selected_index]))
-	var part := {"id": String(options[_selected_index]), "start": _cursor, "rot": _rotation, "aim": _aim}
-	if _build_layer == LAYER_PLATFORM and String(options[_selected_index]) == "platform_cell":
+	## 防御式钳制：`_draw_grid()` **每帧**都会调到这里，一旦越界就会每帧刷屏
+	## `SCRIPT ERROR: Out of bounds get index`（用户报告的就是这个）。真正的收口在
+	## `_ensure_option_visible()`，但绘制路径不该依赖「上游一定调过它」。
+	var index := clampi(_selected_index, 0, options.size() - 1)
+	var definition: Dictionary = definitions.get_module(String(options[index]))
+	var part := {"id": String(options[index]), "start": _cursor, "rot": _rotation, "aim": _aim}
+	if _build_layer == LAYER_PLATFORM and String(options[index]) == "platform_cell":
 		return [_cursor]
 	return _editor_model().part_cells(part)
 
