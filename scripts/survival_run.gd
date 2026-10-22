@@ -569,24 +569,6 @@ func _resolve_house_hits(frame_events: Array[Dictionary]) -> void:
 		var scale := float(event.get("damage_scale", 1.0))
 		_damage_house(house, raw * scale, frame_events)
 
-## 撞击房屋：玩家坦克 AABB 与房屋相交且速度足够时扣血（design §3.4.4）。
-## 只有玩家会撞房屋——敌人 AI 的目标是玩家，不去拆房子。
-func _resolve_rammed_houses() -> void:
-	var tank: TankBody = duel.tank_of(Duel.TAG_PLAYER)
-	if tank == null:
-		return
-	var bounds := tank.world_bounds()
-	var speed: float = tank.velocity.length()
-	if speed <= _wall_min_speed:
-		return
-	for house in houses:
-		if not bool(house["alive"]):
-			continue
-		if not bounds.intersects(Rect2(house["rect"])):
-			continue
-		var raw: float = _wall_base + _wall_per_speed * speed
-		_damage_house(house, raw, [])
-
 func _damage_house(house: Dictionary, raw: float, frame_events: Array[Dictionary]) -> void:
 	if raw <= 0.0:
 		return
@@ -649,6 +631,26 @@ func _resolve_debris_crush() -> void:
 			_add_xp(_roll_between(_debris_xp_min, _debris_xp_max))
 		if _next_unit() < _debris_drop_chance:
 			_grant_random_module()
+
+## 撞击房屋：玩家坦克的**真实格轮廓**与房屋相交且速度足够时扣血（design §3.4.4）。
+## 只有玩家会撞房屋——敌人 AI 的目标是玩家，不去拆房子。
+## **v3.20 改用逐格**：旧版用 `world_bounds()` 外接框相交就扣血，车头没碰到房子
+## （只是外接框的虚空角逼近了房子）也会扣血。现在要求至少有一个真实格压在房屋矩形上。
+func _resolve_rammed_houses() -> void:
+	var tank: TankBody = duel.tank_of(Duel.TAG_PLAYER)
+	if tank == null:
+		return
+	var speed: float = tank.velocity.length()
+	if speed <= _wall_min_speed:
+		return
+	for house in houses:
+		if not bool(house["alive"]):
+			continue
+		var overlap := tank.cell_overlap_rect(Rect2(house["rect"]))
+		if not bool(overlap["hit"]):
+			continue
+		var raw: float = _wall_base + _wall_per_speed * speed
+		_damage_house(house, raw, [])
 
 ## 结算已被击毁的敌人：给钱、给经验、按概率掉落它自己的一个配件（design §3.4.4 / Q31）。
 func _reap_enemies(frame_events: Array[Dictionary]) -> void:

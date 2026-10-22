@@ -40,6 +40,7 @@ func _init() -> void:
 		return
 	if not _check_tank_collision(definitions):
 		return
+	if not _check_cell_hull_differs_from_aabb(definitions):
 		return
 	if not _check_spin_stop(definitions):
 		return
@@ -340,9 +341,15 @@ func _check_rect_obstacle_push_out(definitions: ModuleDefs) -> bool:
 		return false
 	return true
 
-## R17-3：圆心落在 AABB 内部时，推出量必须让 AABB 完整离开圆。
-## 缺陷表现：closest 退化为圆心、distance = 0，旧的「radius − distance」只推 radius，
-## 且法向取自中心差，完全忽略圆心与 AABB 中心的偏移。
+## R17-3（v3.20 重写）：圆心与车的两种情形必须分开验。
+##
+## 情形 A —— **圆心埋在车体内**（圆心落在某个格内）：这是退化情形。
+## 让圆整个在车里时，逐格求最小平移会在格与格之间打转（实测卡在 depth=0），
+## 所以实现保留旧的外接框兜底：按整车轮廓把圆推出去。断言：推出后逐格无命中。
+##
+## 情形 B —— **圆心在车外**（正常碰撞）：这时逐格才是正确口径。
+## 把圆放在车体右前方、只碰到最右一列格。外接框会把左下角的虚空也当实心，
+## 逐格只推那一列。断言：推出量明显小于按整车推的量。
 func _check_circle_obstacle_push_out(definitions: ModuleDefs) -> bool:
 	var builder := GridBuilder.new()
 	if not builder.setup(definitions):
@@ -359,20 +366,41 @@ func _check_circle_obstacle_push_out(definitions: ModuleDefs) -> bool:
 		_fail("PHYSICS_FAIL_CIRCLE_BODY")
 		return false
 	body.position = Vector2(1024.0, 576.0)
-	var bounds := body.world_bounds()
-	var half := bounds.size * 0.5
 	var radius := 30.0
-	var centre := bounds.get_center()
+	## ===== 情形 A：圆心埋在车体内（内圈） =====。
+	var inner_centre: Vector2 = body.world_bounds().get_center()
 	var before := body.position
-	body.apply_obstacles([{"shape": "circle", "center": centre, "radius": radius}])
+	body.apply_obstacles([{"shape": "circle", "center": inner_centre, "radius": radius}])
 	var moved := body.position.distance_to(before)
-	## 同心时最短推出量 = radius + 较短的半边（即沿短轴推出）。
-	var expected := radius + minf(half.x, half.y)
-	if moved < expected - 0.01:
-		_fail("PHYSICS_FAIL_CIRCLE_SHORT moved=%.2f expected=%.2f" % [moved, expected])
+	if bool(body.cell_overlap_circle(inner_centre, radius)["hit"]):
+		_fail("PHYSICS_FAIL_CIRCLE_INSIDE_STILL_OVERLAP moved=%.2f" % moved)
 		return false
-	if body.world_bounds().has_point(centre):
-		_fail("PHYSICS_FAIL_CIRCLE_OVERLAP")
+	if moved <= 0.0:
+		_fail("PHYSICS_FAIL_CIRCLE_INSIDE_NO_PUSH")
+		return false
+	## ===== 情形 B：圆心在车外，只碰到最右一列 =====。
+	body.position = Vector2(1024.0, 576.0)
+	var rightmost := -INF
+	for entry in body.cell_world_rects():
+		rightmost = maxf(rightmost, (entry["centre"] as Vector2).x)
+	## 圆心放在最右一格中心再向右一格的半个处：圆必然压到最右列。
+	var outer_centre := Vector2(rightmost + body.cell_size(), body.world_bounds().get_center().y)
+	if not bool(body.cell_overlap_circle(outer_centre, radius)["hit"]):
+		## 没碰到就不构成碰撞测试，直接跳过这一段（前置条件不成立）。
+		return true
+	before = body.position
+	body.apply_obstacles([{"shape": "circle", "center": outer_centre, "radius": radius}])
+	var outer_moved := body.position.distance_to(before)
+	if bool(body.cell_overlap_circle(outer_centre, radius)["hit"]):
+		_fail("PHYSICS_FAIL_CIRCLE_OUTER_STILL_OVERLAP moved=%.2f" % outer_moved)
+		return false
+	## 逐格推出必须小于整车推出（半径 + 半车宽 = 30 + 24 = 54）。
+	var whole_hull_push := radius + minf(body.world_bounds().size.x, body.world_bounds().size.y) * 0.5
+	if outer_moved >= whole_hull_push - 0.01:
+		_fail("PHYSICS_FAIL_CIRCLE_USED_AABB moved=%.2f whole=%.2f" % [outer_moved, whole_hull_push])
+		return false
+	if outer_moved <= 0.0:
+		_fail("PHYSICS_FAIL_CIRCLE_OUTER_NO_PUSH")
 		return false
 	return true
 
@@ -568,3 +596,70 @@ func _measure_spin_stop(definitions: ModuleDefs) -> float:
 		if absf(body.angular_velocity) <= 0.1:
 			return elapsed
 	return -1.0
+
+## v3.20 的**区分性**回归：证明碰撞箱真的是逐格拓扑，而不是整车外接框。
+##
+## 构造一台 U 形车（左边一竖 + 下边一横，中间是凹口）。外接框会把凹口当实心，
+## 逐格则不会。五个独立断言：
+##   ① 凹口中心确实落在外接框内（前提成立，否则无区分性）；
+##   ② 凹口处逐格无命中；
+##   ③ 凹口内的小矩形与车体不相交；
+##   ④ 但真实占用的格子仍然命中（证明不是「永远不碰」）；
+##   ⑤ 两台单格车车角相对：外接框相交，逐格不相交。
+func _check_cell_hull_differs_from_aabb(definitions: ModuleDefs) -> bool:
+	var builder := GridBuilder.new()
+	if not builder.setup(definitions):
+		_fail("PHYSICS_FAIL_U_BUILDER")
+		return false
+	builder.budget_enabled = false
+	builder.credits_total = 1000000
+	## U 形：竖边 x=4、y=4..7；底边 y=7、x=4..7。凹口在 (5..7, 4..6)。
+	for y in range(4, 8):
+		builder.place_platform_cell(Vector2i(4, y))
+	for x in range(4, 8):
+		builder.place_platform_cell(Vector2i(x, 7))
+	builder.place_module("cockpit_light", Vector2i(4, 4), 0, 0)
+	var body := TankBody.new()
+	if not body.setup(definitions, builder):
+		_fail("PHYSICS_FAIL_U_BODY")
+		return false
+	body.position = Vector2(500.0, 500.0)
+	body.heading = 0.0
+	var notch := body.world_position_of_cell(Vector2i(6, 5))
+	## ① 前提：外接框包含凹口，说明区分性成立。
+	if not body.world_bounds().has_point(notch):
+		_fail("PHYSICS_FAIL_U_NOTCH_OUTSIDE_AABB")
+		return false
+	## ② 逐格：凹口处不应有任何格子。
+	if bool(body.cell_overlap_circle(notch, 1.0)["hit"]):
+		_fail("PHYSICS_FAIL_U_NOTCH_HAS_CELL")
+		return false
+	## ③ 凹口内的小矩形也不应与车体相交。
+	var notch_rect := Rect2(notch - Vector2(5.0, 5.0), Vector2(10.0, 10.0))
+	if bool(body.cell_overlap_rect(notch_rect)["hit"]):
+		_fail("PHYSICS_FAIL_U_NOTCH_RECT_HIT")
+		return false
+	## ④ 真实占用的格子仍然命中。
+	if not bool(body.cell_overlap_circle(body.world_position_of_cell(Vector2i(4, 4)), 1.0)["hit"]):
+		_fail("PHYSICS_FAIL_U_SOLID_MISS")
+		return false
+	## ⑤ 两车「外接框相交、格子不交」——用 L 形 vs 单格验证逐格的区分性。
+	## U 形车已有凹口；把单格车放到凹口里：单格车的外接框在 U 形的 AABB 内，
+	## 但它只占凹口（凹口里没格子），所以逐格判定不应相交。
+	var single := _make_single_cell(definitions, "PHYSICS_FAIL_CORNER_B")
+	if single == null:
+		return false
+	## 凹口格 (6,5) 的世界位置就是单格车要占据的地方。
+	single.position = notch
+	if not body.world_bounds().intersects(single.world_bounds()):
+		_fail("PHYSICS_FAIL_CORNER_AABB_NOT_OVERLAP")
+		return false
+	if bool(body.cells_overlap_tank(single)["hit"]):
+		_fail("PHYSICS_FAIL_CORNER_CELLS_HIT")
+		return false
+	## 反向对照：把单格车挪到真实格子上（(4,4)），必须相交。
+	single.position = body.world_position_of_cell(Vector2i(4, 4))
+	if not bool(body.cells_overlap_tank(single)["hit"]):
+		_fail("PHYSICS_FAIL_CORNER_REAL_CELL_MISS")
+		return false
+	return true

@@ -14,11 +14,13 @@ extends RefCounted
 
 ## 一条动效：`kind` 供绘制端分支，`pos` 是世界坐标（页面层负责转屏幕坐标），
 ## `radius` 以像素计，`left` / `life` 驱动淡出比例 `left / life`。
+## `text` 可选：非空时绘制端当作**悬浮数字/文字**渲染（伤害提示用），空则照旧画圆环。
+## 默认空字符串保证所有旧调用点的行为完全不变。
 var entries: Array = []
 
 
 ## 追加一条动效。`life <= 0` 视为无效，直接忽略，避免绘制端出现除零。
-func push(kind: String, at: Vector2, radius: float, colour: Color, life: float) -> void:
+func push(kind: String, at: Vector2, radius: float, colour: Color, life: float, text: String = "") -> void:
 	if life <= 0.0:
 		return
 	entries.append({
@@ -28,6 +30,7 @@ func push(kind: String, at: Vector2, radius: float, colour: Color, life: float) 
 		"colour": colour,
 		"left": life,
 		"life": life,
+		"text": text,
 	})
 
 

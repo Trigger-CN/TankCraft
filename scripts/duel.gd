@@ -353,6 +353,13 @@ func _resolve_impact(event: Dictionary) -> void:
 		float(event.get("damage_scale", 1.0))
 	)
 	var dealt := float(hit.get("damage", 0.0)) + float(hit.get("shield", 0.0))
+	## v3.20：把**真实结算后的伤害**写回事件，供页面层做悬浮数字。
+	## 必须在结算之后写：`apply_hit()` 可能走延迟爆炸分支，那时 `damage` 已经是
+	## 预先算好的「过完护甲」值；直接拿弹药的 base_damage 会显示得偏高。
+	## `shield` 单列，页面层据此把护盾吸收的数字换个颜色，不与本体的混为一谈。
+	event["damage"] = float(hit.get("damage", 0.0))
+	event["shield"] = float(hit.get("shield", 0.0))
+	event["victim"] = victim
 	if not damage_dealt.has(shooter):
 		damage_dealt[shooter] = 0.0
 	damage_dealt[shooter] = float(damage_dealt[shooter]) + dealt

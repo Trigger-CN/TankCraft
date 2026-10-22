@@ -307,6 +307,8 @@ func cell_size() -> float:
 	return _cell_size
 
 ## 当前朝向下的世界轴对齐包围盒（已含旋转），用于边界与障碍碰撞。
+## **注意**：这是整车外接 AABB，只用作粗筛（broad phase）与旧调用兼容，
+## 不再是碰撞依据——真实碰撞体是逐个配件的格子，见 `cell_world_rects()`。
 func world_bounds() -> Rect2:
 	if cells.is_empty():
 		return Rect2(position, Vector2.ZERO)
@@ -327,6 +329,172 @@ func world_bounds() -> Rect2:
 			max_p.y = maxf(max_p.y, point.y)
 	return Rect2(min_p, max_p - min_p)
 
+## 逐格的世界坐标**旋转矩形**（OBB）四角。每个存活格一项：
+## `{cell, part_index, corners:[四个 Vector2]}`，四角顺序为 左上/右上/右下/左下（已旋转）。
+## 这是碰撞箱的唯一真相来源：坦克的体积就是这些格子的并集，格与格之间的凹口不是碰撞体。
+## 与 `world_bounds()` 的区别：外接框会把两块分离的格之间的空白也算进去，而这里不会。
+func cell_world_rects() -> Array:
+	var out: Array = []
+	if cells.is_empty():
+		return out
+	var half := _cell_size * 0.5
+	for unit in cells:
+		var centre := position + (Vector2(unit["local"]) - centroid_local).rotated(heading)
+		var corners: Array[Vector2] = []
+		for offset in [Vector2(-half, -half), Vector2(half, -half), Vector2(half, half), Vector2(-half, half)]:
+			corners.append(centre + (offset as Vector2).rotated(heading))
+		out.append({
+			"cell": Vector2i(unit["cell"]),
+			"part_index": int(unit["part_index"]),
+			"centre": centre,
+			"corners": corners,
+		})
+	return out
+
+## 逐格与轴对齐矩形的相交测试（分离轴定理，只需测两个矩形各自的边法线）。
+## 返回**穿透最浅**的那一格：`{hit, depth, normal, cell, part_index}`。
+## `normal` 是「从目标格指向 rect」的方向，推出时沿它反方向平移本体。
+## 为什么不用外接框：外接框会把 L 形车的凹口当成实心，车明明能进去却被弹开。
+func cell_overlap_rect(rect: Rect2) -> Dictionary:
+	var best := {"hit": false, "depth": INF, "normal": Vector2.ZERO, "cell": Vector2i.ZERO, "part_index": -1}
+	for entry in cell_world_rects():
+		var corners: Array[Vector2] = entry["corners"]
+		var centre: Vector2 = entry["centre"]
+		## 格子的两条正交轴：u = 格子的「向右」向量（已旋转），v = 其垂直。
+		var u: Vector2 = ((corners[1] - corners[0]) as Vector2).normalized()
+		var v: Vector2 = ((corners[3] - corners[0]) as Vector2).normalized()
+		var half_extent := _cell_size * 0.5
+		var rect_centre := rect.get_center()
+		var rect_half := rect.size * 0.5
+		## 两个矩形的四条轴：格子的 u/v，与矩形自身的 X/Y。
+		var axes: Array[Vector2] = [u, v, Vector2.RIGHT, Vector2.DOWN]
+		var overlap := INF
+		var axis_best := Vector2.ZERO
+		var separated := false
+		for axis in axes:
+			var self_radius := half_extent * (absf(axis.dot(u)) + absf(axis.dot(v)))
+			var other_radius := rect_half.x * absf(axis.dot(Vector2.RIGHT)) + rect_half.y * absf(axis.dot(Vector2.DOWN))
+			var distance := absf((rect_centre - centre).dot(axis))
+			var gap := self_radius + other_radius - distance
+			if gap <= 0.0:
+				separated = true
+				break
+			if gap < overlap:
+				overlap = gap
+				axis_best = axis if (rect_centre - centre).dot(axis) >= 0.0 else -axis
+		if separated:
+			continue
+		if overlap < float(best["depth"]):
+			best = {
+				"hit": true,
+				"depth": overlap,
+				"normal": axis_best,
+				"cell": entry["cell"],
+				"part_index": entry["part_index"],
+			}
+	return best
+
+## 逐格与圆的相交测试，返回**穿透最深**的那一格。
+##
+## 为什么是「最深」而不是「最浅」：一个半径大于格子的圆会同时压住几格，
+## 取最浅的一格只能推出一点点，下一步又轮到相邻格，在格与格之间反复横跳、永不收敛
+## （实测卡在 depth=0 的死循环）。取最深的一格可以一次推够。
+## `depth` 的几何含义：要让这一格完全不与圆相交，需沿 `normal` 反方向移动的距离。
+func cell_overlap_circle(centre: Vector2, radius: float) -> Dictionary:
+	var best := {"hit": false, "depth": -INF, "normal": Vector2.ZERO, "cell": Vector2i.ZERO, "part_index": -1}
+	if radius <= 0.0:
+		return best
+	var half := _cell_size * 0.5
+	for entry in cell_world_rects():
+		var cell_centre: Vector2 = entry["centre"]
+		var relative := centre - cell_centre
+		## 变换到格子局部轴（逆旋转，用两角构造正交基）。
+		var corners: Array[Vector2] = entry["corners"]
+		var u: Vector2 = ((corners[1] - corners[0]) as Vector2).normalized()
+		var v := Vector2(-u.y, u.x)
+		var local := Vector2(relative.dot(u), relative.dot(v))
+		## 圆心到矩形的最近点（局部）。
+		var closest := Vector2(clampf(local.x, -half, half), clampf(local.y, -half, half))
+		var delta := local - closest
+		var distance := delta.length()
+		var depth := 0.0
+		var local_normal := Vector2.ZERO
+		if distance > 0.0001:
+			if distance >= radius:
+				continue
+			depth = radius - distance
+			local_normal = delta / distance
+		else:
+			## 圆心在格内：先出格边界（dx/dy），再退一个半径。
+			var dx := half - absf(local.x)
+			var dy := half - absf(local.y)
+			if dx < 0.0 or dy < 0.0:
+				continue
+			if dx < dy:
+				local_normal = Vector2(signf(local.x) if local.x != 0.0 else 1.0, 0.0)
+				depth = dx + radius
+			else:
+				local_normal = Vector2(0.0, signf(local.y) if local.y != 0.0 else 1.0)
+				depth = dy + radius
+		if depth > float(best["depth"]):
+			best = {
+				"hit": true,
+				"depth": depth,
+				"normal": u * local_normal.x + v * local_normal.y,
+				"cell": entry["cell"],
+				"part_index": entry["part_index"],
+			}
+	return best
+
+## 逐格的世界凸多边形是否与另一台坦克的逐格凸多边形相交（SAT，两套格的轴）。
+## 返回 `{hit, depth, normal}`，`normal` 指向 other。
+## 为什么不用外接框：两台车车角相对、中间隔两格虚空时，外接框判定为碰撞，逐格判定为不碰。
+func cells_overlap_tank(other) -> Dictionary:
+	if destroyed or other == null or bool(other.destroyed):
+		return {"hit": false, "depth": 0.0, "normal": Vector2.ZERO}
+	var mine := cell_world_rects()
+	var theirs: Array = other.cell_world_rects()
+	if mine.is_empty() or theirs.is_empty():
+		return {"hit": false, "depth": 0.0, "normal": Vector2.ZERO}
+	var best := {"hit": false, "depth": INF, "normal": Vector2.ZERO}
+	for raw_a in mine:
+		var a: Dictionary = raw_a
+		var a_centre: Vector2 = a["centre"]
+		var a_corners: Array[Vector2] = a["corners"]
+		var au: Vector2 = ((a_corners[1] - a_corners[0]) as Vector2).normalized()
+		var av := Vector2(-au.y, au.x)
+		for raw_b in theirs:
+			var b: Dictionary = raw_b
+			var b_centre: Vector2 = b["centre"]
+			var b_corners: Array[Vector2] = b["corners"]
+			var bu: Vector2 = ((b_corners[1] - b_corners[0]) as Vector2).normalized()
+			var bv := Vector2(-bu.y, bu.x)
+			var separated := false
+			var overlap := INF
+			var axis_best := Vector2.ZERO
+			for axis in [au, av, bu, bv]:
+				var self_radius := half_extent_of(a_corners) * (absf(axis.dot(au)) + absf(axis.dot(av)))
+				var other_radius := half_extent_of(b_corners) * (absf(axis.dot(bu)) + absf(axis.dot(bv)))
+				var distance := absf((b_centre - a_centre).dot(axis))
+				var gap := self_radius + other_radius - distance
+				if gap <= 0.0:
+					separated = true
+					break
+				if gap < overlap:
+					overlap = gap
+					axis_best = axis if (b_centre - a_centre).dot(axis) >= 0.0 else -axis
+			if separated:
+				continue
+			if overlap < float(best["depth"]):
+				best = {"hit": true, "depth": overlap, "normal": axis_best}
+	return best
+
+## 取四角构成的正方形的半边长（格子的边长恒为 cell_size，但保留通用写法）。
+func half_extent_of(corners: Array) -> float:
+	if corners.size() < 2:
+		return _cell_size * 0.5
+	return ((corners[1] as Vector2) - (corners[0] as Vector2)).length() * 0.5
+
 func world_position_of_cell(cell: Vector2i) -> Vector2:
 	return position + (_cell_centre_local(cell) - centroid_local).rotated(heading)
 
@@ -341,8 +509,11 @@ func apply_boundary(arena_rect: Rect2) -> float:
 	if destroyed or cells.is_empty():
 		return 0.0
 	var before := impact_damage_total
+	## 边界是轴对齐的，所以这里用 `world_bounds()` 是**精确的**：它的 min/max 就是
+	## 所有格角点的极值，与逐格取极限结果完全一致，不存在「凹口被当成实心」的问题。
+	## 逐格判定只在**非轴对齐形状**（旋转的格 vs 矩形/圆/另一台车）上才有意义，
+	## 那几处见 `cell_overlap_rect()` / `cell_overlap_circle()` / `cells_overlap_tank()`。
 	var bounds := world_bounds()
-	## 接触容差：贴墙静止时 penetration 恰为 0，仍需清零向墙内的法向速度。
 	var contact := 0.001
 	var normals: Array[Vector2] = []
 	var deepest := 0.0
@@ -380,69 +551,76 @@ func apply_obstacles(obstacles: Array) -> float:
 			_resolve_obstacle_circle(Vector2(obstacle["center"]), float(obstacle.get("radius", 0.0)))
 	return impact_damage_total - before
 
-## 矩形障碍：取四个候选抽出方向中穿透最小的一个做最小平移。
-## outward 语义："从本体指向障碍"的方向；_resolve_contact 内部用 position -= outward·d 推开。
-## R17-2：原先的写法有两个错误：一是方向传反了（towards_left 时传 LEFT，把车推进障碍），
-## 二是只比较 overlap_x / overlap_y——当长条墙体的某轴完全包含车身时，
-## 两个 overlap 都等于车身尺寸，会选中与入撞方向无关的轴，车身就从墙里穿过去。
-## 因此改成比较四个「抽出到各侧面」的穿透量，取最小。
-func _resolve_obstacle_rect(rect: Rect2) -> void:
-	var bounds := world_bounds()
-	if not bounds.intersects(rect):
-		return
-	var overlap_x := minf(bounds.end.x, rect.end.x) - maxf(bounds.position.x, rect.position.x)
-	var overlap_y := minf(bounds.end.y, rect.end.y) - maxf(bounds.position.y, rect.position.y)
-	if overlap_x <= 0.0 or overlap_y <= 0.0:
-		return
-	## 从本体向各外侧抽出的距离；outward 指向障碍，所以推开方向取对应反向。
-	var out_left := bounds.end.x - rect.position.x
-	var out_right := rect.end.x - bounds.position.x
-	var out_up := bounds.end.y - rect.position.y
-	var out_down := rect.end.y - bounds.position.y
-	var best := "left"
-	var depth := out_left
-	if out_right < depth:
-		best = "right"
-		depth = out_right
-	if out_up < depth:
-		best = "up"
-		depth = out_up
-	if out_down < depth:
-		best = "down"
-		depth = out_down
-	match best:
-		"left":
-			_resolve_contact([Vector2.RIGHT], depth)
-		"right":
-			_resolve_contact([Vector2.LEFT], depth)
-		"up":
-			_resolve_contact([Vector2.DOWN], depth)
-		_:
-			_resolve_contact([Vector2.UP], depth)
+## 矩形障碍：逐格求交，迭代推出。
+## **v3.20 改用逐格**：旧实现拿整车外接框与障碍求交，斜放的细长车会用外接框的四角
+## 去碰障碍，那些角其实是虚空；L 形车的凹口也会被当成实心，车明明能骑进去却被弹开。
+## 现在只问「有没有某一个真实的格子压在障碍上」，并用 SAT 得到的**最短分离轴**推出。
+##
+## **为什么要迭代**：一次只按「当前最浅的那一格」推，推出后相邻的格子可能又压上了
+## （比如圆半径大于半车宽时）。所以循环到逐格不再命中为止，最多 `MAX_PUSH_ITERATIONS` 次。
+## 伤害只在**最后一次**结算，避免同一帧反复扣血（R17-4 的墙角双扣就是这个毛病）。
+const MAX_PUSH_ITERATIONS := 8
 
-## 圆形障碍：AABB 最近点法。
-## R17-3：原实现只在圆心落在 AABB 内部时失效——closest 退化为圆心本身，
-## distance = 0，随后用「中心差」当法向、把那个长度当穿透量，推出量不够，仍与圆重叠。
-## 现在分成两种情形：
-##   圆心在 AABB 外 → 穿透量就是 radius − distance（不需要再叠加任何支撑半径）；
-##   圆心在 AABB 内 → 把圆当作「AABB 向外膨胀 radius」，取四个面中最大透入最小的一个面推出。
+func _resolve_obstacle_rect(rect: Rect2) -> void:
+	var total_push := Vector2.ZERO
+	var last_normal := Vector2.ZERO
+	var last_depth := 0.0
+	for iteration in range(MAX_PUSH_ITERATIONS):
+		var overlap := cell_overlap_rect(rect)
+		if not bool(overlap["hit"]):
+			break
+		var normal: Vector2 = overlap["normal"]
+		var depth := float(overlap["depth"])
+		## `normal` 由格指向矩形，推开本体要沿反方向；先累积位移，最后一次性应用。
+		position -= normal * depth
+		total_push += normal * depth
+		last_normal = normal
+		last_depth = depth
+	if last_normal == Vector2.ZERO:
+		return
+	## 位移已经做过（在循环里），这里只结算速度与伤害，传 penetration = 0。
+	_resolve_contact([last_normal], 0.0)
+
+## 圆形障碍：逐格求交，迭代推出（理由同矩形，见 `MAX_PUSH_ITERATIONS`）。
+## **v3.20 改用逐格**：旧实现用整车外接框与圆求最近点——外接框的四个角在斜放车上
+## 是虚空，圆压到那个角也会把车推开；而真正的格子可能在圆外，实际没碰。
 func _resolve_obstacle_circle(centre: Vector2, radius: float) -> void:
 	if radius <= 0.0:
 		return
-	var bounds := world_bounds()
-	var closest := Vector2(
-		clampf(centre.x, bounds.position.x, bounds.end.x),
-		clampf(centre.y, bounds.position.y, bounds.end.y)
-	)
-	var delta := closest - centre
-	var distance := delta.length()
-	if distance > 0.0001:
-		if distance >= radius:
+	## **先判断圆是否埋在本体内部**（圆心落在某个格内）。
+	## 这种退化情形不能用逐格求最小平移：圆心在车里时，任何一格都「命中且穿透很小」，
+	## 逐格迭代会在格与格之间弹来弹去，永远推不干净（实测会卡在 depth=0 的死循环）。
+	## 正确的语义是：**圆整个埋在车里，按整车轮廓把它推出**——这时外接框反而是对的。
+	for entry in cell_world_rects():
+		var corners: Array[Vector2] = entry["corners"]
+		var u: Vector2 = ((corners[1] - corners[0]) as Vector2).normalized()
+		var v := Vector2(-u.y, u.x)
+		var local_rel := centre - (entry["centre"] as Vector2)
+		var half := _cell_size * 0.5
+		if absf(local_rel.dot(u)) <= half and absf(local_rel.dot(v)) <= half:
+			_resolve_circle_inside_hull(centre, radius)
 			return
-		## normal 从圆心指向本体，所以推开本体用 -normal。
-		_resolve_contact([-(delta / distance)], radius - distance)
+	var last_normal := Vector2.ZERO
+	for iteration in range(MAX_PUSH_ITERATIONS):
+		var overlap := cell_overlap_circle(centre, radius)
+		if not bool(overlap["hit"]):
+			break
+		var normal: Vector2 = overlap["normal"]
+		var depth := float(overlap["depth"])
+		if depth <= 0.0001:
+			## 退化：已经贴住但没有可推的穿透，再迭代也是原地打转。
+			break
+		## `normal` 由格指向圆心，推开本体要沿反方向。
+		position -= normal * depth
+		last_normal = normal
+	if last_normal == Vector2.ZERO:
 		return
-	## 圆心已在 AABB 内（也包含两车同心这种退化情形）。
+	_resolve_contact([last_normal], 0.0)
+
+## 圆心落在车体**内部**时的兜底：把整车轮廓推到圆外。
+## 这是旧的 R17-3 分支，语义仍然正确——只是不再用于「圆心在车外」的正常碰撞。
+func _resolve_circle_inside_hull(centre: Vector2, radius: float) -> void:
+	var bounds := world_bounds()
 	var half := bounds.size * 0.5
 	var offset := centre - bounds.get_center()
 	var limit := half + Vector2(radius, radius)
@@ -507,25 +685,16 @@ func apply_tank_collision(other) -> float:
 	var other_cells: Array = other.cells
 	if cells.is_empty() or other_cells.is_empty():
 		return 0.0
-	var a := world_bounds()
-	var b: Rect2 = other.world_bounds()
-	if not a.intersects(b):
-		return 0.0
-	var overlap_x := minf(a.end.x, b.end.x) - maxf(a.position.x, b.position.x)
-	var overlap_y := minf(a.end.y, b.end.y) - maxf(a.position.y, b.position.y)
-	if overlap_x <= 0.0 or overlap_y <= 0.0:
+	## **v3.20 改用逐格 SAT**：旧实现拿两台车的外接框相交就判碰。两台 L 形车
+	## 车角相对、中间隔着两格虚空时，外接框已经相交，于是它们会凭空互撞并扣血。
+	## 现在要求至少存在一对**真实的格子**相交，并用最短分离轴推开。
+	var contact := cells_overlap_tank(other)
+	if not bool(contact["hit"]):
 		return 0.0
 	var other_position: Vector2 = other.position
-	## 分离方向：从本体的 AABB 中心指向对方。两车同心时用位置差，仍相同则取 +X（确定性）。
-	var push := b.get_center() - a.get_center()
-	if push.length_squared() <= 0.0001:
-		push = other_position - position
-	if push.length_squared() <= 0.0001:
-		push = Vector2.RIGHT
-	var axis := Vector2.RIGHT if absf(push.x) >= absf(push.y) else Vector2.DOWN
-	if push.dot(axis) < 0.0:
-		axis = -axis
-	var depth := overlap_x if axis == Vector2.RIGHT else overlap_y
+	## `normal` 由本体指向对方，与下面的法向相对速度计算方向一致。
+	var axis: Vector2 = contact["normal"]
+	var depth := float(contact["depth"])
 	## 按质量反比分配分离量：重的少动。M 为 0 时两侧各一半。
 	var other_mass: float = float(other.mass_total)
 	var total_mass: float = mass_total + other_mass

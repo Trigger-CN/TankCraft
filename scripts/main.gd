@@ -948,7 +948,26 @@ func _match_step(step_time: float) -> void:
 	for raw_event in match_session.duel.drain_events():
 		var battle_event: Dictionary = raw_event
 		var kind := String(battle_event.get("kind", ""))
-		if kind == "core_destroyed":
+		if kind == "impact" and String(battle_event.get("target", "")) == "tank":
+			## v3.20 悬浮数字：对局页同样「造成与承受都显示」。
+			## 坐标是竞技场世界坐标，`_draw_match_fx` 会按 `DRIVE_VIEW.position + pos * scale` 转换。
+			var at := Vector2(battle_event.get("pos", Vector2.ZERO))
+			var dealt := float(battle_event.get("damage", 0.0))
+			var absorbed := float(battle_event.get("shield", 0.0))
+			var victim := String(battle_event.get("tag", ""))
+			if victim == Duel.TAG_PLAYER:
+				if dealt > 0.0:
+					_push_match_damage(at, dealt, Palette.ACCENT_RED, "received")
+				if absorbed > 0.0:
+					_push_match_damage(at, absorbed, Palette.ACCENT_LIME, "shield")
+				_match_event = "本体被命中"
+			else:
+				if dealt > 0.0:
+					_push_match_damage(at, dealt, Palette.ACCENT_CYAN, "dealt")
+				if absorbed > 0.0:
+					_push_match_damage(at, absorbed, Palette.ACCENT_LIME, "shield")
+				_match_event = "命中 %s" % victim
+		elif kind == "core_destroyed":
 			_match_event = "驾驶舱被摧毁"
 		elif kind == "detach":
 			_match_event = "整块脱落：%d 格被撕下" % (battle_event.get("cells", []) as Array).size()
@@ -972,6 +991,47 @@ func _match_outcome_text() -> String:
 
 func _push_match_fx(kind: String, at: Vector2, radius: float, colour: Color, life: float) -> void:
 	_match_fx.push(kind, at, radius, colour, life)
+
+## 对局页的伤害悬浮数字（与生存页同一套语义，但坐标系统不同）。
+## 同侧同帧限流与生存页一致，避免多炮齐射时数字糊满屏。
+func _push_match_damage(at: Vector2, amount: float, colour: Color, mode: String) -> void:
+	if amount <= 0.0:
+		return
+	var shown := int(roundf(amount))
+	if shown <= 0:
+		return
+	var counting := 0
+	for raw_entry in _match_fx.entries:
+		if String((raw_entry as Dictionary).get("kind", "")) == "damage":
+			counting += 1
+	if counting >= DAMAGE_POPUP_PER_SIDE:
+		return
+	## 符号语义与生存页一致：造成 `+N`，承受/护盾 `-N`。
+	var label := "+%d" % shown if mode == "dealt" else "-%d" % shown
+	_match_fx.push("damage", at, 0.0, colour, DAMAGE_POPUP_LIFE, label)
+
+## 对局页的伤害数字绘制：与生存页同样的上浮 + 淡出，但坐标转换走 `_match_fx` 的规矩。
+func _draw_match_damage_popups(scale_factor: float) -> void:
+	var stack := 0
+	for raw_entry in _match_fx.entries:
+		var entry: Dictionary = raw_entry
+		if String(entry.get("kind", "")) != "damage":
+			continue
+		var text := String(entry.get("text", ""))
+		if text.is_empty():
+			continue
+		var life := float(entry["life"])
+		if life <= 0.0:
+			continue
+		var progress := clampf(1.0 - float(entry["left"]) / life, 0.0, 1.0)
+		var rise := DAMAGE_POPUP_RISE * sqrt(progress) * scale_factor
+		var at: Vector2 = DRIVE_VIEW.position + Vector2(entry["pos"]) * scale_factor + Vector2(0.0, -rise - float(stack) * 14.0)
+		var colour: Color = entry["colour"]
+		var alpha := 1.0 if progress < 0.7 else clampf((1.0 - progress) / 0.3, 0.0, 1.0)
+		var size := int(roundf(20.0 - 4.0 * progress))
+		_draw_text(text, at + Vector2(1.0, 1.0), size, Color(0.0, 0.0, 0.0, 0.55 * alpha), true)
+		_draw_text(text, at, size, Color(colour, alpha), true)
+		stack += 1
 
 ## 对局页动效倒计时：只在 `_match_step` 的固定步长里累减。
 ## 递减逻辑已收归 `FxLayer.step()`（v3.11）——三页共用一份，不会再出现「调错 tick 对象」。
@@ -1723,6 +1783,9 @@ func _draw_match_hull(tag: String, scale_factor: float) -> void:
 func _draw_match_fx(scale_factor: float) -> void:
 	for raw_entry in _match_fx.entries:
 		var entry: Dictionary = raw_entry
+		## 伤害数字由 `_draw_match_damage_popups()` 单独画，这里跳过，否则会多画一个小圆圈。
+		if String(entry.get("kind", "")) == "damage":
+			continue
 		var at: Vector2 = DRIVE_VIEW.position + Vector2(entry["pos"]) * scale_factor
 		var radius := float(entry["radius"]) * scale_factor
 		var colour: Color = entry["colour"]
@@ -1730,6 +1793,7 @@ func _draw_match_fx(scale_factor: float) -> void:
 		var ratio := clampf(float(entry["left"]) / life, 0.0, 1.0)
 		var grow := 1.0 - ratio
 		draw_arc(at, radius * (0.2 + 0.8 * grow), 0.0, TAU, 24, Color(colour, 0.8 * ratio), 2.0)
+	_draw_match_damage_popups(scale_factor)
 
 func _draw_match_hud() -> void:
 	var duel: Duel = match_session.duel
@@ -2287,6 +2351,12 @@ const SURVIVAL_SHOP_HEIGHT := 132.0
 const SURVIVAL_MIRROR_RECT := Rect2(1560.0, 436.0, 312.0, 400.0)
 ## 命中闪光持续时间（秒，固定步长累减）。
 const HIT_FLASH_TIME := 0.14
+## 伤害悬浮数字：上浮速度（像素/秒，世界单位）与存活时长。
+## 两者都是导出常量而不是魔法数，方便后续调手感；写成常量也便于 smoke 断言。
+const DAMAGE_POPUP_RISE := 46.0
+const DAMAGE_POPUP_LIFE := 0.85
+## 同一帧同一侧最多显示几条数字：多炮齐射或殉爆时避免数字糊成一团。
+const DAMAGE_POPUP_PER_SIDE := 6
 
 var _survival_sell_index := 0
 
@@ -2537,9 +2607,22 @@ func _survival_step(step_time: float) -> void:
 			_hit_flash_at = at
 			_hit_flash_left = HIT_FLASH_TIME
 			var victim := String(entry.get("tag", ""))
+			## v3.20 悬浮数字：**造成伤害与被击伤害都显示**。
+			## 数值来自 `duel._resolve_impact()` 写回事件的真实结算值，不是弹药的 base_damage。
+			## 打中敌人 → 白青色数字；自己被命中 → 红色数字；护盾吸收单独用绿色数字。
+			var dealt := float(entry.get("damage", 0.0))
+			var absorbed := float(entry.get("shield", 0.0))
 			if victim == Duel.TAG_PLAYER:
+				if dealt > 0.0:
+					_push_damage_popup(at, dealt, Palette.ACCENT_RED, "received")
+				if absorbed > 0.0:
+					_push_damage_popup(at, absorbed, Palette.ACCENT_LIME, "shield")
 				_survival_event = "本体被命中"
 			else:
+				if dealt > 0.0:
+					_push_damage_popup(at, dealt, Palette.ACCENT_CYAN, "dealt")
+				if absorbed > 0.0:
+					_push_damage_popup(at, absorbed, Palette.ACCENT_LIME, "shield")
 				_survival_event = "命中 %s" % victim
 		elif kind == "shield_hit":
 			_push_survival_fx("shield", Vector2.ZERO, 0.0, Palette.ACCENT_LIME, 0.25)
@@ -2576,6 +2659,35 @@ func _survival_cell_world(cell: Vector2i, tag: String) -> Vector2:
 
 func _push_survival_fx(kind: String, at: Vector2, radius: float, colour: Color, life: float) -> void:
 	_survival_fx.push(kind, at, radius, colour, life)
+
+## 伤害悬浮数字：把一次真实结算的数值推入动效层（`kind = "damage"`，带 `text`）。
+## 四舍五入到整数并带正负记号：**造成**用 `+N`、**承受**用 `-N`，颜色区分敌我。
+## 同侧同帧最多 `DAMAGE_POPUP_PER_SIDE` 条：多炮齐射时旧数字排队会让画面糊成一片，
+## 超出就丢弃最新的一条——保先保稳，不保全。
+func _push_damage_popup(at: Vector2, amount: float, colour: Color, mode: String) -> void:
+	if amount <= 0.0:
+		return
+	var shown := int(roundf(amount))
+	if shown <= 0:
+		return
+	var counting := 0
+	for raw_entry in _survival_fx.entries:
+		var entry: Dictionary = raw_entry
+		if String(entry.get("kind", "")) == "damage" and String(entry.get("mode", "")) == mode:
+			counting += 1
+	if counting >= DAMAGE_POPUP_PER_SIDE:
+		return
+	## 符号语义：**承受**与**护盾吸收**都是玩家损失，用负号；**造成**用正号。
+	## （旧版一律 `%+d`，导致被击中时也显示 `+17`——看起来像加血，语义错误。）
+	var label := ""
+	if mode == "dealt":
+		label = "+%d" % shown
+	else:
+		label = "-%d" % shown
+	_survival_fx.push("damage", at, 0.0, colour, DAMAGE_POPUP_LIFE, label)
+	## `mode` 在 push 之后补写：`push()` 的签名保持向后兼容（旧调用点不动），
+	## 而模式信息只有绘制/限流需要，不进入通用字段。
+	(_survival_fx.entries[_survival_fx.entries.size() - 1] as Dictionary)["mode"] = mode
 
 ## 动效倒计时在固定步长里累减，保持确定性（绝不放 `_process`，绝不用 `randf`）。
 ## 命中闪光的倒计时是生存页独有的（不属于通用动效列表），因此留在这里。
@@ -2659,6 +2771,8 @@ func _draw_survival_arena() -> void:
 		draw_circle(head, maxf(float(shot["radius"]) * scale_factor, 2.0), colour)
 	## 命中闪光画在炮弹之上，确保不会被格线淹掉。
 	_draw_survival_hit_flash(scale_factor)
+	## 伤害数字画在最后：必须盖在炮弹、命中闪光与所有地形之上。
+	_draw_damage_popups(scale_factor)
 
 ## 逐部件按**血量比例**上色：完好是队伍色、中度损伤转琥珀、濒危转红、已毁不留格。
 ## 旧版整台只有一种颜色、不看 HP，玩家看不见自己到底打掉了什么——这正是
@@ -2702,11 +2816,44 @@ func _draw_survival_fx(scale_factor: float) -> void:
 		var colour: Color = entry["colour"]
 		if String(entry["kind"]) == "shield":
 			continue
+		if String(entry["kind"]) == "damage":
+			## 悬浮数字单独画：不画圆环，只画上浮的文字（详见 `_draw_damage_popups`）。
+			continue
 		var at := _survival_to_screen(Vector2(entry["pos"]), scale_factor)
 		var radius := maxf(float(entry["radius"]) * scale_factor * (0.6 + 0.4 * t), 2.0)
 		var alpha := 0.75 * t
 		draw_circle(at, radius, Color(colour, alpha * 0.5))
 		draw_arc(at, radius, 0.0, TAU, 20, Color(colour, alpha), 1.5)
+
+## 伤害悬浮数字：从命中点向上飘升并淡出。
+## `progress = 1 - left/life` 从 0 走到 1；上升距离先快后慢（`sqrt`），像真的被击飞。
+## 字号随接近消失而略微缩小，强化「远离视线」的感觉；**不用随机偏移**，
+## 否则两次跑同一模拟会得到不同像素，截图逐字节比对就失效了。
+## 同一帧多条数字会在垂直方向按序号错开一行，避免完全重叠。
+func _draw_damage_popups(scale_factor: float) -> void:
+	var stack := 0
+	for raw_entry in _survival_fx.entries:
+		var entry: Dictionary = raw_entry
+		if String(entry.get("kind", "")) != "damage":
+			continue
+		var text := String(entry.get("text", ""))
+		if text.is_empty():
+			continue
+		var life := float(entry["life"])
+		if life <= 0.0:
+			continue
+		var progress := clampf(1.0 - float(entry["left"]) / life, 0.0, 1.0)
+		var rise := DAMAGE_POPUP_RISE * sqrt(progress) * scale_factor
+		var offset := Vector2(0.0, -rise - float(stack) * 14.0)
+		var at := _survival_to_screen(Vector2(entry["pos"]), scale_factor) + offset
+		var colour: Color = entry["colour"]
+		## 前 70% 保持不透明，后 30% 才淡出：数字要看得清，不能一出来就开始糊。
+		var alpha := 1.0 if progress < 0.7 else clampf((1.0 - progress) / 0.3, 0.0, 1.0)
+		var size := int(roundf(20.0 - 4.0 * progress))
+		## 先画一层暗色底再画本体：霓虹背景下纯色小字容易被地形线淹掉。
+		_draw_text(text, at + Vector2(1.0, 1.0), size, Color(0.0, 0.0, 0.0, 0.55 * alpha), true)
+		_draw_text(text, at, size, Color(colour, alpha), true)
+		stack += 1
 
 ## 最近一次命中点的高亮圈：即便命中发生在缩放后只有几像素的敌车上，也能看见。
 func _draw_survival_hit_flash(scale_factor: float) -> void:
