@@ -15,6 +15,10 @@ extends SceneTree
 var _main: Node = null
 var _step := 0
 var _failures := 0
+## v3.25：第 ⑧ 条断言要直接用 `CannonBank` 类型标注（`_player_bank()` 的返回类型），
+## 以及 `SurvivalRun.STAGE_BATTLE` 这个阶段常量。
+const CannonBank := preload("res://scripts/cannon_bank.gd")
+const SurvivalRun := preload("res://scripts/survival_run.gd")
 
 func _initialize() -> void:
 	var packed: PackedScene = load("res://scenes/main.tscn")
@@ -115,3 +119,42 @@ func _run_checks() -> void:
 	_send_button(grid_point, MOUSE_BUTTON_LEFT, true)
 	_send_button(grid_point, MOUSE_BUTTON_LEFT, false)
 	_expect(true, "battle_click_survived")
+
+	## ⑧ v3.25：战斗期左键必须**真的开火且把炮口转向点击处**。
+	##
+	## 为什么这条必须存在：前七条只证明「点击不炸」，而本轮的核心需求是
+	## 「鼠标瞄准 + 左键开火」。若 `_is_battle_screen()` 恒为假（例如 stage 判断
+	## 写错），测试依旧全绿，玩家却点了没反应——那是一个会静默失效的回归。
+	## 所以重新进入一局拿到真正的 `STAGE_BATTLE`，再断言两条可观察后果：
+	## ① 炮管进入了 `aim_override` 模式；② 「最近事件」变成了开火反馈。
+	_main._enter_survival()
+	_expect(_main.survival != null, "battle_reentered")
+	if _main.survival == null:
+		return
+	_expect(_main.survival.stage == SurvivalRun.STAGE_BATTLE, "battle_stage_battle")
+	_expect(_main._is_battle_screen(), "battle_is_battle_screen")
+	var player_bank: CannonBank = _main._player_bank()
+	_expect(player_bank != null and not player_bank.cannons.is_empty(), "battle_has_player_bank")
+	if player_bank == null or player_bank.cannons.is_empty():
+		return
+	var aim_before := bool(player_bank.cannons[0]["aim_override"])
+	_expect(not aim_before, "battle_aim_override_starts_off")
+	## 点在战场区中心的稍下方：`DRIVE_VIEW` 是 (320,168,1216,684)。
+	var battle_point := Vector2(1100.0, 700.0)
+	_send_button(battle_point, MOUSE_BUTTON_LEFT, true)
+	_send_button(battle_point, MOUSE_BUTTON_LEFT, false)
+	_expect(bool(player_bank.cannons[0]["aim_override"]), "battle_left_click_sets_aim_override")
+	## 方向必须真的指向点击处：换算回世界后与 `aim_world` 一致（容差 0.02 rad）。
+	var view := _main.DRIVE_VIEW as Rect2
+	var arena: Rect2 = _main.survival.duel.arena
+	var scale_factor: float = _main._survival_scale()
+	var world: Vector2 = _main._screen_to_world(view, arena, battle_point, scale_factor)
+	var cannon: Dictionary = player_bank.cannons[0]
+	var centre: Vector2 = player_bank.body.world_position_of_cell(Vector2i(cannon["cell"]))
+	var expected := (world - centre).angle()
+	var delta := absf(wrapf(float(cannon["aim_world"]) - expected, -PI, PI))
+	_expect(delta <= 0.02, "battle_aim_world_matches_click_delta=%.4f" % delta)
+	## 事件文案：满装填时是「开火：N 发离膛」，冷却中是「未装填或冷却中」。
+	## 两者都证明点击确实走到了开火入口（而不是被 `_handle_mouse()` 吞掉）。
+	var event_text := String(_main._survival_event)
+	_expect(event_text.begins_with("开火：") or event_text == "未装填或冷却中", "battle_fire_event_%s" % event_text)

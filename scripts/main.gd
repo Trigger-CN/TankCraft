@@ -79,6 +79,11 @@ const PORT_ARROW_LEN := 13.0
 const PORT_ARROW_WIDTH := 2.0
 const PORT_ARROW_WING := 5.0
 const PORT_ARROW_WING_ANGLE := 0.6
+## v3.25 鼠标瞄准：准星环的半径与线宽。与端口箭头（物料流向）、`_draw_aim_line`（弹道方向）
+## 三个概念互不相干，但都是「短小几何图形」，所以用「空心圆环 + 十字」这种唯一可辨的形状。
+const AIM_RETICLE_RADIUS := 9.0
+const AIM_RETICLE_WIDTH := 1.5
+const AIM_RETICLE_CROSS := 5.0
 
 var definitions: ModuleDefs
 var builder: GridBuilder
@@ -135,6 +140,9 @@ var _capture_frozen := false
 ## （反向对照，证明参数真的生效、不是被忽略）；③ 修 bug 前后用同一 N 比像素。
 ## -1 表示「用该页原来的默认值」，保证不带参数时的历史基线不被改变。
 var _capture_steps := -1
+## `--cursor=x,y`：把设计坐标下的鼠标位置钉到指定点，供截图探针验证准星绘制（v3.25）。
+## 不加这个参数时保持 `_mouse_position` 原值，**历史基线截图逐字节不变**。
+var _capture_cursor := Vector2.INF
 var tank: TankBody
 var bank: CannonBank
 var field: ProjectileField
@@ -281,9 +289,24 @@ func _input(event: InputEvent) -> void:
 		if _dragging and _grid_rect().has_point(design_position):
 			_cursor = _mouse_to_cell(design_position)
 			queue_redraw()
+		## v3.25：战斗页把鼠标当作**瞄准器**——移动即转向炮口。三页共用 `_aim_player_cannons()`，
+		## 只在战场区矩形内生效，鼠标飘到 HUD 上时不会把炮口拉向面板边缘。
+		if _screen == SCREEN_SURVIVAL or _screen == SCREEN_MATCH or _screen == SCREEN_DRIVE:
+			if _aim_with_mouse(design_position):
+				queue_redraw()
 		return
 	if event is InputEventMouseButton:
 		var button_event: InputEventMouseButton = event as InputEventMouseButton
+		## v3.25：战斗页左键 = 开火。放在分流之前，因为生存页的 `_handle_survival_mouse()`
+		## 只处理升级卡 / 商品格 / 改装按钮，战斗期会把左键转发给 `_handle_mouse()` 然后早退。
+		## 这里先截下战斗页左键，避免「点了没反应」。
+		if button_event.pressed and button_event.button_index == MOUSE_BUTTON_LEFT:
+			if _is_battle_screen():
+				## 先瞄准再开火：同一帧内点下去时，炮口必须指向点击处而不是上一个鼠标位置。
+				var click_position := _design_position(button_event.position)
+				_aim_with_mouse(click_position)
+				_fire_battle_player(click_position)
+				return
 		## 生存页必须在**入口处**就分流：`_handle_survival_mouse()` 会单向转发给
 		## `_handle_mouse()`，而 `_handle_mouse()` 不再回跳——否则两者互调会无限递归。
 		if _screen == SCREEN_SURVIVAL:
@@ -978,11 +1001,16 @@ func _enter_match() -> void:
 	_match_ready = true
 	_set_screen(SCREEN_MATCH)
 	_status_error = false
-	_status_message = "对战：W/S 油门 · A/D 转向 · 空格 开火 · Esc 返回 · R 重开"
+	_status_message = "对战：W/S 油门 · A/D 转向 · 鼠标瞄准 · 左键开火（空格备选） · Esc 返回 · R 重开"
 	queue_redraw()
 
 func _exit_match() -> void:
 	_match_held.clear()
+	## v3.25：退出战斗时清掉鼠标瞄准覆盖，否则「上一局鼠标停在哪里」会跟着下一局的车走。
+	if match_session != null:
+		var player_bank := match_session.duel.bank_of(Duel.TAG_PLAYER)
+		if player_bank != null:
+			player_bank.clear_aim_override()
 	_match_ready = false
 	_set_screen(SCREEN_MAIN)
 	queue_redraw()
@@ -1214,13 +1242,15 @@ func _enter_drive() -> void:
 	_drive_ready = true
 	_set_screen(SCREEN_DRIVE)
 	_status_error = false
-	_status_message = "试驾：W/S 油门 · A/D 转向 · 空格 开火 · R 重开 · Esc 返回"
+	_status_message = "试驾：W/S 油门 · A/D 转向 · 鼠标瞄准 · 左键开火（空格备选） · R 重开 · Esc 返回"
 	if tank.parts_of_kind(TankBody.KIND_MOBILITY).size() < 2:
 		_status_message += "　（行进机构少于 2 组，design §5.2 会持续偏转）"
 	queue_redraw()
 
 func _exit_drive() -> void:
 	_drive_held.clear()
+	## v3.25：清掉鼠标瞄准覆盖，回到建造期 `aim` 语义。
+	bank.clear_aim_override()
 	_drive_throttle = 0.0
 	_drive_steer = 0.0
 	_drive_ready = false
@@ -1964,6 +1994,9 @@ func _draw_match() -> void:
 	CombatView.draw_hit_flash(self, DRIVE_VIEW, duel.arena, scale_factor, _match_hit_flash_at, _match_hit_flash_left)
 	CombatView.draw_damage_popups(self, DRIVE_VIEW, duel.arena, scale_factor, _match_fx.entries, _draw_text)
 	_draw_match_hud()
+	## v3.25：准星画在最后——它必须盖在弹道 / 炮口闪光 / 命中闪光 / HUD 之上，
+	## 否则鼠标压在特效上时准星会被遮住，玩家会以为鼠标丢了。
+	_draw_aim_reticle()
 
 ## 炮口闪光与消散的绘制包装：两个页面共用同一个循环形状，只有竞技场与缩放不同。
 ##
@@ -2220,7 +2253,7 @@ func _draw_match_hud() -> void:
 		_draw_text("暂停中", Vector2(right, 220), 24, Palette.ACCENT_RED, false)
 	_draw_text("W / S    油门", Vector2(right, 260), 16, Palette.TEXT_HI, false)
 	_draw_text("A / D    转向", Vector2(right, 290), 16, Palette.TEXT_HI, false)
-	_draw_text("空格     开火", Vector2(right, 320), 16, Palette.TEXT_HI, false)
+	_draw_text("鼠标瞄准 · 左键开火", Vector2(right, 320), 16, Palette.TEXT_HI, false)
 	_draw_text("P        暂停", Vector2(right, 350), 16, Palette.TEXT_HI, false)
 	_draw_text("R        重开对局", Vector2(right, 380), 16, Palette.TEXT_HI, false)
 	_draw_text("Esc      返回主菜单", Vector2(right, 410), 16, Palette.TEXT_HI, false)
@@ -2250,6 +2283,115 @@ func _drive_scale() -> float:
 func _drive_to_screen(world: Vector2) -> Vector2:
 	return DRIVE_VIEW.position + (world - _drive_arena.position) * _drive_scale()
 
+## 屏幕坐标 → 世界坐标。三个战斗页共用同一条逆变换公式（`to_screen` 的逆）。
+## 为什么不能三页各写一份：正向变换在 `CombatView` 里只写了一份，逆变换如果每页自己拼，
+## 一旦 `fit_scale` 改成「铺满高度」，三处就会同时错。
+static func _screen_to_world(view: Rect2, arena: Rect2, screen: Vector2, scale_factor: float) -> Vector2:
+	if scale_factor <= 0.0001:
+		return arena.position
+	return arena.position + (screen - view.position) / scale_factor
+
+## 把鼠标位置换成世界坐标并让该侧所有炮管指向它。三个战斗页共用。
+##
+## 只在 `view` 矩形内部生效：鼠标飘到 HUD 上时不应该把炮口拉向面板边缘。
+## 返回是否真的改动了方向（供调用方决定要不要重绘）。
+func _aim_player_cannons(view: Rect2, arena: Rect2, scale_factor: float, position: Vector2) -> bool:
+	if not view.has_point(position):
+		return false
+	var bank := _player_bank()
+	if bank == null:
+		return false
+	var world := _screen_to_world(view, arena, position, scale_factor)
+	return bank.aim_all_at(world) > 0
+
+## 当前屏幕对应的玩家炮管组；非战斗页返回 null。
+func _player_bank() -> CannonBank:
+	if _screen == SCREEN_SURVIVAL and survival != null and survival.duel != null:
+		return survival.duel.bank_of(Duel.TAG_PLAYER)
+	if _screen == SCREEN_MATCH and match_session != null:
+		return match_session.duel.bank_of(Duel.TAG_PLAYER)
+	if _screen == SCREEN_DRIVE:
+		return bank
+	return null
+
+## 当前屏幕是否处于**可瞄准 / 可开火**的战斗页。战斗期以外（升级页 / 商店页 / 改装页）
+## 一律返回 false：那里左键是「选卡片 / 买商品 / 落格」，不能同时当开火键。
+func _is_battle_screen() -> bool:
+	if _screen == SCREEN_DRIVE:
+		return _drive_ready
+	if _screen == SCREEN_MATCH:
+		return _match_ready and match_session != null and not match_session.is_over() and not match_session.paused
+	if _screen == SCREEN_SURVIVAL:
+		return _survival_ready and survival != null and survival.stage == SurvivalRun.STAGE_BATTLE
+	return false
+
+## 把鼠标位置换算成世界坐标并让玩家全部炮管指过去。三页共用。
+## 返回是否真的改了方向（供调用方决定要不要重绘）。
+func _aim_with_mouse(position: Vector2) -> bool:
+	var info := _battle_view()
+	if info.is_empty():
+		return false
+	return _aim_player_cannons(info.get("view", Rect2()), info.get("arena", Rect2()), float(info.get("scale", 1.0)), position)
+
+## v3.25：左键开火。三个战斗页共用一条路径，但开火后的 UI 反馈各写各的，
+## 因为三个页面的「最近事件」字段与开火入口本来就不同（试驾页绕过 Duel）。
+func _fire_battle_player(position: Vector2) -> void:
+	if not _is_battle_screen():
+		return
+	## 先确保炮口已经指向点击处：同一帧内的「点下去」必须打向点击点，不能打上一个鼠标位置。
+	_aim_with_mouse(position)
+	if _screen == SCREEN_SURVIVAL:
+		var fired := 0
+		if survival.duel != null:
+			fired = survival.duel.fire(Duel.TAG_PLAYER)
+		_survival_event = ("开火：%d 发离膛" % fired) if fired > 0 else "未装填或冷却中"
+		queue_redraw()
+		return
+	if _screen == SCREEN_MATCH:
+		var fired_match := match_session.duel.fire(Duel.TAG_PLAYER)
+		_match_event = ("开火：%d 发离膛" % fired_match) if fired_match > 0 else "未装填或冷却中"
+		queue_redraw()
+		return
+	if _screen == SCREEN_DRIVE:
+		_drive_fire()
+
+
+## 当前屏幕对应玩家侧的竞技场：生存页 / 对局页各读自己的 `duel.arena`，
+## 试驾页读 `_drive_arena`（它不经过 `Duel`）。
+##
+## 返回 `{view, arena, scale}`，三页的鼠标瞄准与准星绘制都走这一份，
+## 避免「某页用了别的页的竞技场」这类静默错位。
+func _battle_view() -> Dictionary:
+	if _screen == SCREEN_SURVIVAL and survival != null and survival.duel != null:
+		var scale := _survival_scale()
+		return {"view": DRIVE_VIEW, "arena": survival.duel.arena, "scale": scale}
+	if _screen == SCREEN_MATCH and match_session != null:
+		var scale := _match_scale()
+		return {"view": DRIVE_VIEW, "arena": match_session.duel.arena, "scale": scale}
+	if _screen == SCREEN_DRIVE:
+		return {"view": DRIVE_VIEW, "arena": _drive_arena, "scale": _drive_scale()}
+	return {}
+
+## 准星：鼠标在战场区内时画一个空心环 + 十字）。
+##
+## 为什么用环 + 十字：端口箭头是「短线 + 箭翼」、瞄准线是「细长线段」、命中闪光是「实心圆向外扩张」、
+## 消散是「三圈收缩 + 刻线」，四种已有图形都包围了「线」与「实心圆」，只剩空心环是空的。
+func _draw_aim_reticle() -> void:
+	## 只在战斗期画：升级页 / 商店页 / 改装页 / 结算页都有自己的左键语义，
+	## 在那些页面上画准星会让人误以为「这里也能开火」。
+	if not _is_battle_screen():
+		return
+	var info := _battle_view()
+	if info.is_empty():
+		return
+	var view: Rect2 = info["view"]
+	if not view.has_point(_mouse_position):
+		return
+	var colour := Palette.ACCENT_LIME
+	draw_arc(_mouse_position, AIM_RETICLE_RADIUS, 0.0, TAU, 24, Color(colour, 0.85), AIM_RETICLE_WIDTH, true)
+	draw_line(_mouse_position - Vector2(AIM_RETICLE_CROSS, 0.0), _mouse_position + Vector2(AIM_RETICLE_CROSS, 0.0), Color(colour, 0.55), 1.0)
+	draw_line(_mouse_position - Vector2(0.0, AIM_RETICLE_CROSS), _mouse_position + Vector2(0.0, AIM_RETICLE_CROSS), Color(colour, 0.55), 1.0)
+
 func _draw_drive() -> void:
 	_draw_drive_field()
 	_draw_drive_hull()
@@ -2260,6 +2402,8 @@ func _draw_drive() -> void:
 	_draw_drive_shields()
 	_draw_drive_fx()
 	_draw_drive_hud()
+	## v3.25：准星必须最后画，盖住车体 / 弹道 / HUD。
+	_draw_aim_reticle()
 
 func _draw_drive_field() -> void:
 	var scale_factor := _drive_scale()
@@ -2596,7 +2740,7 @@ func _draw_drive_hud() -> void:
 	_draw_text("在飞弹药    %d" % field.shots.size(), Vector2(right, hint_y - 36.0), 14, Palette.ACCENT_AMBER, false)
 	_draw_text("W / S    油门", Vector2(right, hint_y), 16, Palette.TEXT_HI, false)
 	_draw_text("A / D    转向", Vector2(right, hint_y + 30.0), 16, Palette.TEXT_HI, false)
-	_draw_text("空格     开火", Vector2(right, hint_y + 60.0), 16, Palette.TEXT_HI, false)
+	_draw_text("鼠标瞄准 · 左键开火", Vector2(right, hint_y + 60.0), 16, Palette.TEXT_HI, false)
 	_draw_text("R        重开试驾", Vector2(right, hint_y + 90.0), 16, Palette.TEXT_HI, false)
 	_draw_text("Esc      返回主菜单", Vector2(right, hint_y + 120.0), 16, Palette.TEXT_HI, false)
 	var supply := "M4 管路：未初始化"
@@ -2666,6 +2810,15 @@ func _handle_capture_request() -> void:
 	for argument in OS.get_cmdline_user_args():
 		if argument.begins_with("--capture="):
 			_capture_target = argument.substr("--capture=".length())
+		elif argument.begins_with("--cursor="):
+			## v3.25 探针参数：把设计坐标下的鼠标位置钉到指定点。
+			## 为什么必需：`--capture` 路径**不产生任何 `InputEventMouseMotion`**，`_mouse_position`
+			## 会停在 `Vector2.ZERO`（战场区外），于是 `_draw_aim_reticle()` 早退——
+			## 截图上连准星都没有，就无法用像素证据证明它存在。
+			## 这是**测试钩子**，不参与玩法逻辑，也不读游戏数据。
+			var parts := argument.substr("--cursor=".length()).split(",")
+			if parts.size() == 2:
+				_capture_cursor = Vector2(float(parts[0]), float(parts[1]))
 		elif argument == "--screen=drive":
 			_enter_drive()
 			_drive_capture_warmup()
@@ -2693,6 +2846,11 @@ func _handle_capture_request() -> void:
 	## 冻结前必须把「过渡类」状态直接推到终值：`_screen_opacity` 的初始值是 0，
 	## 它原本靠在 `_process` 里 `move_toward` 才涨到 1.0；一旦冻结，页面就停在
 	## 淡入起点，实测截图只有 8587 B（几乎全黑）。这里显式置终值。
+	## v3.25：如果传了 `--cursor=`，页面已经建好，现在才能真正应用鼠标位置。
+	## 顺带把炮口也指向该点：截图里准星与炮口方向一致，才能一眼看出「鼠标瞄准」生效。
+	if _capture_cursor.is_finite():
+		_mouse_position = _capture_cursor
+		_aim_with_mouse(_capture_cursor)
 	_screen_opacity = 1.0
 	_focus_rail_alpha = 1.0
 	_capture_frozen = true
@@ -2828,15 +2986,19 @@ func _enter_survival() -> void:
 	_survival_ready = true
 	_set_screen(SCREEN_SURVIVAL)
 	_status_error = false
-	_status_message = "生存：W/S 油门 · A/D 转向 · 空格 开火 · Esc 返回"
+	_status_message = "生存：W/S 油门 · A/D 转向 · 鼠标瞄准 · 左键开火（空格备选） · Esc 返回"
 	queue_redraw()
 
 func _exit_survival() -> void:
 	_survival_held.clear()
 	_survival_ready = false
 	if survival != null:
+		## v3.25：离开生存页前清掉鼠标瞄准覆盖（炮管随 run 一起丢弃，但 `close_run()` 前先复位更清楚）。
+		if survival.duel != null:
+			var run_bank := survival.duel.bank_of(Duel.TAG_PLAYER)
+			if run_bank != null:
+				run_bank.clear_aim_override()
 		survival.close_run()
-	_survival_event = ""
 	_set_screen(SCREEN_MAIN)
 	queue_redraw()
 
@@ -3114,6 +3276,9 @@ func _draw_survival() -> void:
 	if survival.duel != null:
 		_draw_survival_arena()
 		_draw_survival_hud()
+		## v3.25：准星最后画。`_draw_aim_reticle()` 内部用 `_is_battle_screen()` 限定
+		## 只在 `STAGE_BATTLE` 显示，所以升级页 / 商店页不会在战场上冒出一个环。
+		_draw_aim_reticle()
 	if survival.stage == SurvivalRun.STAGE_LEVEL_UP:
 		_draw_survival_level_up()
 	elif survival.stage == SurvivalRun.STAGE_SHOP:
@@ -3207,7 +3372,7 @@ func _draw_survival_hud() -> void:
 	_draw_text(_survival_event, Vector2(left, 576), 15, Palette.ACCENT_LIME, false)
 	_draw_text("W / S    油门", Vector2(right, 240), 16, Palette.TEXT_HI, false)
 	_draw_text("A / D    转向", Vector2(right, 270), 16, Palette.TEXT_HI, false)
-	_draw_text("空格     开火", Vector2(right, 300), 16, Palette.TEXT_HI, false)
+	_draw_text("鼠标瞄准 · 左键开火", Vector2(right, 300), 16, Palette.TEXT_HI, false)
 	_draw_text("R        重开 run", Vector2(right, 330), 16, Palette.TEXT_HI, false)
 	_draw_text("Esc      返回主菜单", Vector2(right, 360), 16, Palette.TEXT_HI, false)
 	_draw_text("战斗期禁止改装", Vector2(right, 410), 14, Palette.ACCENT_AMBER, false)

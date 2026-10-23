@@ -43,7 +43,13 @@ var collision_damage_enabled: bool = true
 
 var _cell_size: float = 16.0
 var _k_drag: float = 0.004
+## v3.25：横向（垂直于车头）阻力。履带车不会像冰球一样横滑，旧版只有一项二次阻力，
+## 横向速度要 1.3 s 才衰减，这就是用户说的「摩擦力很低」。
+var _k_lateral_drag: float = 0.05
 var _k_ang_drag: float = 0.35
+## v3.25：始终生效的线性角阻尼（履带横向磨擦）。旧版只在松手时才有线性制动，
+## 按住转向时 ω 瞬间撞到 OMEGA_MAX，转向只有「满舵」与「停」两档。
+var _k_ang_damp: float = 3.0
 var _k_ang_brake: float = 5.0
 var _i_min: float = 12000.0
 var _omega_max: float = 3.0
@@ -97,7 +103,9 @@ func _read_config() -> void:
 		return
 	_cell_size = definitions.global_number("cell_size", 16.0)
 	_k_drag = definitions.global_number("k_drag", 0.004)
+	_k_lateral_drag = definitions.global_number("k_lateral_drag", 0.05)
 	_k_ang_drag = definitions.global_number("k_ang_drag", 0.35)
+	_k_ang_damp = definitions.global_number("k_ang_damp", 3.0)
 	_k_ang_brake = definitions.global_number("k_ang_brake", 5.0)
 	_i_min = definitions.global_number("i_min", 12000.0)
 	_omega_max = definitions.global_number("omega_max", 3.0)
@@ -277,15 +285,24 @@ func step(dt: float, throttle: float, steer: float) -> void:
 	var metrics := drive_metrics(throttle, steer)
 	thrust_total = float(metrics["thrust"])
 	torque_total = float(metrics["torque"])
-	var accel := (thrust_total / mass_total) * forward - _k_drag * velocity * velocity.length()
-	## design §5.2：角阻尼按「角减速度」量纲施加，τ/I 与 ω²、ω 同量纲才能互相抵消。
-	## 旧写法把 k_ang_drag·ω·|ω| 当作扭矩从 τ 里减，与 τ 差 10⁵ 量级，等于没有阻尼。
+	## v3.25：把速度拆成**纵向 / 横向**两个分量分别施加阻力。
+	## 旧版只有一项二次阻力作用于整个速度向量，横向速度衰减时间常约 1.3 s——
+	## 等于没有履带抓地力：松油门后长时间滑行，转弯时整台车跟着平移。
+	## 拆开后 `max_speed()` 的闭式 sqrt(T/(M·k_drag)) 仍精确成立（直线行驶时横向分量为 0）。
+	var lateral_axis := forward.orthogonal()
+	var forward_speed := velocity.dot(forward)
+	var lateral_speed := velocity.dot(lateral_axis)
+	var accel_forward := thrust_total / mass_total - _k_drag * forward_speed * absf(forward_speed)
+	var accel_lateral := -_k_lateral_drag * lateral_speed * absf(lateral_speed)
 	var inertia_eff := maxf(inertia, _i_min)
 	var alpha := torque_total / inertia_eff - _k_ang_drag * angular_velocity * absf(angular_velocity)
+	## v3.25：线性角阻尼**始终**生效——它才是「转向有阻尼」的手感来源。
+	## 旧版把线性项只放在「松手」分支里，于是按住转向时 ω 一路撞到 OMEGA_MAX。
+	alpha -= _k_ang_damp * angular_velocity
 	## 无转向输入时地面横摆阻尼占主导：角速度线性收敛，松手即停（design §5.2）。
 	if absf(steer) <= 0.001:
 		alpha -= _k_ang_brake * angular_velocity
-	velocity += accel * dt
+	velocity += (forward * accel_forward + lateral_axis * accel_lateral) * dt
 	angular_velocity = clampf(angular_velocity + alpha * dt, -_omega_max, _omega_max)
 	position += velocity * dt
 	heading += angular_velocity * dt

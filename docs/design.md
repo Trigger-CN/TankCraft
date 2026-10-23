@@ -2,7 +2,7 @@
 
 > 权威范围：**全部玩法机制、系统规格、数值、架构草案、决策记录**。
 > 术语必须与 `agent_note.md` §5 一致；改动后的同步义务见 `agent_note.md` §1 元规则。
-> 版本：**v3.24** · 2026-10-23 · 状态：设计文档（**M2 建造编辑器与运行期 `BUILD_MODE`、M3 坦克物理与操控、M4 弹药输送网络、M5 战斗结算与可拆解摧毁、M6 机器人 AI 与完整对局、**M9 波次生存单人玩法**均已实现并验证**；`data/*.json` 是正式运行时数值来源；**M3 转向手感缺陷已于 v3.1 修正（§5.2、§5.6）**；**M5 的六条有意简化已写入 §8.9，其自击缺陷与撞墙不连锁两项已于 M6 修复**；**M6 的三层 AI、四档难度、12 张 Bot 蓝图已实现，实现记录在 §10.5**；**v3.4 把单人模式重写为「波次生存 + 升级菜单 + 波间商店 + 每 5 波 Boss」并禁止战斗期改装（§3.4、ADR-017），v3.6 已完成其实现：`survival` 块 36 键、竞技场 `props`、`boss_warlord.json`、`scripts/survival_run.gd` 与主场景的四个页面（§3.6 实现记录）**；**v3.7 补上「改装坦克」UI 入口：`STAGE_MODIFY` 子阶段 + 升级页/商店页按钮 + 改装页（§3.4.7）**；**v3.8 修用户报告的界面四项：窗口启动即最大化（`window/size/mode=2`，实测 `WINDOW_MODE mode=2 size=(1842, 1057)`）、所有菜单补齐 hover + 左键点击（含主菜单难度按钮与升级卡/商品格）、修掉主菜单「难度/提示」压在「退出」行上的重叠、并让改装页**复用建造页整套编辑器**而非自带第二套（§2.3、§3.4.7、§11.4.2.1）**；**v3.9 修用户报告的「炮弹似乎不能对敌人造成伤害」并重做生存页战斗 UI：起始坦克 20mm → 76mm（`SurvivalRun.build_starter()` 为唯一布局来源，§3.4.8）、命中事件补齐文案/动效/命中闪光、敌我坦克逐部件按血量着色、HUD 新增「总输出」、新增坦克镜像面板（§11.4.4.2）**；**v3.5 修复了 R17 列出的 9 个碰撞/损坏缺陷，并在修复过程中又发现并修掉 3 个实现级 bug（§8.7）**；**v3.6 同时把 `duel` 扩为任意 tag/team 集合，使同屏多敌人成立（§10.6）**；**v3.12 修正了 `scripts/` 文件计数（实为 18 个 `.gd`，非 16）并修复了截图取图时刻不固定导致「逐字节等价」证据链失效的缺陷（§11.4.9）**；**v3.13 对全部 7 个截图钩子做了可复现性重验（7/7 逐字节相同），并完成与历史截图的差异归因：静态 UI 区零差异（§11.4.9.1）**；**v3.14 新增 `--steps=N` 预热步数参数化，使战场区渲染回归可验证（裁切后同 N 两次逐字节相同，§11.4.9.2）**；**v3.15 按用户「配件、摆放更合理 / 初始敌人过于大 / 敌人不断地生成 / 不同等级不同坦克」重做生存模式坦克阵容：起始车 8×2 单履带 → 6×4 双履带（§3.4.8）、13 张 Bot 蓝图全部重写为每档三种不同轮廓且招募级从 30 格缩到 12–20 格（§14.8）、新增 `enemy_quota_for()` + 本波内按间隔补兵，并把通过条件改为「配额耗尽且场上无敌人」（§3.4、§14.8）**；**v3.16 更正 v3.15 的两个数字（弹药库殉爆死亡时间 21.8 s → 36.4 s、瞄准命中区间 12–22/1–2 → 8–22/0–2），只改注释与文档文字、代码零改动（§3.4.8、§17）**；**v3.17 修用户报告的栈溢出崩溃：`_handle_mouse()` 与 `_handle_survival_mouse()` 自 v3.8 起双向互调，生存页改装模式下任何一次网格点击都会无限递归——已改为单向转发，并新增走真实 `_input()` 的 `tests/mouse_input_smoke.gd` 作永久回归（§11.4.2.2、§17）**；**v3.18 按用户要求把编辑器三层做成「看得见的分层」：非选中层降到 22% alpha、光标件随层切换、坦克默认在建造区居中，并修掉层级行压面板分隔线与「工具」标签压按钮两处重叠（§11.4.2.3、§17）**；**v3.19 建立版本控制：`git init` + 初始提交 `fd3857f`（77 文件 / 22366 行，本地 `Trigger-CN` / `759025229@qq.com`），并用 `.gitattributes` 钉死 `eol=lf` 以保护以文件字节为基准的验证体系（§11.4.9.1、§17）**；**v3.20 按用户「优化坦克和其他物品的碰撞箱逻辑，坦克的整体碰撞箱和中弹判定都由配件构成，受到伤害和造成伤害都要有悬浮数字提示」把**碰撞箱**从整车外接 AABB 改为逐配件格子（新增 `cell_world_rects()` / `cell_overlap_rect()` / `cell_overlap_circle()` / `cells_overlap_tank()`），并给生存页与对战页加上伤害/受击悬浮数字（§11.4.2.4、§17）**；**v3.20.1 修用户报告的 `SCRIPT ERROR: Out of bounds get index '8' (on base: 'PackedStringArray') at: _preview_cells`：`_selected_index` 是 `_option_ids()` 的下标，却被两处当成 `survival.inventory` 的下标钳制，而 `_ensure_option_visible()` 根本不钳制它——已在收口点统一按可选件数量钳制、`_preview_cells()` 加防御式钳制、`_mount_selected_inventory()` 改用 module_id 反查库存，并新增反向对照可复现的 `tests/editor_bounds_smoke.gd`（§11.4.2.5、§17）**；**v3.21 按用户「精细化坦克配件的特效，要能体现弹药制造、弹药装填、护盾、维修等效果，例如在模块上加入进度条，小窗口显示坦克镜像也要显示模块的细节」给每个模块加上进度条 / 护盾脉冲 / 维修连线，并重做镜像面板的逐部件行（§11.4.2.6、§17）**；**v3.22 按用户「生存模式的战斗 UI 也应该能复用到其他模式」把整套战斗视图（竞技场 / 障碍 / 中立物 / 车体 / 弹道 / 动效 / 命中闪光 / 伤害数字）抽成 `scripts/combat_view.gd`，对局页与生存页共用同一份实现，模式差异改为参数表达；对局页因此真正获得命中闪光与按血量分档上色（§11.4.2.7、§17）**；**v3.23 按用户「实现开火特效，提高所有口径炮弹的默认射程，炮弹没有命中时飞行到最远射程后也要有一个消失特效」把射程从全局单值 `max_range_px` 改为五口径各自的 `range_px`（1900/1820/1740/1660/1580，全部提高）、寿命改由射程反推（否则 76/120/155 只名义提高）、新增锥形炮口闪光与三环收缩消散（形状/时长/运动方向与命中闪光全不同），并修复了一个让「未命中飞满射程消散」永远无法发生的投影物矩形碰撞缺陷（§11.4.2.8、§17）**；**v3.24 按用户「升级效果模组应该也要和最初设计一样，需要安装在坦克上，并且需要输入弹药和输出弹药，来给弹药升级，在改装UI中，这些模块要显示输入输出箭头来辨别方向，不只是升级效果模块，其他所有有输出或者有输入的模块都要显示箭头，方便规划流水线，后续计划要深化流水线的概念」把升级从「整台聚合的抽象池」改为**逐发弹药携带的升级载荷**（改进器加工时写入、管路搬运、`CannonBank` 装填时接收、开火时交给 `field.spawn()`），给改装/建造 UI 的全部五类带端口模块加上输入/输出箭头，并把「深化流水线」写成后续计划（§11.4.2.9、§17）**；M3.5 Android 导出预设已写入工程但**因环境缺导出模板与 Android SDK 未产出 APK**（§13.7）；**移动端触屏操控已完成设计（§11.6）、Q24–Q26 已裁定但无任何实现代码**）
+> 版本：**v3.25** · 2026-10-23 · 状态：设计文档（**M2 建造编辑器与运行期 `BUILD_MODE`、M3 坦克物理与操控、M4 弹药输送网络、M5 战斗结算与可拆解摧毁、M6 机器人 AI 与完整对局、**M9 波次生存单人玩法**均已实现并验证**；`data/*.json` 是正式运行时数值来源；**M3 转向手感缺陷已于 v3.1 修正（§5.2、§5.6），v3.25 再次调整（横向阻力 + 始终生效的角阻尼，§5.2、§11.4.2.10）**；**M5 的六条有意简化已写入 §8.9，其自击缺陷与撞墙不连锁两项已于 M6 修复**；**M6 的三层 AI、四档难度、12 张 Bot 蓝图已实现，实现记录在 §10.5**；**v3.4 把单人模式重写为「波次生存 + 升级菜单 + 波间商店 + 每 5 波 Boss」并禁止战斗期改装（§3.4、ADR-017），v3.6 已完成其实现：`survival` 块 36 键、竞技场 `props`、`boss_warlord.json`、`scripts/survival_run.gd` 与主场景的四个页面（§3.6 实现记录）**；**v3.7 补上「改装坦克」UI 入口：`STAGE_MODIFY` 子阶段 + 升级页/商店页按钮 + 改装页（§3.4.7）**；**v3.8 修用户报告的界面四项：窗口启动即最大化（`window/size/mode=2`，实测 `WINDOW_MODE mode=2 size=(1842, 1057)`）、所有菜单补齐 hover + 左键点击（含主菜单难度按钮与升级卡/商品格）、修掉主菜单「难度/提示」压在「退出」行上的重叠、并让改装页**复用建造页整套编辑器**而非自带第二套（§2.3、§3.4.7、§11.4.2.1）**；**v3.9 修用户报告的「炮弹似乎不能对敌人造成伤害」并重做生存页战斗 UI：起始坦克 20mm → 76mm（`SurvivalRun.build_starter()` 为唯一布局来源，§3.4.8）、命中事件补齐文案/动效/命中闪光、敌我坦克逐部件按血量着色、HUD 新增「总输出」、新增坦克镜像面板（§11.4.4.2）**；**v3.5 修复了 R17 列出的 9 个碰撞/损坏缺陷，并在修复过程中又发现并修掉 3 个实现级 bug（§8.7）**；**v3.6 同时把 `duel` 扩为任意 tag/team 集合，使同屏多敌人成立（§10.6）**；**v3.12 修正了 `scripts/` 文件计数（实为 18 个 `.gd`，非 16）并修复了截图取图时刻不固定导致「逐字节等价」证据链失效的缺陷（§11.4.9）**；**v3.13 对全部 7 个截图钩子做了可复现性重验（7/7 逐字节相同），并完成与历史截图的差异归因：静态 UI 区零差异（§11.4.9.1）**；**v3.14 新增 `--steps=N` 预热步数参数化，使战场区渲染回归可验证（裁切后同 N 两次逐字节相同，§11.4.9.2）**；**v3.15 按用户「配件、摆放更合理 / 初始敌人过于大 / 敌人不断地生成 / 不同等级不同坦克」重做生存模式坦克阵容：起始车 8×2 单履带 → 6×4 双履带（§3.4.8）、13 张 Bot 蓝图全部重写为每档三种不同轮廓且招募级从 30 格缩到 12–20 格（§14.8）、新增 `enemy_quota_for()` + 本波内按间隔补兵，并把通过条件改为「配额耗尽且场上无敌人」（§3.4、§14.8）**；**v3.16 更正 v3.15 的两个数字（弹药库殉爆死亡时间 21.8 s → 36.4 s、瞄准命中区间 12–22/1–2 → 8–22/0–2），只改注释与文档文字、代码零改动（§3.4.8、§17）**；**v3.17 修用户报告的栈溢出崩溃：`_handle_mouse()` 与 `_handle_survival_mouse()` 自 v3.8 起双向互调，生存页改装模式下任何一次网格点击都会无限递归——已改为单向转发，并新增走真实 `_input()` 的 `tests/mouse_input_smoke.gd` 作永久回归（§11.4.2.2、§17）**；**v3.18 按用户要求把编辑器三层做成「看得见的分层」：非选中层降到 22% alpha、光标件随层切换、坦克默认在建造区居中，并修掉层级行压面板分隔线与「工具」标签压按钮两处重叠（§11.4.2.3、§17）**；**v3.19 建立版本控制：`git init` + 初始提交 `fd3857f`（77 文件 / 22366 行，本地 `Trigger-CN` / `759025229@qq.com`），并用 `.gitattributes` 钉死 `eol=lf` 以保护以文件字节为基准的验证体系（§11.4.9.1、§17）**；**v3.20 按用户「优化坦克和其他物品的碰撞箱逻辑，坦克的整体碰撞箱和中弹判定都由配件构成，受到伤害和造成伤害都要有悬浮数字提示」把**碰撞箱**从整车外接 AABB 改为逐配件格子（新增 `cell_world_rects()` / `cell_overlap_rect()` / `cell_overlap_circle()` / `cells_overlap_tank()`），并给生存页与对战页加上伤害/受击悬浮数字（§11.4.2.4、§17）**；**v3.20.1 修用户报告的 `SCRIPT ERROR: Out of bounds get index '8' (on base: 'PackedStringArray') at: _preview_cells`：`_selected_index` 是 `_option_ids()` 的下标，却被两处当成 `survival.inventory` 的下标钳制，而 `_ensure_option_visible()` 根本不钳制它——已在收口点统一按可选件数量钳制、`_preview_cells()` 加防御式钳制、`_mount_selected_inventory()` 改用 module_id 反查库存，并新增反向对照可复现的 `tests/editor_bounds_smoke.gd`（§11.4.2.5、§17）**；**v3.21 按用户「精细化坦克配件的特效，要能体现弹药制造、弹药装填、护盾、维修等效果，例如在模块上加入进度条，小窗口显示坦克镜像也要显示模块的细节」给每个模块加上进度条 / 护盾脉冲 / 维修连线，并重做镜像面板的逐部件行（§11.4.2.6、§17）**；**v3.22 按用户「生存模式的战斗 UI 也应该能复用到其他模式」把整套战斗视图（竞技场 / 障碍 / 中立物 / 车体 / 弹道 / 动效 / 命中闪光 / 伤害数字）抽成 `scripts/combat_view.gd`，对局页与生存页共用同一份实现，模式差异改为参数表达；对局页因此真正获得命中闪光与按血量分档上色（§11.4.2.7、§17）**；**v3.23 按用户「实现开火特效，提高所有口径炮弹的默认射程，炮弹没有命中时飞行到最远射程后也要有一个消失特效」把射程从全局单值 `max_range_px` 改为五口径各自的 `range_px`（1900/1820/1740/1660/1580，全部提高）、寿命改由射程反推（否则 76/120/155 只名义提高）、新增锥形炮口闪光与三环收缩消散（形状/时长/运动方向与命中闪光全不同），并修复了一个让「未命中飞满射程消散」永远无法发生的投影物矩形碰撞缺陷（§11.4.2.8、§17）**；**v3.24 按用户「升级效果模组应该也要和最初设计一样，需要安装在坦克上，并且需要输入弹药和输出弹药，来给弹药升级，在改装UI中，这些模块要显示输入输出箭头来辨别方向，不只是升级效果模块，其他所有有输出或者有输入的模块都要显示箭头，方便规划流水线，后续计划要深化流水线的概念」把升级从「整台聚合的抽象池」改为**逐发弹药携带的升级载荷**（改进器加工时写入、管路搬运、`CannonBank` 装填时接收、开火时交给 `field.spawn()`），给改装/建造 UI 的全部五类带端口模块加上输入/输出箭头，并把「深化流水线」写成后续计划（§11.4.2.9、§17）**；**v3.25 按用户「生存模式难度过高，敌人虽然用的小口径但是射速很快，玩家的默认坦克口径虽然大但是射速低，而且现在的摩擦力很低转向难以控制，难以瞄准，就造成打不中容错率低，瞄准方式改为鼠标瞄准，点击鼠标左键发射炮弹」把玩家侧战斗期瞄准从「建造期 `aim` 锁定 + 靠车身转向」改为**鼠标覆盖**（`CannonBank.aim_override` / `aim_world`，`muzzle_dir()` 双路径，Bot 零改动）、三个战斗页左键开火、准星空心环，并把速度拆成纵向/横向分量 + 新增始终生效的 `k_ang_damp` 改善转向手感；难度侧改 `craft_time_s`（不是 `reload_s`）、`enemy_quota_multiplier`、`enemy_reinforce_delay_s` 与 `aim_error_deg_recruit`（§6.5 更正、§11.4.2.10、§16.1 Q24 更正、§17）**；M3.5 Android 导出预设已写入工程但**因环境缺导出模板与 Android SDK 未产出 APK**（§13.7）；**移动端触屏操控已完成设计（§11.6）、代码零实现；Q25（暂不支持手柄）与 Q26（只做横屏）仍然有效，但 **Q24「不需要右侧瞄准摇杆」的裁定依据已被 v3.25 的鼠标瞄准推翻，需用户重新确认**（见 §16.1）**）
 
 ---
 
@@ -926,6 +926,8 @@ effective_turn = turn_assist_1 + 0.7·turn_assist_2 + ...   // 同上
 - 炮管是**可选件**（I7 只要求驾驶舱）。但无炮坦克只能靠喷射冲撞输出（§6.8）。
 - **`reload_s` 与 `recoil_px` 已落入数据**：`data/modules/systems.json` 的五个 cannon 逐条携带这两字段（0.35/0.60/1.10/1.80/2.60 s 与 6/10/20/34/48 px），`cannon_bank.gd` 只读取它们，脚本内不内联。`data_validator.gd` 对未知可选字段不做白名单，因此新增字段不需要改校验器。
 - **炮管的身份判据是 `aim_steps`，不是 `caliber`**：`ammo_factory_*` 同样携带 `caliber`，用 `caliber` 判炮管会把弹药制造装置当成第二门炮（M3 期间的真实缺陷）。`aim_steps` 是炮管专属字段（恰好 8 档）。
+
+> **v3.25 就地更正（append-only：上面的历史行不改，以本段为准）**：本节上文的「**瞄准角在建造时决定，战斗中锁定**」「**战斗中不可改变 `aim`**」「因此瞄准仍需转动整台坦克」三句，**已于 v3.25 对玩家侧失效**。用户 2026-10-23 要求「瞄准方式改为鼠标瞄准，点击鼠标左键发射炮弹」——现在玩家侧的战斗期弹道方向由**鼠标位置**决定（`CannonBank.aim_at()` / `aim_all_at()` 把目标点换算成绝对世界角写进 `aim_override` / `aim_world`，`muzzle_dir()` 优先用它们，与 `body.heading` 完全解耦）。**建造期 `aim` 降级为「没有鼠标输入时的缺省方向」**（仍随蓝图序列化、仍由 `Q`/`E` 设定、仍是 Bot 的唯一依据）。**Bot 侧零改动**：`bot_ai._drive()` 从不调 `aim_at()`，所以「弹道 = `heading + aim`」的开火判据完全成立。**ADR-012 的「安装后方向固定」仍然描述建造期语义，但不再是玩家战斗期的限制**；完整实现记录见 §11.4.2.10。**Q24 的裁定依据（即「靠车身转向」）已因此失效，需用户重新确认，见 §16.1 Q24 行下的更正段。**
 
 ### 6.6 护盾 `shield`
 
@@ -2394,6 +2396,184 @@ var life := maxf(_lifetime, range_px / maxf(speed, 0.001) + 0.5)
 
 **这六条都不改变现有拓扑与回归基线**，可以逐条独立交付；P1/P2 必须先做，因为 P3/P4 的可视化与面板都要依赖它们的状态模型。
 
+#### 11.4.2.10 鼠标瞄准、左键开火与手感调整（v3.25）
+
+用户原话：「生存模式难度过高，敌人虽然用的小口径但是射速很快，玩家的默认坦克口径虽然大但是射速低，而且现在的摩擦力很低转向难以控制，难以瞄准，就造成打不中容错率低，瞄准方式改为鼠标瞄准，点击鼠标左键发射炮弹」。拆成三件互相独立、但必须一起做的事。
+
+##### 一、先纠正一个会静默失效的认知：射速不是被 `reload_s` 卡住的
+
+弹药的物理链路是「工厂造弹 → 管路 → 炮管装填 → 开火」，**炮管只有拿到弹才能装填**。所以有效射速 = `max(craft_time_s, reload_s)`：
+
+| | 弹药制造 | 炮管装填 | 实际射速 |
+| --- | --- | --- | --- |
+| 玩家 `ammo_factory_76` → `cannon_76` | 1.5 s（本次 → **1.1 s**） | 1.10 s | 1.5 s/发（本次 → **1.1 s**） |
+| 招募级 Bot `ammo_factory_20` → `cannon_20` | 0.45 s（本次 → **0.85 s**） | 0.35 s | 0.45 s/发 ≈ 2.2 发/s（本次 → **0.85 s/发 ≈ 1.2 发/s**） |
+
+**只调 `reload_s` 对双方的实际射速没有任何效果**。这是本轮最容易误判的一点：`reload_s` 在数据文件里就在炮管条目上、名字直白、数值也确实「敌人的更小」，所以「调 `reload_s`」看起来完全合理；但真正起作用的是 `craft_time_s`。若照直觉改了 `reload_s`，smoke 会全绿、数据会「变好看」，而玩家的体感一点都不会变。
+
+##### 二、鼠标瞄准：从「建造期锁定」到「战斗期覆盖」
+
+**改动前**：`CannonBank.muzzle_dir()` = `RIGHT.rotated(body.heading + deg_to_rad(cannon["aim"]))`；`aim` 由 `reload_from_body()` 从 `part["aim"]` 读入，是建造期 `Q`/`E` 设定的 8 档之一。**战斗期没有任何覆盖路径**——玩家只能转车身来瞄准。
+
+**改动后**（`scripts/cannon_bank.gd`）：
+
+```gdscript
+func muzzle_dir(cannon: Dictionary) -> Vector2:
+	if bool(cannon.get("aim_override", false)):
+		return Vector2.RIGHT.rotated(float(cannon.get("aim_world", 0.0)))
+	return Vector2.RIGHT.rotated(body.heading + deg_to_rad(float(cannon["aim"])))
+```
+
+`aim_override` 为真时，弹道方向是**绝对世界角 `aim_world`**，与 `body.heading` 完全解耦——这就是「鼠标瞄准」与旧「靠车身转向瞄准」的本质区别。`part["aim"]` 降级为「没有鼠标输入时的缺省方向」。
+
+| 新接口 | 语义 |
+| --- | --- |
+| `aim_at(index, target) -> bool` | 用 `atan2` 算世界角；目标与炮管中心重合（`length_squared <= 0.0001`）时**保持原方向**（`atan2(0,0)` 无意义，硬算会突然甩到 +X）；返回「方向是否真的变了」，**0/false 表示没变，不是失败** |
+| `aim_all_at(target) -> int` | 全部炮管指向同一点，返回真正改变的炮管数 |
+| `clear_aim_override() -> void` | 关闭覆盖，回到建造期 `aim` 语义 |
+
+**三条关键取舍**：
+
+1. **`aim_override` / `aim_world` 挂 cannon 字典，不挂 `part`。** `part["aim"]` 是建造期配置（随蓝图序列化、参与 undo），`aim_override` 是运行期状态。混在一起会让 undo 快照与蓝图序列化多出无意义字段，而且「上一局鼠标停在哪里」会跟着下一局的车走。`clear_aim_override()` 提供显式复位，三个战斗页的 exit 函数都会调。
+2. **Bot 侧永远不调 `aim_at()`。** 所以 `bot_ai._drive()` 里「弹道方向 = `heading + aim`」的开火判据完全不受影响，AI 行为零改动。这是本轮最省事也最安全的边界划分——若把鼠标瞄准做成「所有炮管统一跟随某点」，就必须同时改 AI 判据，风险大得多。
+3. **换算放在 `CannonBank` 而不是页面层。** 方向要经过 `body.heading` 换算才能变成相对角，这属于炮管几何；放在页面层等于把同一套角度算术再写一遍，一旦朝向定义变化两边就会不一致。
+
+##### 三、页面层：三个战斗页共用一条瞄准/开火路径
+
+`scripts/main.gd` 新增（全部在 `_drive_to_screen()` 之后）：
+
+| 函数 | 职责 |
+| --- | --- |
+| `static _screen_to_world(view, arena, screen, scale) -> Vector2` | `CombatView.to_screen()` 的精确逆变换；`scale <= 0.0001` 时回退到 `arena.position`（不除零） |
+| `_aim_player_cannons(view, arena, scale, position) -> bool` | 只在 `view` 矩形内生效；鼠标飘到 HUD 上时不会把炮口拉向面板边缘 |
+| `_player_bank() -> CannonBank` | 按 `_screen` 取 survival / match / drive 的玩家炮管组；非战斗页返回 null |
+| `_is_battle_screen() -> bool` | DRIVE 看 `_drive_ready`；MATCH 额外排除 `is_over()` 与 `paused`；SURVIVAL 看 `_survival_ready and stage == STAGE_BATTLE` |
+| `_aim_with_mouse(position) -> bool` | 走 `_battle_view()`，三页共用 |
+| `_fire_battle_player(position)` | 生存 / 对局 / 试驾三条开火分支，各自更新自己的「最近事件」字段 |
+| `_battle_view() -> Dictionary` | 返回 `{view, arena, scale}`；**每页读自己的竞技场**（生存 / 对局各读 `duel.arena`，试驾读 `_drive_arena`，它不经过 `Duel`） |
+
+**输入分发：三条不变量**
+
+1. **单向转发**（v3.16 修过的栈溢出）：`_input()` → `_handle_survival_mouse()` → `_handle_mouse()`。**`_handle_mouse()` 绝不可回调 `_handle_survival_mouse()`**。
+2. **战斗页左键拦截必须插在生存页分流之前**。放在之后会被 `_handle_survival_mouse()` 转发给 `_handle_mouse()`，后者对非建造页在 `if _screen != SCREEN_BUILD and not _in_modify_mode(): return` 处早退——玩家「点了没反应」。
+3. **同帧「先瞄再开火」**：`_fire_battle_player()` 内部**又调了一次** `_aim_with_mouse(position)`。这是刻意的——同一帧内点下去时，炮口必须指向点击处而不是上一个鼠标位置；重复调用是幂等的（第二次方向已相同，`aim_all_at()` 返回 0）。
+
+**`_is_battle_screen()` 是必需的**：升级 / 商店 / 改装页的左键是「选卡片 / 买商品 / 落格」，不能同时当开火键。
+
+##### 四、准星：视觉上与四种已有图形都必须可分
+
+战场上已经有四种「短小几何图形」：
+
+| 图形 | 形状 | 颜色 | 语义 |
+| --- | --- | --- | --- |
+| 端口箭头 `_draw_port_arrows()` | 13 px 短线 + 两片 ±0.6 rad 箭翼 | `ACCENT_CYAN`（in）/ `ACCENT_AMBER`（out） | 物料流向（**只在建造/改装页**） |
+| 瞄准线 `_draw_aim_line()` | 24 px 细长线段，可对角 8 档 | `ACCENT_LIME` | 建造期弹道方向（**只在建造/改装页**） |
+| 命中闪光 | 实心圆向外扩张 0.14 s | `ACCENT_AMBER` | 打中了 |
+| 消散 | 三圈同心描边向内收缩 + 四根刻线 + 上漂 6 px，0.26 s | 按敌我 | 射程耗尽 |
+
+**只剩「空心环 + 十字」是空的**，所以准星用这个形状：`AIM_RETICLE_RADIUS 9.0` / `AIM_RETICLE_WIDTH 1.5` / `AIM_RETICLE_CROSS 5.0`，颜色 `Palette.ACCENT_LIME`，环 0.85 alpha、十字 0.55 alpha。**只在鼠标位于战场区矩形内时绘制**。确定性：形状 / 半径 / 线宽 / 十字长度全部是常量，位置来自 `_mouse_position`，**零随机、零时间依赖**。
+
+绘制顺序：三页都**最后画准星**（`_draw_match()` 在 `_draw_match_hud()` 之后、`_draw_drive()` 在 `_draw_drive_hud()` 之后、`_draw_survival()` 在 `_draw_survival_hud()` 之后），否则鼠标压在特效上时准星会被遮住。`_draw_aim_reticle()` 内部先判 `_is_battle_screen()`，所以升级 / 商店 / 结算页不会在战场上冒出一个环。
+
+##### 五、物理：摩擦与转向手感的根因
+
+**改动前**：
+
+```gdscript
+var accel := (thrust_total / mass_total) * forward - _k_drag * velocity * velocity.length()
+var alpha := torque_total / inertia_eff - _k_ang_drag * angular_velocity * absf(angular_velocity)
+if absf(steer) <= 0.001:
+	alpha -= _k_ang_brake * angular_velocity
+```
+
+两个独立缺陷：
+
+- **阻力只有一项，作用于整个速度向量。** `k_drag = 0.004` 的二次阻力对横向速度同样适用，衰减时间常约 1.3 s——等于没有履带抓地力：松油门后长时间滑行，转弯时整台车跟着平移。这就是用户说的「摩擦力很低」。
+- **线性角阻尼只在松手时生效。** 按住转向时 `k_ang_brake` 不参与，ω 一路撞到 `omega_max = 3.0`；转向只有「满舵」与「停」两档，中间没有渐进。这就是用户说的「转向难以控制」。
+
+**改动后**（`scripts/tank_body.gd`）：
+
+```gdscript
+var lateral_axis := forward.orthogonal()
+var forward_speed := velocity.dot(forward)
+var lateral_speed := velocity.dot(lateral_axis)
+var accel_forward := thrust_total / mass_total - _k_drag * forward_speed * absf(forward_speed)
+var accel_lateral := -_k_lateral_drag * lateral_speed * absf(lateral_speed)
+var alpha := torque_total / inertia_eff - _k_ang_drag * angular_velocity * absf(angular_velocity)
+alpha -= _k_ang_damp * angular_velocity
+if absf(steer) <= 0.001:
+	alpha -= _k_ang_brake * angular_velocity
+velocity += (forward * accel_forward + lateral_axis * accel_lateral) * dt
+```
+
+- **速度拆成纵向 / 横向两个分量分别施加阻力**：纵向仍是 `k_drag`（保持终端速度公式），横向新增 `k_lateral_drag = 0.05`（比纵向大 12.5 倍）。
+- **新增始终生效的线性角阻尼 `k_ang_damp = 1.6`**。它才是「转向有阻尼」的手感来源；`k_ang_brake = 5.0` 仍保留为松手时的额外制动。
+- **`max_speed()` 的闭式 `sqrt(T/(M·k_drag))` 仍精确成立**——直线行驶时横向分量为 0，纵向方程与旧版完全一致。这是 `physics_smoke._check_terminal_speed()` 的前提。
+- **`omega_max` 仍是 3.0，未提高**（禁止项）。
+
+**新物理基线**（6×7 突击型，M=61.0 / I=104064，`tests/physics_smoke.gd` 实测）：`v_max 192.1`（**未变**）/ `turn180_s 1.35 → 1.70` / `spin_stop_s 0.62 → 0.43`。转向变慢、松手停得更快，两个方向都与设计意图一致。
+
+##### 六、难度平衡：本轮改了什么
+
+全部进 `data/*.json`，脚本内零硬编码：
+
+| 文件 | 键 | 旧 | 新 | 目的 |
+| --- | --- | --- | --- | --- |
+| `data/modules/systems.json` | `ammo_factory_20.craft_time_s` | 0.45 | **0.85** | 招募级 Bot 射速 2.2 → 1.2 发/秒 |
+| 同上 | `ammo_factory_40.craft_time_s` | 0.8 | **0.95** | 同口径递进，不出现 20mm 比 40mm 更慢的倒置 |
+| 同上 | `ammo_factory_76.craft_time_s` | 1.5 | **1.1** | 玩家 76mm 实际射速 1.5 → 1.1 s/发（`reload_s` 是硬闸） |
+| `data/globals.json` | `survival.enemy_quota_multiplier` | 3.0 | **2.0** | 本波总配额从「同屏×3」降到「同屏×2」 |
+| 同上 | `survival.enemy_reinforce_delay_s` | 5.0 | **8.0** | 补兵间隔拉长 |
+| 同上 | `ai.aim_error_deg_recruit` | 8.0 | **12.0** | 招募级敌人打得更歪 |
+
+**`reload_s` 五个口径全部未动**（0.35 / 0.6 / 1.1 / 1.8 / 2.6）。这也是 `tests/cannon_smoke.gd` 的 `_check_data_fields()`（写死 `cannon_76: [1.1, 20.0]`）与 `_check_reload()`（硬编码 1.10 s 时序）**不需要改**的原因——它们断言的是 `reload_s`，而本轮只改 `craft_time_s`。
+
+**必须知道的全局影响**：`craft_time_s` 是**模块数据**，对局页 Bot 也会受影响。这是有意的（同一台发动机不应在不同模式里跑不同速度），但意味着 `MATCH` 的难度曲线也随之变化。
+
+##### 七、为什么「鼠标瞄准」与「转向手感」互补而不替代
+
+用户把「摩擦力很低转向难以控制」与「难以瞄准」并列写在同一句里。这两件事在**旧实现**里是耦合的：因为瞄准必须靠转车身，所以转向手感差直接等于瞄准差。
+
+**鼠标瞄准解除了这个耦合**：炮口方向不再依赖 `body.heading`，所以即使转向手感仍然一般，玩家也能精确瞄准。这意味着物理改动与瞄准改动是**互补而非替代**的关系——两者都要做，但不能指望只做其中一个就解决用户的全部抱怨。
+
+##### 八、验证
+
+| 工件 | 结果 |
+| --- | --- |
+| `.me/tmp/main/c25_all.txt` | `cannon_bank=78` / `tank_body=78` / `main=78`（三次 `--check-only` 全 78 B / `6ca5b6ba`） |
+| `.me/tmp/main/c25_main3.txt` | 78 B / `6ca5b6ba`（HUD 文案 + 准星接线 + exit 复位之后的最终 `main.gd`） |
+| `.me/tmp/main/aim25.txt` | `AIM_OK cannons=2`（新永久回归 `tests/aim_smoke.gd`） |
+| `.me/tmp/main/s25b.txt` | **15 项 smoke 全绿**：`PHYSICS_OK … v_max=192.1 turn180_s=1.70 spin_stop_s=0.43` / `CANNON_OK shots=3 reload76=1.10 range=1740` / `AMMO_OK` / `UPGRADE_OK` / `AIM_OK` / `BUILD_OK` / `RUNTIME_OK` / `DATA_OK` / `DATA_ERROR_OK` / `COMBAT_OK` / `MATCH_OK` / `EXPEDITION_OK` / `SURVIVAL_OK` / `MOUSE_OK` / `PREVIEW_OK` |
+| `v25_surv.png` = `v25_surv_b.png` | 196428 B / `720fbad3`（`--steps=420 --cursor=960,540` 两次**逐字节相同**） |
+| `v25_surv_s300.png` | 191343 B / `33afdd19`（`--steps=300`，**与 420 不同**：证明步数参数真的生效） |
+| `v25_surv_nocursor.png` | 195078 B / `c9c14f6b`（**不传 `--cursor`**），与带 cursor 版 `REGION_TOTAL diff_px=3722`，包围盒 `(928, 505)–(994, 575)` = 133×71 px —— 正是准星环 + 十字 |
+| `rd25_surv.txt` | 七个区域里 **六个 diff_px=0**（含左右 HUD / 镜像面板 / 状态栏）；只有 battlefield 3722 px |
+| `crop25_surv.png` / `crop25_nocursor.png` | 6× 放大对比：带 cursor 版中间有完整亮绿空心环 + 十字，不带版同一位置**空白** |
+| `v25_match.png` | 146903 B / `7a788b7d`，`Image_View` 目视确认准星在战场区中心 |
+| `v25_drive.png` | 217047 B / `96306344`，同上 |
+| `v25_levelup.png` / `v25_shop.png` | 218721 / 250448 B，`Image_View` 目视确认**没有准星**（左键在此是选卡片 / 买商品） |
+| `v25_modify.png` | 270209 B / `2c643eb3`，与 v3.24 逐字节相同（改装页不受影响） |
+
+**新增的永久回归**：
+
+- `tests/aim_smoke.gd`（8698 B）：`aim_at()` 方向正确、与 `heading` 解耦（转车体不改变弹道）、`clear_aim_override()` 回退、`aim_all_at()` 多炮一致、非法下标拒收且**不改状态**、目标与炮管中心重合时保持原方向、`to_screen → _screen_to_world` 往返一致。
+- `tests/mouse_input_smoke.gd` 新增第 ⑧ 段：在真实 `STAGE_BATTLE` 下灌入真实 `InputEventMouseButton`，断言左键确实把炮管切到 `aim_override`、`aim_world` 与点击处的方向差 ≤ 0.02 rad、且「最近事件」变成开火反馈。**这一段是必要的**：前七段只证明「点击不炸」，若 `_is_battle_screen()` 恒为假，旧测试依旧全绿而玩家点了没反应。
+
+##### 九、截图探针的新参数 `--cursor=x,y`
+
+`--capture` 路径**不产生任何 `InputEventMouseMotion`**，`_mouse_position` 会停在 `Vector2.ZERO`（战场区外），于是 `_draw_aim_reticle()` 早退——截图上连准星都没有。新增 `--cursor=x,y`（设计坐标）把鼠标位置钉到指定点，并在页面建好后调一次 `_aim_with_mouse()`，使截图里准星与炮口方向一致。
+
+**这是测试钩子，不参与玩法逻辑、不读游戏数据**。不传该参数时 `_capture_cursor = Vector2.INF`，`is_finite()` 为假，截图路径与之前完全一致（`v25_modify.png` 与 v3.24 的 `2c643eb3` 完全相同可作旁证）。
+
+##### 十、诚实声明（本轮未做到的事）
+
+- **从未有人真的用鼠标瞄准过、也没有人真的点左键开过炮。** 所有验证都是脚本灌入合成事件或像素比对。
+- **准星没有专属 smoke 断言**——只有两张截图 + 一次 6× 放大裁切 + 一次「有/无 cursor」的区域比对。
+- **升级页 / 商店页 / 改装页的左键语义未被真实点击验证过**，只由 `_is_battle_screen()` 的代码路径与两张截图（准星未出现）间接支持。
+- **键盘空格开火仍可用**（`KEY_SPACE` 分支一字未改），但也未在本轮重新实测。
+- **Q24 已失效、待用户重新裁定**（见 §6.5 与 §16.1 的就地更正）。
+- **未在 Android 上验证，任何 APK 均不存在。**
+
 #### 11.4.3 两个 SETUP 界面
 
 **`EXPEDITION_SETUP`（单人远征）**
@@ -3556,6 +3736,8 @@ M3 的物理验收基准（`M 61.0 u` / `I 104 064 u·px²` / `T 9000` / `v_max 
 | Q25 | 是否支持外接手柄（gamepad）？ | **暂不支持**：v1 只有键鼠与触屏两个提供者。输入抽象层（§11.6.1）保留第三个提供者的接入位置，但不实现 | §11.6.1 |
 | Q26 | 是否支持竖屏？ | **不支持**，v1 仅横屏；因此 HUD 只需“上下分区”一套移动端布局，不做竖屏变体 | §11.6.6 |
 
+> **v3.25 更正（append-only：Q24 原行不改）**：Q24 的裁定依据「炮管 `aim` 安装后锁定，射击方向靠车身转向」**已被 v3.25 的鼠标瞄准推翻**（见 §6.5 的就地更正与 §11.4.2.10）。因此 **Q24 需要用户重新确认**：① 移动端是否需要第二个瞄准手段（右侧瞄准摇杆 / 拖动准星 / 自动索敌），还是接受「移动端只能靠车身转向」与桌面端不一致；② 若要，它应该是独立摇杆还是与开火键合并。**在用户重新裁定前不得自行实现右侧瞄准摇杆**——原有「右半屏只放开火/重开/返回三个按键」的布局仍按现状保留。**Q25（暂不支持手柄）与 Q26（只做横屏）不受影响，仍然有效。**
+
 ### 16.2 仍开放
 
 | # | 问题 | 当前假设 | 影响 | 待谁确认 |
@@ -3637,3 +3819,4 @@ M3 的物理验收基准（`M 61.0 u` / `I 104 064 u·px²` / `T 9000` / `v_max 
 | 2026-10-23 | v3.22 | **战斗视图复用（用户原话：「生存模式的战斗UI也应该能复用到其他模式」）**。① **先摸底再动手**：逐行对照 `_draw_survival_arena()` 与 `_draw_match()`，可复用面 = 竞技场底板 / 边框 / 障碍 / 中立物 / 弹道 / 动效 / 命中闪光 / 伤害数字 / 车体着色判据；模式专属的只有 HUD 与状态机。② **新建 `scripts/combat_view.gd`**（`extends RefCounted`，只 preload `palette.gd` 与 `fx_layer.gd`，**零 preload 回 `main.gd`**，依赖 DAG 保持单向）。**全部 `static`、无状态**：可变状态（`FxLayer` 实例、命中闪光剩余时间）留在页面层。**为什么不用实例**：若组件持有动效层，就得回答「哪个实例才是真状态」；而两个战斗模式各有独立的动效层。无状态的硬好处是**生存页切过去时不可能因初始化顺序改变一个像素**，这正是「抽取不改观感」可被逐字节验证的前提。③ **API**：`to_screen` / `fit_scale` / `scale_obstacles` / `draw_arena` / `draw_neutrals` / `draw_shots` / `draw_fx` / `draw_hit_flash` / `draw_damage_popups` / `push_damage` / `hull_damage_colour` / `hull_damage_alpha`。绘制函数都接 `canvas: CanvasItem` 并用 `canvas.draw_*`（Godot 允许在 `_draw()` 周期内从别处调用），因此**不必新增 Node2D**；文本绘制以 `text_fn: Callable` 注入（字体属于页面，组件不该自己加载，否则同一字形会在两处解析出不同回退链）。④ **模式差异用参数表达，不用分支**：没有房屋/残骸 → `draw_neutrals(..., [], [], cell_px)`（**空数组即无绘制**）；障碍单位不同 → 进组件前正规化（生存页用 `scale_obstacles()`，对局页直接传已是像素的 `duel.obstacles`）；动效观感 → `FX_STYLE_SURVIVAL` / `FX_STYLE_MATCH` 两个常量字典（`radius_base` / `radius_grow` / `min_radius` / `arc_points` / `arc_width` / `fill_scale` / `alpha_scale`）。**为什么不用模式枚举**：枚举会让组件知道「世界上有哪些模式」，每加一个模式都要改组件。⑤ **两页接线后是同一调用序列**，只有参数不同。**对局页因此真正获得三样东西**（这是复用的**目的**，不是回归）：命中闪光（旧版完全没有；新增 `_match_hit_flash_at` / `_match_hit_flash_left` 页面变量，在 `_match_step()` 的 `impact` 分支置位、`_match_tick_fx()` 在固定步长内递减）、按血量分档上色（`_match_part_colour()` 先定队伍色/驾驶舱琥珀，再过 `CombatView.hull_damage_colour`；旧版整台只有一种队伍色、不看 HP）、层级统一（弹道在动效之下、伤害数字在最上层）。⑥ **顺带修掉一个潜在缺陷**：对局页弹道坐标原为 `DRIVE_VIEW.position + pos * scale`，**漏了 `- arena.position`**；走 `to_screen` 后正确。现阶段 `arena.position == ZERO` 所以像素无影响——**这是正确性改进，不是本轮引入的问题**。⑦ **刻意不抽**：`_draw_hull_shared()` 留在 `main.gd`（已带 `effects` 尾参、三页共用、需要 `_time` 与 `Palette`，搬进无状态组件只会多两个注入参数）；**坦克镜像面板不抽**（与生存 run 的 inventory / wave / level 强耦合，抽出去只会把生存语义灌进通用组件，**列为独立后续目标**）；HUD 不抽（模式专属信息，共用只会制造条件分支）。⑧ **清理**：删除 `_draw_match_damage_popups` 与 `_survival_fx` / `_draw_damage_popups` / `_draw_survival_hit_flash` / `_draw_match_fx` 四个已无调用点的包装，以及 `HIT_FLASH_TIME` / `DAMAGE_POPUP_RISE` / `DAMAGE_POPUP_LIFE` / `DAMAGE_POPUP_PER_SIDE` 四个页面常量（全部搬到组件，避免同一套数值写两份而只改了一份）。`main.gd` 172866 B / 3585 行 → **166082 B / 3418 行**。⑨ **回归（三条结论必须分开陈述）**：`--check-only` `combat_view` / `main` 均 **78 B / `6ca5b6ba`**；**13 项 smoke `s7.txt` = `s9.txt` = 720 B / `f1606d4c`，与 v3.20.1/v3.21 的历史基线逐字节相同**（两次独立运行）；**生存页** `v22_surv_a.png` = `v22_surv_c.png` = **182717 B / `d6a8bec2`，与 v3.21 基线逐字节相同**，区域归因**七个区域 diff_px 全为 0**（`REGION_TOTAL diff_px=0`）→ **像素零变化**；**试驾页** `v22_drive.png` **213555 B / `f7ba692c`，与基线逐字节相同** → **未被间接影响**；**对局页** `v22_match_b.png` **133659 B / `6d5654d1`**（v3.21 为 133138 B / `ceb34015`），区域归因**六个非战场区域全为 0**，仅 battlefield 14689 px（bbox 737,233–938,522，max_delta 86）→ **有变化，且那正是复用的目的**，不可说成「重构无可见变化」。`Image_View` 目视确认敌方车体呈血量分档渐变色、红色 `-52` 数字、障碍/弹道/HUD 正常。⑩ **过程自伤 1 次（已修并复验）**：`_match_part_colour` 那次 `replace` 把范围写成 1919–1948，连带删掉了 `_draw_match_hull` 与 `_draw_match_fx` 两个函数体；立即读回发现并补回，随后又清掉一条因补写产生的重复注释。**同类事故总数已达 6 次**——教训固定为：`File.Edit` 报 `succeeded` 不证明字节正确，改完必须 `File.Read` 读回函数前后。**如实声明**：截图与测试均为**脚本驱动 + 像素检查，非人工交互验证**——**从未有人真的进游戏玩过一局**去观察对局页新出现的命中闪光与血量分档上色；**`combat_view.gd` 没有专属 smoke 断言**（纯绘制层，只被截图间接覆盖）；**镜像面板仍未复用**；**未在 Android 上验证，任何 APK 均不存在**；`boss_armor` / `safe_radius` / 商店稀有度权重方向 / 房屋撞毁断言等旧缺口本轮一条未动。 | §11.4.2.7 §17 |
 | 2026-10-23 | v3.23 | **开火特效 + 提高全部口径射程 + 射程耗尽消散**（用户原话：「实现开火特效，提高所有口径炮弹的默认射程，炮弹没有命中时飞行到最远射程后也要有一个消失特效」）。① **射程从全局单值改为口径属性**：`data/ammo/calibers.json` 五个口径全部新增 `range_px` = 1900 / 1820 / 1740 / 1660 / 1580（旧值统一 1400，全部提高 +180~+500）。这不是「把一个数调大」：用户说的是「**所有口径**…的默认射程」，射程是口径属性。`projectile_field.spawn()` 把 `range_px` 写进 `shot["range"]`，`step()` 按逐发值判定，`max_range_px` 降级为缺省回退值；`data_validator` 强制该字段必填。**第一版数字 2300/2200/2000 超过竞技场宽度 2048**，`cannon_smoke` 立刻报 `CANNON_FAIL_REASON:impact`——炮弹先撞墙意味着消散特效在实战里永远不会发生，这是功能失效而非测试挑剔，已全部压到 1580–1900。② **寿命由射程反推**：旧 `step()` 有两个独立终止条件（射程 / 3.5 s 寿命）谁先到谁终止；按旧寿命，五个口径只能飞 3150/2730/2170/1750/**1470** px，因此只改射程会让 76/120/155 三个口径「名义上提高、实际没有」（`cal_155` 连 1580 都到不了）。改为 `life := maxf(_lifetime, range_px / speed + 0.5)`：射程是设计意图，全局寿命退化为安全阀。`cal_155` 因此是唯一能做区分性证明的口径（旧跨度 1470 < 新射程 1580）；最初拿 `cal_76` 做这件事实测报 `CANNON_FAIL_PREMISE range=1740 old_span=2170`——前提不成立，已改用 `cal_155`。③ **事件架构**：`expire` 事件早已存在（`_expire()` 一直在产出），`Duel.step()` 原样透传、`drain_events()` 送到页面层，**但三个页面层都没有任何 `expire` 分支**，一直静默丢弃；v3.23 补上 `shooter` / `travelled` / `range` 三个字段并开始消费。`muzzle` 是新增的，接在 `Duel.fire()` 里——开火入口有 4 处，分散推 FX 必然漏，而所有 `Duel` 调用方都已统一 `drain_events()`，**零调用方改动**；位置与方向直取 `bank.fire()` 的实际发射结果，不重算炮口。试驾页绕过 `Duel`，自己调 `_consume_combat_particles()`。④ **视觉**：炮口做成**锥形**而非圆（圆无法表达朝向；炮管 `aim` 与车体朝向可以不同），三层构成 = 锥形光 + 中心亮芯 + 炮口冲击环，0.18 s。消散刻意与命中闪光相反：命中是实心琥珀圆向外扩张 0.14 s，消散是三圈同心描边**向内收缩** + 四根固定角度刻线 + 向上漂 6 px、0.26 s、按敌我上色——**形状、时长、运动方向全不同，不看颜色也能分辨**。消散画在弹道之下、炮口画在弹道之上。⑤ **状态存放**：三页各两组多实例数组（`_match_muzzles` / `_match_expires` 等）+ 通用 `_advance_timed()`；**不塞进 `FxLayer`**（它的字段集是给通用圆环的，炮口需要 `dir`）。`_advance_timed()` 必须 `entries.clear()` + `append_array(kept)` 而**不能重新赋值**——三页传的都是成员数组。⑥ **本周期发现并修复两个真实缺陷（都直接决定需求能否成立）**：**缺陷 A（严重，产品级）** `projectile_field._clip_to_rect()` 只算 `rect.end` 一侧，等于假设「起点在矩形内部、向外射出」；它本是给竞技场边界写的，却被 `_sweep()` 复用来求障碍矩形，于是**每个矩形障碍的右侧变成一道无限高的隐形墙**——任意 y 的炮弹跨过 `rect.end.x` 就被吃成命中。实测：一发 `cal_76` 沿 `y=200` 直飞，在 `x=1088` 判成 `impact/obstacle`，而该矩形 `rect(960,320,128,128)` 在 y 方向只覆盖 320..448。**这直接废掉用户要的第三件事**。既有三个 `cannon_smoke` 子测试全从矩形左侧打过去，对新缺陷完全不敏感。已改用标准 slab 求交（起点在内取退出点、在外取进入点），并新增两条**必须同时存在**的区分性断言：`CANNON_FAIL_RECT_BYPASS`（`y=200` 绕行必须以 `expire/range` 结束）与 `CANNON_FAIL_RECT_THROUGH`（`y=580` 正对必须命中 `obstacle`）——只留绕行那条，把矩形碰撞整个删掉也能过。**缺陷 B** `main.gd` 两处接线错误（都是我自己 `File.Edit` 范围过大的自伤，**第 7 次同类**）：`_draw_match_hud()` 被误插进 `_draw_timed_expires()` 函数体末尾，导致生存页每帧抛 `Invalid access to property or key 'duel' on a base object of type 'Nil'`，**`_draw_survival_arena()` 其后的弹道、命中闪光、伤害数字全部不再绘制**；`_match_step()` 里 `is_over` + `_match_tick_fx` 重复写在事件循环内部，同帧事件越多倒计时被多减几次。⑦ **验证**：`--check-only` 六个脚本均 **78 B**；**13 项 smoke `s12.txt` = 720 B / `9394474c`**，13 项全绿，`CANNON_OK shots=3 reload76=1.10 range=1740`（旧基线 `range=1400`，这是预期的功能结果）；**特效链路首次有断言覆盖**：`probe_fx23.txt`（483 B / `195092c4`）**13 条全 PASS**——muzzle 入状态且方向单位化、`_advance_timed()` 就地递减 0.163→0.147 并能在过期时清空成员数组、expire 入状态且位置精确 = `origin.x + range_px = 1800.00`；**两个特效都拿到了真实战斗内像素证据**：`v23_fxm.png`（130200 B / `c6fdaa16`，同帧报告 `MUZZLES 1` / `MUZZLE_DIR (1.0, 0.0)`）与 `v23_fxe.png`（132212 B / `4b8fade5`，同帧报告 `EXPIRE_POS (1800.002, 200.0)`），放大裁切 `crop_fxm2.png` / `crop_fxe2.png` 肉眼确认锥形炮口闪光与三环消散各自可见。三页整体截图：生存页 `v23c_surv.png` = `v23c_surv2.png` = **183957 B / `7c2c25ae`**（两次逐字节相同）、对局页 `v23c_match.png` **133180 B / `8bb087b5`**（五个非战场区域 diff_px 全 0）、试驾页 `v23c_drive.png` **213730 B / `672eaf05`**。**生存页从 v3.22 的 `d6a8bec2` 变为 `7c2c25ae` 是缺陷 B 修复的直接结果**（旧版那里抛异常，弹道与伤害数字根本没画出来），不是布局回归——`Image_View` 确认伤害数字 `-17` / `+52` 与镜像面板都已恢复。⑧ **顺带修掉一处历史遗留**：`#### 11.4.3 两个 SETUP 界面` 标题在文档里重复了两遍（改动前就存在），已删去重复行。**如实声明**：**两个绘制函数本身没有任何专属 smoke 断言**（探针覆盖的是事件→状态→倒计时这条链，绘制只被截图肉眼确认）；**生存页与试驾页的炮口/消散没有单独截到**（三页共用同一份 `CombatView.draw_*`，事件入状态已被证明，但只有对局页的画面上有直接像素证据）；**只有 `cal_76` 有消散截图**；**仍然没有人真的进游戏用手玩过**；`DAMAGE_POPUP_PER_SIDE`（=6）被复用作炮口/消散的同侧上限，语义不完全贴切；**未在 Android 上验证，任何 APK 均不存在**；`boss_armor` / `safe_radius` / 商店稀有度权重方向 / 房屋撞毁断言等旧缺口一条未动。 | §11.4.2.8 §17 |
 | 2026-10-23 | v3.24 | **升级载荷实体化 + 端口箭头 + 流水线后续计划**（用户原话：「升级效果模组应该也要和最初设计一样，需要安装在坦克上，并且需要输入弹药和输出弹药，来给弹药升级，在改装UI中，这些模块要显示输入输出箭头来辨别方向，不只是升级效果模块，其他所有有输出或者有输入的模块都要显示箭头，方便规划流水线，后续计划要深化流水线的概念」）。① **先认账：9 种升级在本轮之前根本没生效**。摸底三条独立死链（逐条 `File.Search` 确认，不是推断）：`survival_run.collected_upgrades` 只被 `append()` 与 `clear()`、**从未被任何代码读取**；`DamageSystem.inject_upgrades()` **零调用方**；`DamageSystem.cannon_upgrades()` 依赖 `part["upgrades"]` 而 `tank_body.gd` 从不产生该字段，`_modifier_upgrades` 那条分支同样永假 —— 所以 `cannon_upgrades()` **恒返回空数组**，`_upgrade_profile([])` 恒全零，九种效果全部走不到。而 `ammo_network._module_advance()` 的 modifier 分支此前是 `queue.pop_front()` → 等 `work_remaining` → `output.append(同一个 ammo_id 字符串)`：**进出完全是同一个字符串，升级信息在物理上无处存放**。这就是「必须实体化」的直接原因，不是 UI 需求。② **方案：弹药携带载荷，不整台聚合**。一发弹药从纯 `ammo_id` 字符串升级为 `{ammo_id, upgrades}` 对象（网络里的在途弹药本来就存在 `_rounds[uid]` 字典里，`ammo_id` 只是其中一个字段）。改进装置逐个加工流经弹药时，把**自己槽里配置的升级**追加到这笔载荷上。完整链路：modifier 加工完成 → `output.append({ammo_id, upgrades})` → `_emit_from(..., upgrades)` → `_spawn_round(..., upgrades)` → `_apply_module_requests()`（本轮修的产品缺陷，见 ⑥）→ `_accept(..., upgrades)` → 炮管 `state["queued_upgrades"]` → `fill_cannons()` → `CannonBank.load_round(index, payload)` → `cannon["upgrades"]` → `_fire_one()` 返回 `shot["upgrades"]` → `Duel.fire()` / `main._drive_fire()` → `field.spawn(..., upgrades, ...)` → `apply_hit(..., upgrades, ...)` → `_upgrade_profile(upgrades)`。③ **网络内部统一弹药对象**：新增静态助手 `_make_round(ammo_id, upgrades)` 与 `_ammo_of(entry)`（兼容旧式纯字符串）；工厂新造弹药无载荷；仓库 / 改进器 / 管路上的都是对象；`_depot_has_room()` 用 `_ammo_of()` 算槽位；`_modifier_has_room()` 改用 `(state["work"] as Dictionary).is_empty()`。新增三个对外接口：`configure_modifier(part_index, upgrades) -> bool`、`modifier_slots(part_index) -> Array`、`loaded_upgrades(part_index) -> Array`；`strand_positions()` / `cannon_states()` / `module_states()` 都暴露载荷或槽配置；`_snapshot_rounds()` / `_reattach_rounds()` / `_orphans` 均保留载荷（否则拓扑重建会丢）。④ **建造期配置挂 `part["upgrades"]`，不挂 `state`**：它是**建造期**配置（改装页设的），`state` 是运行期可变状态，混在一起会让 undo 与蓝图序列化多出无意义字段。`grid_builder._add_part_direct()` 对 `definitions.get_module(module_id).has("upgrade_slots")` 的模块初始化 `part["upgrades"] = []`；新增 `set_modifier_upgrades(cell, upgrades) -> String`（带 `_push_undo()`）与只读 `modifier_upgrades_at(cell)`。**注意**：`part_at()` 返回 `{index, part}` 包装，真正的 part 是 `hit["part"]`（本轮一度误把它当 part 本身，读 `_part_at()` 后改正，见 §11.4.2.9 第九小节）。校验规则在 `GridBuilder.set_modifier_upgrades()` 与 `AmmoNetwork.configure_modifier()` 两处**必须同一套**（id 存在、数量 ≤ `upgrade_slots`、同一 `effect` 层数 ≤ `stack_limit`、参数非法时**不改动**原配置），否则建造期与运行期判定会漂移。⑤ **删除旧的整台聚合，不保留兼容**：`DamageSystem.cannon_upgrades()` / `set_modifier_upgrades()` / `inject_upgrades()` 与字段 `_modifier_upgrades` **全部移除**，`Duel.add_side()` 与 `main._drive_setup()` 的调用同步删除。**理由**：整台一个升级池与 §7.1「弹药实例携带自己的升级列表」以及「流经改进器才被染色」相矛盾 —— 一台坦克两门炮走两条不同流水线时，两门炮会拿到同一套升级；两套来源并存会让「升级到底有没有生效」永远说不清。⑥ **本周期发现并修复的三个产品缺陷（不是探针缺陷）**：**A** `configure_modifier()` 写成 `definitions.get_upgrade(...)`，而 `ModuleDefs` 只有 `get_module` / `get_blueprint` / `get_ammo` / `get_arena` 等，**没有 `get_upgrade`** —— 升级表在 `definitions.registry.get_upgrade()`（`data_registry.gd:43`）；运行期报 `Nonexistent function 'get_upgrade' in base 'RefCounted (module_defs.gd)'`，`--check-only` 抓不到。**B** `_apply_module_requests()` 调用 `_accept(target, ammo_id)` 时**没有传 `r["upgrades"]`**，所以弹药从管路进入炮管 / 仓库 / 改进器时载荷一律归零 —— 「改进器 → 炮管」整条链在**模块接收**这一环断掉；`upgrade_flow_smoke` 当时两条断言同时失败（`flow_loaded_upgrades_[]`、`flow_cannon_state_payload_[]`），而 `flow_payload_in_transit` 通过，正好把断点定位到「模块接收」。**C** 改造 `cannon_bank._fire_one()` 返回字典时把 `"recoil_px"` 删掉了，`cannon_smoke.gd:156` 立刻报 `Invalid access to property or key 'recoil_px'`。三处均已修并复验。⑦ **端口箭头（用户第二项要求）**：新增 `AmmoNetwork.ui_ports(module_id, def, rot) -> Array` 作为 UI **唯一入口**，内部直接复用 `_role_of()` + `_port_specs()`（两者连同 `_port_cell()` 一并改为 **static**）。**不在页面层另写一份角色判据**：一旦判据变化（例如新增一种带端口的模块），箭头就会与真实连线对不上。返回每项 `{id, kind: "in"|"out", side: "N"|"E"|"S"|"W"}`，已按 `rot` 旋转。`main.gd` 新增常量 `PORT_ARROW_LEN 13.0` / `PORT_ARROW_WIDTH 2.0` / `PORT_ARROW_WING 5.0` / `PORT_ARROW_WING_ANGLE 0.6` 与 `_draw_port_arrows(part, definition, alpha)` / `static _side_direction(side)`，在 `_draw_grid()` 的 module 循环里、`_draw_cell` 之后、`_draw_aim_line` 之前调用（箭头贴格边、瞄准线从首格中心向外，几何上不会混）。**覆盖五类角色**（由 `ui_ports()` 决定）：conveyor（直管 1 in / 1 out；二合一 2/1；四通 2/2；一分二 1/2）、factory（0 in / 1 out）、depot（1/1）、modifier（1/1）、cannon（1 in / 0 out）。**与瞄准线必须可分**（炮管同时有 `in0` 与 `aim`，若画成同一种箭头，玩家会以为能从炮口装弹）：端口箭头 = **物料流向**、只有四正交、13 px 短箭头 + 两片 ±0.6 rad 箭翼、`in` 冷色 `ACCENT_CYAN` 指向模块内部 / `out` 暖色 `ACCENT_AMBER` 背离模块；`_draw_aim_line()` = **弹道方向**、可对角 8 档、24 px 细长 `ACCENT_LIME` 线段、从首格中心出发。确定性：形状 / 长度 / 颜色全部由格坐标与常量决定，零随机、零时间依赖，颜色一律取 `Palette.*`。⑧ **生存流程与改装页交互**：`survival_run.take_level_choice()` 的 `CHOICE_UPGRADE` 改调新增的 `_install_upgrade()` —— 按 `module_parts` 数组顺序找第一件还有空槽的改进装置，**真的写进 `part["upgrades"]`**，并把反馈文本放进新增的 `upgrade_note`（升级页 UI 直接显示）；**没有空槽时不凭空生效**：id 进 `collected_upgrades` 暂存，文案明确说「没有空槽的改进装置，升级已暂存」。新增 `flush_collected_upgrades()`（`enter_modification()` 时调一次；**实现必须先快照池子、`clear()`、再逐条试** —— `_install_upgrade()` 装不下时会自己 append 回池子，边遍历边写回会把失败项重复压入）与只读 `installed_upgrades()`；`close_run()` 清 `upgrade_note`。改装页键盘：光标下是改进装置时 `Q/E` 切换「待装升级」候选（`_upgrade_pick_index`）、`T` 追加到下一个空槽、`Shift+T` 清空；底部提示与状态栏同步更新。**全部走键盘**，不新增鼠标反向调用，守住 `_input()` → `_handle_survival_mouse()` → `_handle_mouse()` 这条单向量不变量。⑨ **测试与验证**：新增 `tests/upgrade_flow_smoke.gd`（10256 B / 235 行，第 14 项 smoke），三段：`ui_ports()` 覆盖全部五类带端口角色（含 rot=90 时 side 变 N/S、无端口模块返回空）、槽配置校验（单槽接受 1 个、拒绝 2 个、未知 id 拒绝且不改动原配置、非改进装置拒绝）、载荷全链路（factory → 直管 → modifier_mk1 配 `up_damage` → 直管 → cannon_20，断言 `strand_positions()` 在途带载荷、`loaded_upgrades()` == `["up_damage"]`、`cannon_states()` 与 `module_states()` 均暴露载荷 / 槽配置）。`--check-only` 七个脚本全部 **78 B / `6ca5b6ba`**；`UPGRADE_OK`；**14 项 smoke 全绿**（`s24b.txt` 755 B / `791ae573`）。三页整体截图与 v3.23 基线**逐字节相同**（生存页 `v24_surv.png` 183957 B / `7c2c25ae`、对局页 `v24_match.png` 133180 B / `8bb087b5`、试驾页 `v24_drive.png` 213730 B / `672eaf05`）→ **端口箭头只加在建造 / 改装页，对三个战斗页零影响**。改装页截图 `v24_modify.png`（270209 B / `2c643eb3`，1920×1080）+ 4× 放大裁切 `crop_mod24c.png`（2560×1600 / `65ff0c99`）：**肉眼确认**青色 in 箭头指向模块内部、琥珀 out 箭头背离模块、亮绿细长瞄准线三者可分。⑩ **过程自伤（如实记录）**：`File.Edit` 范围过大累计造成 **6 次解析级 + 2 次语义级**自伤（清单与逐条修复见 §11.4.2.9 第九小节，含 `duel.fire()` 的 `field.spawn` 被删、`grid_builder` 把 `part_at()` 包装当 part 两例语义级）；另有 **1 处探针缺陷**（`upgrade_flow_smoke` 第一版在 `delivered` 那一 tick 就断言，读到 `queued=true / loaded=false` 中间态）。**必须与产品缺陷分开记**：若把探针缺陷当成产品缺陷，就会去改正确的两段式装填代码。**如实声明**：**仍然没有人真的进游戏看过这些端口箭头** —— `v24_modify.png` 与 `crop_mod24c.png` 是脚本驱动截图 + 放大裁切目视，**不是人工桌面交互验证**；**升级效果的实战可见性没有像素证据** —— `upgrade_flow_smoke` 只证明载荷进了炮管，没有一局真实战斗里「同一发炮弹带 `up_damage` 打出的伤害数字更大」的证据；**端口箭头只加在建造 / 改装页的网格上，战斗页的实时管网没有任何端口箭头**；**`_draw_port_arrows()` 没有专属 smoke 断言**（只有 `ui_ports()` 的数据层断言 + 一张整体截图 + 一次放大裁切）；**`_modifier_has_room()` 的容量语义本轮刻意未改**（实现 `total < upgrade_slots + 1` 与 §6.4「输入缓存 1 发」不一致，只写进 §11.4.2.9 第十小节的差异清单）；**流水线深化 P1–P6 只记录计划、一条未实现**（见 §11.4.2.9 第十一小节）；**未在 Android 上验证，任何 APK 均不存在**。 | §11.4.2.9 §17 |
+| 2026-10-23 | v3.25 | **鼠标瞄准 + 左键开火 + 生存难度与转向手感**（用户原话：「生存模式难度过高，敌人虽然用的小口径但是射速很快，玩家的默认坦克口径虽然大但是射速低，而且现在的摩擦力很低转向难以控制，难以瞄准，就造成打不中容错率低，瞄准方式改为鼠标瞄准，点击鼠标左键发射炮弹」）。① **先纠正一个会静默失效的认知**：弹药的物理链路是「工厂造弹 → 管路 → 炮管装填 → 开火」，炮管只有拿到弹才能装填，所以**有效射速 = max(`craft_time_s`, `reload_s`)**。玩家起始车被 `ammo_factory_76.craft_time_s = 1.5` 卡住（不是 `cannon_76.reload_s = 1.10`），招募级 Bot 被 `ammo_factory_20.craft_time_s = 0.45` 卡住（不是 `cannon_20.reload_s = 0.35`）。**只调 `reload_s` 对双方实际射速零效果**——smoke 会全绿、数据会「变好看」，而玩家体感一点都不会变。② **鼠标瞄准**：`CannonBank` 新增运行期字段 `aim_override` / `aim_world`（挂 cannon 字典，**不挂 `part`**——`part["aim"]` 是建造期配置，随蓝图序列化并参与 undo），`muzzle_dir()` 改为双路径：有覆盖时用绝对世界角，与 `body.heading` **完全解耦**；无覆盖时退回 `heading + deg_to_rad(aim)`。新增 `aim_at(index, target) -> bool`（`atan2` 算世界角；目标与炮管中心重合时保持原方向；返回「方向是否真的变了」，0/false **不是失败**）/ `aim_all_at(target) -> int` / `clear_aim_override()`；`reload_from_body()` 的 snapshot 新增两字段并在拓扑重建时复制（否则每波开局都要重新晃鼠标）。**Bot 侧零改动**：`bot_ai._drive()` 从不调 `aim_at()`，所以「弹道 = `heading + aim`」的开火判据完全不受影响——这是本轮最安全的边界划分。③ **左键开火**：`main.gd` 的 `_input()` 在**生存页分流之前**拦截战斗页左键（放在之后会被 `_handle_survival_mouse()` 转发给 `_handle_mouse()` 然后静默早退，玩家「点了没反应」），`_is_battle_screen()` 精确限定 DRIVE / MATCH（排除 `is_over` 与 `paused`）/ SURVIVAL 的 `STAGE_BATTLE`；`_fire_battle_player()` 内部**又调一次 `_aim_with_mouse()`**，保证同帧「先瞄再开火」，重复调用幂等。新增 `static _screen_to_world()`（`CombatView.to_screen()` 的精确逆变换，`scale <= 0.0001` 回退原点不除零）、`_aim_player_cannons()`、`_player_bank()`、`_aim_with_mouse()`、`_battle_view()`（返回 `{view, arena, scale}`，**每页读自己的竞技场**）。三个战斗页的 exit 函数都调 `clear_aim_override()`。④ **准星**：新增 `AIM_RETICLE_RADIUS 9.0` / `AIM_RETICLE_WIDTH 1.5` / `AIM_RETICLE_CROSS 5.0`，**空心环 + 十字**——与端口箭头（短线+箭翼）、瞄准线（细长线段）、命中闪光（实心圆外扩）、消散（三圈内收+刻线）在**形状上**全可区分，不靠颜色。只在鼠标位于战场区矩形内时绘制；零随机、零时间依赖。三个 `_draw()` 都**最后**画准星（否则压在特效上会被遮）。`_draw_aim_reticle()` 内部先判 `_is_battle_screen()`，所以升级/商店/结算页不会冒出环。⑤ **物理**：`tank_body.step()` 把速度拆成**纵向 / 横向**两个分量分别施加阻力（纵向 `k_drag`，横向新增 `k_lateral_drag = 0.05`，大 12.5 倍），并新增**始终生效**的线性角阻尼 `k_ang_damp = 1.6`（旧版线性项只在 `|steer| <= 0.001` 的 `k_ang_brake` 分支里，按住转向时 ω 一路撞 `omega_max`）。**`max_speed()` 闭式 `sqrt(T/(M·k_drag))` 仍精确成立**（直线时横向分量为 0，`physics_smoke._check_terminal_speed()` 的前提）；**`omega_max` 仍是 3.0，未提高**。⑥ **难度平衡（全部进 `data/*.json`）**：`ammo_factory_20.craft_time_s 0.45 → 0.85`（招募级 2.2 → 1.2 发/秒）、`ammo_factory_40 0.8 → 0.95`、`ammo_factory_76 1.5 → 1.1`（玩家实际射速 1.5 → 1.1 s/发，`reload_s` 是硬闸）、`enemy_quota_multiplier 3.0 → 2.0`、`enemy_reinforce_delay_s 5.0 → 8.0`、`aim_error_deg_recruit 8.0 → 12.0`。**`reload_s` 五口径全部未动**——这也是 `cannon_smoke._check_data_fields()`（写死 `cannon_76: [1.1, 20.0]`）与 `_check_reload()`（硬编码 1.10 s 时序）**不需要改**的原因。**`craft_time_s` 是模块数据，对局页 Bot 也会受影响**，这是有意的但必须知道。⑦ **HUD 文案**：三处 `_status_message` 与三处 `_draw_text("空格 开火")` 改为「鼠标瞄准 · 左键开火（空格备选）」；`KEY_SPACE` 分支一字未改，**键盘开火仍然可用**。⑧ **截图探针新参数 `--cursor=x,y`**：`--capture` 路径不产生任何 `InputEventMouseMotion`，`_mouse_position` 停在 `Vector2.ZERO`（战场区外），`_draw_aim_reticle()` 会早退——截图上连准星都没有。新增该参数把鼠标位置钉到指定点并在页面建好后调一次 `_aim_with_mouse()`。**不传时 `Vector2.INF`，截图路径与之前完全一致**。⑨ **验证**：`--check-only` `cannon_bank` / `tank_body` / `main` 三次均 **78 B / `6ca5b6ba`**（`c25_all.txt` 42 B / `c527e1c3`、`c25_main3.txt` 78 B）；新增 `tests/aim_smoke.gd`（8698 B，7 组断言：方向正确 / 与 `heading` 解耦 / `clear` 回退 / 多炮一致 / 非法下标不改状态 / 重合目标保持原向 / 坐标往返回退）；`tests/mouse_input_smoke.gd` 新增第 ⑧ 段（真实 `STAGE_BATTLE` 下灌真实 `InputEventMouseButton`，断言炮管切到 `aim_override`、`aim_world` 与点击方向差 ≤ 0.02 rad、最近事件变成开火反馈）；**15 项 smoke 全绿**（`s25b.txt` 787 B / `e4b6afa6`）：`PHYSICS_OK mass=61.0 inertia=104064 v_max=192.1 turn180_s=1.70 spin_stop_s=0.43` / `CANNON_OK shots=3 reload76=1.10 range=1740` / `AMMO_OK` / `UPGRADE_OK` / `AIM_OK cannons=2` / `BUILD_OK` / `RUNTIME_OK` / `DATA_OK files=23 modules=45 ammo=5 upgrades=9 arenas=3 blueprints=14` / `DATA_ERROR_OK errors=30` / `COMBAT_OK` / `MATCH_OK` / `EXPEDITION_OK` / `SURVIVAL_OK` / `MOUSE_OK` / `PREVIEW_OK`。**物理基线已重新记录**：`v_max 192.1` 未变，`turn180_s 1.35 → 1.70`，`spin_stop_s 0.62 → 0.43`（旧值不得再引用）。⑩ **像素证据**：`v25_surv.png` = `v25_surv_b.png` = 196428 B / `720fbad3`（`--steps=420 --cursor=960,540` **两次逐字节相同**）、`v25_surv_s300.png` 191343 B / `33afdd19`（`--steps=300`，**与 420 不同**，证明参数真生效）；`v25_surv_nocursor.png`（195078 B / `c9c14f6b`）与带 cursor 版 `REGION_TOTAL diff_px=3722`、bbox `(928,505)–(994,575)` = 133×71 px，且**其余六个区域 diff_px 全为 0**（左/右 HUD、镜像面板、状态栏、镜像标题条）——差异**恰好只是准星**；`crop25_surv.png` vs `crop25_nocursor.png` 6× 放大对比：带 cursor 版中间有完整亮绿空心环 + 十字，不带版同一位置**空白**。对局页 `v25_match.png` 146903 B / `7a788b7d`、试驾页 `v25_drive.png` 217047 B / `96306344`，`Image_View` 目视确认准星都在战场区中心；升级页 `v25_levelup.png` 218721 B / `9f671a90` 与商店页 `v25_shop.png` 250448 B / `5e295005` 目视确认**没有准星**（左键在此是选卡 / 买商品）；改装页 `v25_modify.png` **270209 B / `2c643eb3` 与 v3.24 逐字节相同**。⑪ **文档**：§6.5 与 §16.1 Q24 行均**就地追加更正**（append-only，历史行一字未改），新增 §11.4.2.10 全节。**Q24 的裁定依据「靠车身转向」已被本轮推翻，需用户重新确认；在重新裁定前不得自行实现右侧瞄准摇杆。**⑫ **本周期自伤（如实记录）**：`main.gd` 的 `--cursor` 参数解析块两次 `File.Edit` 范围算错（缩进错位 + 重复注释），均读回后修正；`tests/mouse_input_smoke.gd` 因未 preload `SurvivalRun` 导致一次 `Parse Error: Identifier "SurvivalRun" not declared`（737 B 失败工件 `mouse25.txt`），补 preload 后 `MOUSE_OK`。**如实声明**：**从未有人真的用鼠标瞄准过、也没有人真的点左键开过炮**——所有验证都是脚本灌合成事件或像素比对；**准星没有专属 smoke 断言**（只有两张截图 + 一次 6× 放大 + 一次有/无 cursor 的区域比对）；**升级页 / 商店页 / 改装页的左键语义未被真实点击验证**，只由代码路径与两张「准星未出现」的截图间接支持；**键盘空格开火未在本轮重新实测**；**鼠标瞄准只在桌面键鼠下有意义，移动端仍无任何瞄准手段（Q24 待裁定）**；**未在 Android 上验证，任何 APK 均不存在**。 | §6.5 §11.4.2.10 §16.1 §17 |

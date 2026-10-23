@@ -9,9 +9,13 @@ const TankBody := preload("res://scripts/tank_body.gd")
 
 var definitions: ModuleDefs
 var body: TankBody
-## 每门炮：{part_index, module_id, cell, caliber, reload_s, recoil_px, loaded, reload_remaining, shots_fired, upgrades}
+## 每门炮：{part_index, module_id, cell, caliber, reload_s, recoil_px, aim, loaded,
+##   reload_remaining, shots_fired, upgrades, aim_override, aim_world}
 ## `upgrades` 是**已上膛那一发携带的升级载荷**（v3.24）。炮管只是搬运工：
 ## 载荷由弹药网络在装填时交来，开火时随发射事件交给 `Duel.fire()`。
+## `aim` 是建造期锁定的相对角；`aim_override` / `aim_world` 是 v3.25 的**战斗期鼠标瞄准**：
+## 为真时弹道方向直接用绝对世界角 `aim_world`，不再读 `aim`。玩家侧每帧调 `aim_at()`，
+## Bot 侧永远不设，所以 AI 的「弹道方向 = heading + aim」判据完全不受影响。
 var cannons: Array[Dictionary] = []
 
 func setup(module_defs: ModuleDefs, tank: TankBody) -> bool:
@@ -50,6 +54,10 @@ func reload_from_body() -> void:
 			"reload_remaining": 0.0,
 			"shots_fired": 0,
 			"upgrades": [],
+			## v3.25 鼠标瞄准的运行时覆盖。默认关闭，所以只有显式调 `aim_at()` 的玩家侧会用到；
+			## Bot 侧永远不调，行为与 v3.24 完全一致（这也是 AI 的判据不被牵连的前提）。
+			"aim_override": false,
+			"aim_world": 0.0,
 		}
 		for old in previous:
 			if String(old["module_id"]) == module_id and Vector2i(old["cell"]) == Vector2i(snapshot["cell"]):
@@ -57,6 +65,9 @@ func reload_from_body() -> void:
 				snapshot["reload_remaining"] = float(old["reload_remaining"])
 				snapshot["shots_fired"] = int(old["shots_fired"])
 				snapshot["upgrades"] = (old.get("upgrades", []) as Array).duplicate()
+				## 拓扑重建（波次刷新 / 部件摧毁）时保留瞄准覆盖，否则每波开局都要重新晃鼠标才能拾起瞄准。
+				snapshot["aim_override"] = bool(old.get("aim_override", false))
+				snapshot["aim_world"] = float(old.get("aim_world", 0.0))
 				break
 		cannons.append(snapshot)
 
@@ -91,9 +102,55 @@ func load_all() -> int:
 			count += 1
 	return count
 
-## 世界坐标下的炮口方向：hull 朝向 + 炮管 aim 偏移。
+## 世界坐标下的炮口方向。
+##
+## 有运行时瞄准覆盖时直接用绝对世界角 `aim_world`——那是玩家鼠标指的方向，**与车体朝向无关**，
+## 这正是「鼠标瞄准」与旧「靠车身转向瞄准」的本质区别。
+## 没有覆盖时退回建造期语义：`hull 朝向 + aim 偏移`（design §6.5）。
 func muzzle_dir(cannon: Dictionary) -> Vector2:
+	if bool(cannon.get("aim_override", false)):
+		return Vector2.RIGHT.rotated(float(cannon.get("aim_world", 0.0)))
 	return Vector2.RIGHT.rotated(body.heading + deg_to_rad(float(cannon["aim"])))
+
+## 把某门炮的瞄准方向设为指向世界点 `target`。返回是否真的改变了方向（用于 HUD 节流重绘）。
+##
+## 为什么在炮管组而不是页面层：方向要经过 `body.heading` 的换算才能变成 `aim` 相对角，
+## 而这个换算属于炮管几何的一部分；放在页面层等于把同一套角度算术再写一遍，
+## 一旦朝向定义变化（例如将来改成屏幕朝向）两边就会不一致。
+func aim_at(index: int, target: Vector2) -> bool:
+	if index < 0 or index >= cannons.size():
+		return false
+	var cannon: Dictionary = cannons[index]
+	var centre := body.world_position_of_cell(Vector2i(cannon["cell"]))
+	var to_target := target - centre
+	## 目标与炮管中心重合时保持原方向：atan2(0,0) 没有意义，硬算会突然甩到 +X。
+	if to_target.length_squared() <= 0.0001:
+		return false
+	var world_angle := atan2(to_target.y, to_target.x)
+	var changed := not bool(cannon.get("aim_override", false))
+	if not changed:
+		var delta := absf(wrapf(world_angle - float(cannon.get("aim_world", 0.0)), -PI, PI))
+		changed = delta > 0.0001
+	## 始终写回：`changed` 只用于判断要不要重绘，不代表是否需要更新角度。
+	cannon["aim_override"] = true
+	cannon["aim_world"] = world_angle
+	return changed
+
+## 让某一侧所有炮管都指向同一个世界点（鼠标只瞄一个方向，多炮齐射就都朝那里）。
+## 返回真正改变了方向的炮管数；0 表示「方向没变」，不要用它当失败。
+func aim_all_at(target: Vector2) -> int:
+	var moved := 0
+	for index in range(cannons.size()):
+		if aim_at(index, target):
+			moved += 1
+	return moved
+
+## 关闭运行时覆盖，回到建造期 `aim` 语义。波次结束 / 退出战斗时调，
+## 否则「上一局鼠标停在哪里」会跟着下一局的车走。
+func clear_aim_override() -> void:
+	for cannon in cannons:
+		cannon["aim_override"] = false
+		cannon["aim_world"] = 0.0
 
 func muzzle_origin(cannon: Dictionary) -> Vector2:
 	var centre := body.world_position_of_cell(Vector2i(cannon["cell"]))
