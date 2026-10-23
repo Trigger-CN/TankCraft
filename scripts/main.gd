@@ -14,6 +14,9 @@ const BotAI := preload("res://scripts/bot_ai.gd")
 const SurvivalRun := preload("res://scripts/survival_run.gd")
 ## v3.11：瞬时动效层抽成独立类（三页共用一份 push / step / draw 语义）。
 const FxLayer := preload("res://scripts/fx_layer.gd")
+## v3.22：战斗视图（竞技场 / 障碍 / 中立物 / 弹道 / 动效 / 命中闪光 / 伤害数字）
+## 抽成独立类，对局页与生存页共用同一份实现；模式差异由参数表达，不再各写一份。
+const CombatView := preload("res://scripts/combat_view.gd")
 
 ## M2 正式建造编辑器入口。
 ## 菜单、输入与绘制留在单一场景；建造状态和规则由 GridBuilder 负责。
@@ -151,6 +154,10 @@ var _match_accumulator := 0.0
 var _match_held: Dictionary = {}
 var _match_event := ""
 var _match_fx := FxLayer.new()
+## v3.22：对局页也拿到命中闪光（旧版只有生存页有）。状态留在页面层，
+## 绘制走 `CombatView.draw_hit_flash()`，两个战斗模式互不干扰。
+var _match_hit_flash_at := Vector2.ZERO
+var _match_hit_flash_left := 0.0
 ## M9 波次生存：SurvivalRun 承载 run 状态，玩家坦克由 survival_builder 持有（波间不回滚）。
 var survival: SurvivalRun
 var survival_builder: GridBuilder
@@ -971,12 +978,15 @@ func _match_step(step_time: float) -> void:
 		var battle_event: Dictionary = raw_event
 		var kind := String(battle_event.get("kind", ""))
 		if kind == "impact" and String(battle_event.get("target", "")) == "tank":
-			## v3.20 悬浮数字：对局页同样「造成与承受都显示」。
-			## 坐标是竞技场世界坐标，`_draw_match_fx` 会按 `DRIVE_VIEW.position + pos * scale` 转换。
+			## 悬浮数字与命中闪光：与生存页同一套（`CombatView.push_damage` / `draw_hit_flash`）。
+			## 坐标是竞技场世界坐标，组件统一按 `view.position + (pos - arena.position) * scale` 转换。
 			var at := Vector2(battle_event.get("pos", Vector2.ZERO))
 			var dealt := float(battle_event.get("damage", 0.0))
 			var absorbed := float(battle_event.get("shield", 0.0))
 			var victim := String(battle_event.get("tag", ""))
+			## 命中闪光也在页面层置位，与生存页一样画在自己那张图的坐标系里。
+			_match_hit_flash_at = at
+			_match_hit_flash_left = CombatView.HIT_FLASH_TIME
 			if victim == Duel.TAG_PLAYER:
 				if dealt > 0.0:
 					_push_match_damage(at, dealt, Palette.ACCENT_RED, "received")
@@ -1014,50 +1024,17 @@ func _match_outcome_text() -> String:
 func _push_match_fx(kind: String, at: Vector2, radius: float, colour: Color, life: float) -> void:
 	_match_fx.push(kind, at, radius, colour, life)
 
-## 对局页的伤害悬浮数字（与生存页同一套语义，但坐标系统不同）。
-## 同侧同帧限流与生存页一致，避免多炮齐射时数字糊满屏。
+## 对局页的伤害悬浮数字：实际逻辑已收归 `CombatView.push_damage()`（两页同一份）。
+## 页面只负责指定自己的动效层实例，符号语义与限流全在组件里。
 func _push_match_damage(at: Vector2, amount: float, colour: Color, mode: String) -> void:
-	if amount <= 0.0:
-		return
-	var shown := int(roundf(amount))
-	if shown <= 0:
-		return
-	var counting := 0
-	for raw_entry in _match_fx.entries:
-		if String((raw_entry as Dictionary).get("kind", "")) == "damage":
-			counting += 1
-	if counting >= DAMAGE_POPUP_PER_SIDE:
-		return
-	## 符号语义与生存页一致：造成 `+N`，承受/护盾 `-N`。
-	var label := "+%d" % shown if mode == "dealt" else "-%d" % shown
-	_match_fx.push("damage", at, 0.0, colour, DAMAGE_POPUP_LIFE, label)
-
-## 对局页的伤害数字绘制：与生存页同样的上浮 + 淡出，但坐标转换走 `_match_fx` 的规矩。
-func _draw_match_damage_popups(scale_factor: float) -> void:
-	var stack := 0
-	for raw_entry in _match_fx.entries:
-		var entry: Dictionary = raw_entry
-		if String(entry.get("kind", "")) != "damage":
-			continue
-		var text := String(entry.get("text", ""))
-		if text.is_empty():
-			continue
-		var life := float(entry["life"])
-		if life <= 0.0:
-			continue
-		var progress := clampf(1.0 - float(entry["left"]) / life, 0.0, 1.0)
-		var rise := DAMAGE_POPUP_RISE * sqrt(progress) * scale_factor
-		var at: Vector2 = DRIVE_VIEW.position + Vector2(entry["pos"]) * scale_factor + Vector2(0.0, -rise - float(stack) * 14.0)
-		var colour: Color = entry["colour"]
-		var alpha := 1.0 if progress < 0.7 else clampf((1.0 - progress) / 0.3, 0.0, 1.0)
-		var size := int(roundf(20.0 - 4.0 * progress))
-		_draw_text(text, at + Vector2(1.0, 1.0), size, Color(0.0, 0.0, 0.0, 0.55 * alpha), true)
-		_draw_text(text, at, size, Color(colour, alpha), true)
-		stack += 1
+	CombatView.push_damage(_match_fx, at, amount, colour, mode)
 
 ## 对局页动效倒计时：只在 `_match_step` 的固定步长里累减。
 ## 递减逻辑已收归 `FxLayer.step()`（v3.11）——三页共用一份，不会再出现「调错 tick 对象」。
+## 命中闪光与生存页一样在固定步长内倒计时，绝不放 `_process`。
 func _match_tick_fx(step_time: float) -> void:
+	if _match_hit_flash_left > 0.0:
+		_match_hit_flash_left = maxf(_match_hit_flash_left - step_time, 0.0)
 	_match_fx.step(step_time)
 
 ## ===== 试驾沙盒（M3）：建造结果 → 自建刚体 → 差速操控与开火 =====
@@ -1718,45 +1695,37 @@ func _draw_preview_tank(center: Vector2, scale: float) -> void:
 
 ## ===== M6 对局绘制（design §3.1 BATTLE_PHASE）=====
 
-## 两侧坦克、弹道、护盾覆盖与 HUD；全部复用试驾页的坐标与配色约定。
-## 注意：不能复用 _drive_scale() —— 它读的是试驾页的 _drive_arena，对局页下为空会退回 1.0，导致地图 1:1 溢出。
+## 缩放与坐标换算都委托 `CombatView`：三页原本各有一份逐字相同的副本，
+## 现在的差别只在于「读哪个会话的竞技场」，而那正应该由页面自己决定。
+## 注意：不能复用 _drive_scale() —— 它读的是试驾页的 _drive_arena，对局页下为空会退回 1.0。
 func _match_scale() -> float:
-	if match_session == null or match_session.duel.arena.size.x <= 0.0:
+	if match_session == null:
 		return 1.0
-	return DRIVE_VIEW.size.x / match_session.duel.arena.size.x
+	return CombatView.fit_scale(DRIVE_VIEW, match_session.duel.arena)
 
 func _match_to_screen(world: Vector2, scale_factor: float) -> Vector2:
-	return DRIVE_VIEW.position + (world - match_session.duel.arena.position) * scale_factor
+	return CombatView.to_screen(DRIVE_VIEW, match_session.duel.arena, world, scale_factor)
 
+## 对局页战斗视图：竞技场 / 障碍 / 车体 / 动效 / 弹道 / 命中闪光 / 伤害数字全部走
+## `CombatView`，与生存页同一份实现。页面只负责组装参数与画自己的 HUD。
+##
+## 绘制顺序跟着统一后的规矩：动效在弹道**之下**、命中闪光与伤害数字在最上层。
+## 旧版对局页把弹道画在动效之下，所以接通后层级会变——这是有意的，不是回归。
 func _draw_match() -> void:
 	if match_session == null:
 		return
 	var duel: Duel = match_session.duel
 	var scale_factor := _match_scale()
-	draw_rect(DRIVE_VIEW, Color(Palette.BG_BASE, 0.94), true)
-	draw_rect(Rect2(DRIVE_VIEW.position, duel.arena.size * scale_factor), Palette.ACCENT_CYAN, false, 2.0)
-	for raw_obstacle in duel.obstacles:
-		var obstacle: Dictionary = raw_obstacle
-		if String(obstacle["shape"]) == "rect":
-			var rect: Rect2 = obstacle["rect"]
-			var screen_rect := Rect2(DRIVE_VIEW.position + rect.position * scale_factor, rect.size * scale_factor)
-			draw_rect(screen_rect, Color(Palette.ACCENT_RED, 0.16), true)
-			draw_rect(screen_rect, Palette.ACCENT_RED, false, 1.5)
-		else:
-			var obstacle_centre: Vector2 = obstacle["center"]
-			var centre: Vector2 = DRIVE_VIEW.position + obstacle_centre * scale_factor
-			var radius := float(obstacle["radius"]) * scale_factor
-			draw_circle(centre, radius, Color(Palette.ACCENT_RED, 0.16))
-			draw_arc(centre, radius, 0.0, TAU, 48, Palette.ACCENT_RED, 1.5)
+	CombatView.draw_arena(self, DRIVE_VIEW, duel.arena, scale_factor, duel.obstacles, Palette.ACCENT_CYAN)
+	## 中立物（房屋 / 残骸）是对局模式没有的，传空数组即可——
+	## 这就是「同一份实现按模式配置」而不是「两套分支」的意思。
+	CombatView.draw_neutrals(self, DRIVE_VIEW, duel.arena, scale_factor, [], [], float(definitions.global_number("cell_size", 16.0)))
 	for tag in [Duel.TAG_ENEMY, Duel.TAG_PLAYER]:
 		_draw_match_hull(String(tag), scale_factor)
-	for shot in duel.field.shots:
-		var head: Vector2 = DRIVE_VIEW.position + Vector2(shot["pos"]) * scale_factor
-		var tail: Vector2 = DRIVE_VIEW.position + Vector2(shot["prev"]) * scale_factor
-		var colour := Palette.ACCENT_AMBER if String(shot["shooter"]) == Duel.TAG_PLAYER else Palette.ACCENT_MAGENTA
-		draw_line(tail, head, Color(colour, 0.7), 1.5)
-		draw_circle(head, maxf(float(shot["radius"]) * scale_factor, 2.0), colour)
-	_draw_match_fx(scale_factor)
+	CombatView.draw_fx(self, DRIVE_VIEW, duel.arena, scale_factor, _match_fx.entries, CombatView.FX_STYLE_MATCH)
+	CombatView.draw_shots(self, DRIVE_VIEW, duel.arena, scale_factor, duel.field.shots, Duel.TAG_PLAYER)
+	CombatView.draw_hit_flash(self, DRIVE_VIEW, duel.arena, scale_factor, _match_hit_flash_at, _match_hit_flash_left)
+	CombatView.draw_damage_popups(self, DRIVE_VIEW, duel.arena, scale_factor, _match_fx.entries, _draw_text)
 	_draw_match_hud()
 
 ## 坦克绘制的唯一实现：试驾 / 对局 / 生存三页原本各有一份逐行同构的副本，
@@ -1954,36 +1923,27 @@ func _draw_part_effect(part: Dictionary, effect: Dictionary, cell: float, base: 
 		draw_rect(Rect2(bar.position, Vector2(bar.size.x * clampf(float(effect["bar"]), 0.0, 1.0), bar.size.y)), bar_colour, true)
 		draw_rect(bar, Color(bar_colour, 0.55), false, maxf(0.5, line_width * 0.5))
 
-## 对局页每部件颜色：驾驶舱恒为琥珀，其余按队伍色。`bind(base)` 后签名为 (part, base)。
-func _match_part_colour(part: Dictionary, base: Color) -> Color:
-	if bool(definitions.get_module(String(part["module_id"])).get("core", false)):
-		return Palette.ACCENT_AMBER
-	return base
-
+## 对局页车体：坐标走 `CombatView.to_screen`，颜色走血量分档，特效走 `_hull_effects`。
 func _draw_match_hull(tag: String, scale_factor: float) -> void:
 	var duel: Duel = match_session.duel
 	var hull: TankBody = duel.tank_of(tag)
 	if hull == null or hull.parts.is_empty():
 		return
 	var base := Palette.ACCENT_CYAN if tag == Duel.TAG_PLAYER else Palette.ACCENT_MAGENTA
-	var origin: Vector2 = DRIVE_VIEW.position + (hull.position - duel.arena.position) * scale_factor
+	var origin := CombatView.to_screen(DRIVE_VIEW, duel.arena, hull.position, scale_factor)
 	var effects := _hull_effects(hull, duel.damage_of(tag), duel.network_of(tag))
-	_draw_hull_shared(hull, origin, hull.heading, scale_factor, _match_part_colour.bind(base), Callable(), Callable(), Callable(), effects)
+	_draw_hull_shared(hull, origin, hull.heading, scale_factor, _match_part_colour.bind(base), CombatView.hull_damage_alpha, Callable(), Callable(), effects)
 
-func _draw_match_fx(scale_factor: float) -> void:
-	for raw_entry in _match_fx.entries:
-		var entry: Dictionary = raw_entry
-		## 伤害数字由 `_draw_match_damage_popups()` 单独画，这里跳过，否则会多画一个小圆圈。
-		if String(entry.get("kind", "")) == "damage":
-			continue
-		var at: Vector2 = DRIVE_VIEW.position + Vector2(entry["pos"]) * scale_factor
-		var radius := float(entry["radius"]) * scale_factor
-		var colour: Color = entry["colour"]
-		var life := maxf(float(entry["life"]), 0.001)
-		var ratio := clampf(float(entry["left"]) / life, 0.0, 1.0)
-		var grow := 1.0 - ratio
-		draw_arc(at, radius * (0.2 + 0.8 * grow), 0.0, TAU, 24, Color(colour, 0.8 * ratio), 2.0)
-	_draw_match_damage_popups(scale_factor)
+
+## 对局页每部件颜色：驾驶舱恒为琥珀，其余按队伍色，再统一过血量分档。
+## 分档判据与生存页是**同一个函数**（`CombatView.hull_damage_colour`），
+## 这才是「复用」的实质：不是两页各自会变色，而是只改一处两页同时变。
+## `bind(base)` 后签名为 (part, base)。
+func _match_part_colour(part: Dictionary, base: Color) -> Color:
+	var team := base
+	if bool(definitions.get_module(String(part["module_id"])).get("core", false)):
+		team = Palette.ACCENT_AMBER
+	return CombatView.hull_damage_colour(part, team)
 
 func _draw_match_hud() -> void:
 	var duel: Duel = match_session.duel
@@ -2540,14 +2500,11 @@ const SURVIVAL_SHOP_HEIGHT := 132.0
 ## 生存页的命中动效与镜像面板几何。镜像面板放在右 HUD 下半部（键位提示到 y=410 结束，
 ## `DRIVE_HUD_RIGHT` 到 y=852 结束），因此 436–836 区间不与任何现有元素重叠。
 const SURVIVAL_MIRROR_RECT := Rect2(1560.0, 436.0, 312.0, 400.0)
-## 命中闪光持续时间（秒，固定步长累减）。
-const HIT_FLASH_TIME := 0.14
-## 伤害悬浮数字：上浮速度（像素/秒，世界单位）与存活时长。
-## 两者都是导出常量而不是魔法数，方便后续调手感；写成常量也便于 smoke 断言。
-const DAMAGE_POPUP_RISE := 46.0
-const DAMAGE_POPUP_LIFE := 0.85
-## 同一帧同一侧最多显示几条数字：多炮齐射或殉爆时避免数字糊成一团。
-const DAMAGE_POPUP_PER_SIDE := 6
+## 命中闪光与伤害数字的时长/限流常量原来在这里，v3.22 已随绘制实现一起收归
+## `scripts/combat_view.gd`（`HIT_FLASH_TIME` / `DAMAGE_POPUP_LIFE` /
+## `DAMAGE_POPUP_PER_SIDE` 等）。**不再在页面层重复定义** —— 同一套数值写两份，
+## 迟早会有一份被改而另一份没改，两个战斗模式的数字就会不一样快。
+## 需要时一律读 `CombatView.XXX`。
 
 var _survival_sell_index := 0
 
@@ -2564,12 +2521,12 @@ var _hit_flash_left := 0.0
 var _survival_modify_index := 0
 
 func _survival_scale() -> float:
-	if survival == null or survival.duel == null or survival.duel.arena.size.x <= 0.0:
+	if survival == null or survival.duel == null:
 		return 1.0
-	return DRIVE_VIEW.size.x / survival.duel.arena.size.x
+	return CombatView.fit_scale(DRIVE_VIEW, survival.duel.arena)
 
 func _survival_to_screen(world: Vector2, scale_factor: float) -> Vector2:
-	return DRIVE_VIEW.position + (world - survival.duel.arena.position) * scale_factor
+	return CombatView.to_screen(DRIVE_VIEW, survival.duel.arena, world, scale_factor)
 
 ## 摆放起始坦克：直接转调唯一来源，不在页面层重复一份布局。
 func _build_survival_starter(model: GridBuilder) -> String:
@@ -2796,7 +2753,7 @@ func _survival_step(step_time: float) -> void:
 			var at := Vector2(entry.get("pos", Vector2.ZERO))
 			_push_survival_fx("hit", at, 10.0, Palette.ACCENT_AMBER, 0.22)
 			_hit_flash_at = at
-			_hit_flash_left = HIT_FLASH_TIME
+			_hit_flash_left = CombatView.HIT_FLASH_TIME
 			var victim := String(entry.get("tag", ""))
 			## v3.20 悬浮数字：**造成伤害与被击伤害都显示**。
 			## 数值来自 `duel._resolve_impact()` 写回事件的真实结算值，不是弹药的 base_damage。
@@ -2851,34 +2808,10 @@ func _survival_cell_world(cell: Vector2i, tag: String) -> Vector2:
 func _push_survival_fx(kind: String, at: Vector2, radius: float, colour: Color, life: float) -> void:
 	_survival_fx.push(kind, at, radius, colour, life)
 
-## 伤害悬浮数字：把一次真实结算的数值推入动效层（`kind = "damage"`，带 `text`）。
-## 四舍五入到整数并带正负记号：**造成**用 `+N`、**承受**用 `-N`，颜色区分敌我。
-## 同侧同帧最多 `DAMAGE_POPUP_PER_SIDE` 条：多炮齐射时旧数字排队会让画面糊成一片，
-## 超出就丢弃最新的一条——保先保稳，不保全。
+## 伤害悬浮数字：实际逻辑已收归 `CombatView.push_damage()`（与对局页同一份）。
+## 符号语义（造成 `+N` / 承受与护盾 `-N`）与同模式限流全在组件里，页面不再维护副本。
 func _push_damage_popup(at: Vector2, amount: float, colour: Color, mode: String) -> void:
-	if amount <= 0.0:
-		return
-	var shown := int(roundf(amount))
-	if shown <= 0:
-		return
-	var counting := 0
-	for raw_entry in _survival_fx.entries:
-		var entry: Dictionary = raw_entry
-		if String(entry.get("kind", "")) == "damage" and String(entry.get("mode", "")) == mode:
-			counting += 1
-	if counting >= DAMAGE_POPUP_PER_SIDE:
-		return
-	## 符号语义：**承受**与**护盾吸收**都是玩家损失，用负号；**造成**用正号。
-	## （旧版一律 `%+d`，导致被击中时也显示 `+17`——看起来像加血，语义错误。）
-	var label := ""
-	if mode == "dealt":
-		label = "+%d" % shown
-	else:
-		label = "-%d" % shown
-	_survival_fx.push("damage", at, 0.0, colour, DAMAGE_POPUP_LIFE, label)
-	## `mode` 在 push 之后补写：`push()` 的签名保持向后兼容（旧调用点不动），
-	## 而模式信息只有绘制/限流需要，不进入通用字段。
-	(_survival_fx.entries[_survival_fx.entries.size() - 1] as Dictionary)["mode"] = mode
+	CombatView.push_damage(_survival_fx, at, amount, colour, mode)
 
 ## 动效倒计时在固定步长里累减，保持确定性（绝不放 `_process`，绝不用 `randf`）。
 ## 命中闪光的倒计时是生存页独有的（不属于通用动效列表），因此留在这里。
@@ -2906,156 +2839,56 @@ func _draw_survival() -> void:
 	elif survival.stage == SurvivalRun.STAGE_SUMMARY:
 		_draw_survival_summary()
 
+## 生存页战斗视图：与对局页同一份实现的另一组配置——同样的竞技场 / 障碍 / 车体 /
+## 动效 / 弹道 / 命中闪光 / 伤害数字函数，只是多传了房屋与残骸（生存模式独有的
+## 中立物），并把障碍从格单位换算成像素。**逐项参数、颜色、系数、绘制顺序都与
+## 抽取前一一对应**，所以幸存页的像素不应该有任何变化。
 func _draw_survival_arena() -> void:
 	var duel: Duel = survival.duel
 	var scale_factor := _survival_scale()
-	draw_rect(DRIVE_VIEW, Color(Palette.BG_BASE, 0.94), true)
-	draw_rect(Rect2(DRIVE_VIEW.position, duel.arena.size * scale_factor), Palette.ACCENT_CYAN, false, 2.0)
-	## 竞技场固定障碍直接读数据，避免与 duel.obstacles 里的房屋条目重复绘制。
-	for raw_obstacle in definitions.get_arena(DRIVE_ARENA_ID).get("obstacles", []):
-		var obstacle: Dictionary = raw_obstacle
-		if obstacle.has("rect"):
-			var r: Array = obstacle["rect"]
-			var rect := Rect2(Vector2(float(r[0]), float(r[1])) * float(definitions.global_number("cell_size", 16.0)), Vector2(float(r[2]), float(r[3])) * float(definitions.global_number("cell_size", 16.0)))
-			var screen_rect := Rect2(DRIVE_VIEW.position + rect.position * scale_factor, rect.size * scale_factor)
-			draw_rect(screen_rect, Color(Palette.ACCENT_RED, 0.16), true)
-			draw_rect(screen_rect, Palette.ACCENT_RED, false, 1.5)
-		elif obstacle.has("circle"):
-			var c: Array = obstacle["circle"]
-			var centre := _survival_to_screen(Vector2(float(c[0]), float(c[1])) * float(definitions.global_number("cell_size", 16.0)), scale_factor)
-			var radius := float(c[2]) * float(definitions.global_number("cell_size", 16.0)) * scale_factor
-			draw_circle(centre, radius, Color(Palette.ACCENT_RED, 0.16))
-			draw_arc(centre, radius, 0.0, TAU, 48, Palette.ACCENT_RED, 1.5)
-	## 房屋：硬碰撞体，用琥珀色实心块 + 血条。
-	for raw_house in survival.houses:
-		var house: Dictionary = raw_house
-		if not bool(house["alive"]):
-			continue
-		var house_rect: Rect2 = house["rect"]
-		var screen_house := Rect2(DRIVE_VIEW.position + house_rect.position * scale_factor, house_rect.size * scale_factor)
-		draw_rect(screen_house, Color(Palette.ACCENT_AMBER, 0.14), true)
-		draw_rect(screen_house, Palette.ACCENT_AMBER, false, 1.5)
-		var ratio := clampf(float(house["hp"]) / maxf(float(house["hp_max"]), 0.001), 0.0, 1.0)
-		draw_rect(Rect2(screen_house.position + Vector2(0.0, -6.0), Vector2(screen_house.size.x, 3.0)), Color(Palette.WIRE, 0.4), true)
-		draw_rect(Rect2(screen_house.position + Vector2(0.0, -6.0), Vector2(screen_house.size.x * ratio, 3.0)), Palette.ACCENT_AMBER, true)
-	## 残骸：不是碰撞体，用青色小方块表示可碾过。
 	var cell_px := float(definitions.global_number("cell_size", 16.0))
-	for raw_debris in survival.debris:
-		var item: Dictionary = raw_debris
-		if bool(item["taken"]):
-			continue
-		var centre_world := (Vector2(Vector2i(item["cell"])) + Vector2(0.5, 0.5)) * cell_px
-		var at := _survival_to_screen(centre_world, scale_factor)
-		var half := cell_px * 0.35 * scale_factor
-		var box := Rect2(at - Vector2(half, half), Vector2(half, half) * 2.0)
-		draw_rect(box, Color(Palette.ACCENT_LIME, 0.30), true)
-		draw_rect(box, Palette.ACCENT_LIME, false, 1.0)
+	## 竞技场固定障碍直接读数据，避免与 duel.obstacles 里的房屋条目重复绘制。
+	## 数据文件用**格单位**，进组件前统一换算成像素（对局页的 obstacles 已是像素）。
+	var obstacles := CombatView.scale_obstacles(definitions.get_arena(DRIVE_ARENA_ID).get("obstacles", []), cell_px)
+	CombatView.draw_arena(self, DRIVE_VIEW, duel.arena, scale_factor, obstacles, Palette.ACCENT_CYAN)
+	## 房屋与残骸是生存模式的专属中立物；同一函数传空数组就是「没有」。
+	CombatView.draw_neutrals(self, DRIVE_VIEW, duel.arena, scale_factor, survival.houses, survival.debris, cell_px)
 	## 坦克：逐部件按血量上色（完好队伍色 / 中度琥珀 / 濒危红）。
 	for raw_tag in duel.alive_tags():
 		_draw_survival_hull(String(raw_tag), scale_factor)
-	_draw_survival_fx(scale_factor)
-	for shot in duel.field.shots:
-		var head := _survival_to_screen(Vector2(shot["pos"]), scale_factor)
-		var tail := _survival_to_screen(Vector2(shot["prev"]), scale_factor)
-		var colour := Palette.ACCENT_AMBER if String(shot["shooter"]) == Duel.TAG_PLAYER else Palette.ACCENT_MAGENTA
-		draw_line(tail, head, Color(colour, 0.7), 1.5)
-		draw_circle(head, maxf(float(shot["radius"]) * scale_factor, 2.0), colour)
+	CombatView.draw_fx(self, DRIVE_VIEW, duel.arena, scale_factor, _survival_fx.entries, CombatView.FX_STYLE_SURVIVAL)
+	CombatView.draw_shots(self, DRIVE_VIEW, duel.arena, scale_factor, duel.field.shots, Duel.TAG_PLAYER)
 	## 命中闪光画在炮弹之上，确保不会被格线淹掉。
-	_draw_survival_hit_flash(scale_factor)
+	CombatView.draw_hit_flash(self, DRIVE_VIEW, duel.arena, scale_factor, _hit_flash_at, _hit_flash_left)
 	## 伤害数字画在最后：必须盖在炮弹、命中闪光与所有地形之上。
-	_draw_damage_popups(scale_factor)
+	CombatView.draw_damage_popups(self, DRIVE_VIEW, duel.arena, scale_factor, _survival_fx.entries, _draw_text)
 
 ## 逐部件按**血量比例**上色：完好是队伍色、中度损伤转琥珀、濒危转红、已毁不留格。
+## 分档阈值与透明度曲线已收归 `CombatView`，对局页用**同一个函数**——这才是复用的实质。
 ## 旧版整台只有一种颜色、不看 HP，玩家看不见自己到底打掉了什么——这正是
 ## 「炮弹似乎不能对敌人造成伤害」的直接感知来源（即使伤害真的算对了）。
 func _survival_hull_colour(tag: String, part: Dictionary) -> Color:
 	var base := Palette.ACCENT_CYAN if tag == Duel.TAG_PLAYER else Palette.ACCENT_MAGENTA
 	if bool(definitions.get_module(String(part["module_id"])).get("core", false)):
 		base = Palette.ACCENT_AMBER
-	var ratio := clampf(float(part["hp"]) / maxf(float(part["hp_max"]), 0.001), 0.0, 1.0)
-	if ratio > 0.6:
-		return base
-	if ratio > 0.25:
-		return base.lerp(Palette.ACCENT_AMBER, 0.55)
-	return Palette.ACCENT_RED
+	return CombatView.hull_damage_colour(part, base)
 
 ## 生存页每部件颜色：`_survival_hull_colour(tag, part)` 的绑定包装（bind 追加在尾）。
 func _survival_part_colour(part: Dictionary, tag: String) -> Color:
 	return _survival_hull_colour(tag, part)
 
-## 填充透明度随血量下降：一眼能看出哪块被打残了。
+## 填充透明度随血量下降：一眼能看出哪块被打残了。与对局页共用同一曲线。
 func _survival_hull_alpha(part: Dictionary) -> float:
-	var ratio := clampf(float(part["hp"]) / maxf(float(part["hp_max"]), 0.001), 0.0, 1.0)
-	return 0.14 + 0.20 * ratio
+	return CombatView.hull_damage_alpha(part)
 
 func _draw_survival_hull(tag: String, scale_factor: float) -> void:
 	var hull: TankBody = survival.duel.tank_of(tag)
 	if hull == null or hull.parts.is_empty():
 		return
-	var origin := _survival_to_screen(hull.position, scale_factor)
+	var origin := CombatView.to_screen(DRIVE_VIEW, survival.duel.arena, hull.position, scale_factor)
 	var effects := _hull_effects(hull, survival.duel.damage_of(tag), survival.duel.network_of(tag))
 	_draw_hull_shared(hull, origin, hull.heading, scale_factor, _survival_part_colour.bind(tag), _survival_hull_alpha, Callable(), Callable(), effects)
 
-## 命中 / 击毁 / 脱落的瞬时动效。所有半径用 `sin(_time)` 脉动，不用 `randf`。
-func _draw_survival_fx(scale_factor: float) -> void:
-	for raw_entry in _survival_fx.entries:
-		var entry: Dictionary = raw_entry
-		var life := float(entry["life"])
-		var left := float(entry["left"])
-		if life <= 0.0:
-			continue
-		var t := clampf(left / life, 0.0, 1.0)
-		var colour: Color = entry["colour"]
-		if String(entry["kind"]) == "shield":
-			continue
-		if String(entry["kind"]) == "damage":
-			## 悬浮数字单独画：不画圆环，只画上浮的文字（详见 `_draw_damage_popups`）。
-			continue
-		var at := _survival_to_screen(Vector2(entry["pos"]), scale_factor)
-		var radius := maxf(float(entry["radius"]) * scale_factor * (0.6 + 0.4 * t), 2.0)
-		var alpha := 0.75 * t
-		draw_circle(at, radius, Color(colour, alpha * 0.5))
-		draw_arc(at, radius, 0.0, TAU, 20, Color(colour, alpha), 1.5)
-
-## 伤害悬浮数字：从命中点向上飘升并淡出。
-## `progress = 1 - left/life` 从 0 走到 1；上升距离先快后慢（`sqrt`），像真的被击飞。
-## 字号随接近消失而略微缩小，强化「远离视线」的感觉；**不用随机偏移**，
-## 否则两次跑同一模拟会得到不同像素，截图逐字节比对就失效了。
-## 同一帧多条数字会在垂直方向按序号错开一行，避免完全重叠。
-func _draw_damage_popups(scale_factor: float) -> void:
-	var stack := 0
-	for raw_entry in _survival_fx.entries:
-		var entry: Dictionary = raw_entry
-		if String(entry.get("kind", "")) != "damage":
-			continue
-		var text := String(entry.get("text", ""))
-		if text.is_empty():
-			continue
-		var life := float(entry["life"])
-		if life <= 0.0:
-			continue
-		var progress := clampf(1.0 - float(entry["left"]) / life, 0.0, 1.0)
-		var rise := DAMAGE_POPUP_RISE * sqrt(progress) * scale_factor
-		var offset := Vector2(0.0, -rise - float(stack) * 14.0)
-		var at := _survival_to_screen(Vector2(entry["pos"]), scale_factor) + offset
-		var colour: Color = entry["colour"]
-		## 前 70% 保持不透明，后 30% 才淡出：数字要看得清，不能一出来就开始糊。
-		var alpha := 1.0 if progress < 0.7 else clampf((1.0 - progress) / 0.3, 0.0, 1.0)
-		var size := int(roundf(20.0 - 4.0 * progress))
-		## 先画一层暗色底再画本体：霓虹背景下纯色小字容易被地形线淹掉。
-		_draw_text(text, at + Vector2(1.0, 1.0), size, Color(0.0, 0.0, 0.0, 0.55 * alpha), true)
-		_draw_text(text, at, size, Color(colour, alpha), true)
-		stack += 1
-
-## 最近一次命中点的高亮圈：即便命中发生在缩放后只有几像素的敌车上，也能看见。
-func _draw_survival_hit_flash(scale_factor: float) -> void:
-	if _hit_flash_left <= 0.0:
-		return
-	var t := clampf(_hit_flash_left / HIT_FLASH_TIME, 0.0, 1.0)
-	var at := _survival_to_screen(_hit_flash_at, scale_factor)
-	var radius := 6.0 + 10.0 * (1.0 - t)
-	draw_circle(at, radius, Color(Palette.ACCENT_AMBER, 0.30 * t))
-	draw_arc(at, radius, 0.0, TAU, 24, Color(Palette.TEXT_HI, 0.9 * t), 2.0)
 
 func _draw_survival_hud() -> void:
 	var left := DRIVE_HUD_LEFT.position.x

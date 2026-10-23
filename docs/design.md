@@ -2,7 +2,7 @@
 
 > 权威范围：**全部玩法机制、系统规格、数值、架构草案、决策记录**。
 > 术语必须与 `agent_note.md` §5 一致；改动后的同步义务见 `agent_note.md` §1 元规则。
-> 版本：**v3.21** · 2026-10-22 · 状态：设计文档（**M2 建造编辑器与运行期 `BUILD_MODE`、M3 坦克物理与操控、M4 弹药输送网络、M5 战斗结算与可拆解摧毁、M6 机器人 AI 与完整对局、**M9 波次生存单人玩法**均已实现并验证**；`data/*.json` 是正式运行时数值来源；**M3 转向手感缺陷已于 v3.1 修正（§5.2、§5.6）**；**M5 的六条有意简化已写入 §8.9，其自击缺陷与撞墙不连锁两项已于 M6 修复**；**M6 的三层 AI、四档难度、12 张 Bot 蓝图已实现，实现记录在 §10.5**；**v3.4 把单人模式重写为「波次生存 + 升级菜单 + 波间商店 + 每 5 波 Boss」并禁止战斗期改装（§3.4、ADR-017），v3.6 已完成其实现：`survival` 块 36 键、竞技场 `props`、`boss_warlord.json`、`scripts/survival_run.gd` 与主场景的四个页面（§3.6 实现记录）**；**v3.7 补上「改装坦克」UI 入口：`STAGE_MODIFY` 子阶段 + 升级页/商店页按钮 + 改装页（§3.4.7）**；**v3.8 修用户报告的界面四项：窗口启动即最大化（`window/size/mode=2`，实测 `WINDOW_MODE mode=2 size=(1842, 1057)`）、所有菜单补齐 hover + 左键点击（含主菜单难度按钮与升级卡/商品格）、修掉主菜单「难度/提示」压在「退出」行上的重叠、并让改装页**复用建造页整套编辑器**而非自带第二套（§2.3、§3.4.7、§11.4.2.1）**；**v3.9 修用户报告的「炮弹似乎不能对敌人造成伤害」并重做生存页战斗 UI：起始坦克 20mm → 76mm（`SurvivalRun.build_starter()` 为唯一布局来源，§3.4.8）、命中事件补齐文案/动效/命中闪光、敌我坦克逐部件按血量着色、HUD 新增「总输出」、新增坦克镜像面板（§11.4.4.2）**；**v3.5 修复了 R17 列出的 9 个碰撞/损坏缺陷，并在修复过程中又发现并修掉 3 个实现级 bug（§8.7）**；**v3.6 同时把 `duel` 扩为任意 tag/team 集合，使同屏多敌人成立（§10.6）**；**v3.12 修正了 `scripts/` 文件计数（实为 18 个 `.gd`，非 16）并修复了截图取图时刻不固定导致「逐字节等价」证据链失效的缺陷（§11.4.9）**；**v3.13 对全部 7 个截图钩子做了可复现性重验（7/7 逐字节相同），并完成与历史截图的差异归因：静态 UI 区零差异（§11.4.9.1）**；**v3.14 新增 `--steps=N` 预热步数参数化，使战场区渲染回归可验证（裁切后同 N 两次逐字节相同，§11.4.9.2）**；**v3.15 按用户「配件、摆放更合理 / 初始敌人过于大 / 敌人不断地生成 / 不同等级不同坦克」重做生存模式坦克阵容：起始车 8×2 单履带 → 6×4 双履带（§3.4.8）、13 张 Bot 蓝图全部重写为每档三种不同轮廓且招募级从 30 格缩到 12–20 格（§14.8）、新增 `enemy_quota_for()` + 本波内按间隔补兵，并把通过条件改为「配额耗尽且场上无敌人」（§3.4、§14.8）**；**v3.16 更正 v3.15 的两个数字（弹药库殉爆死亡时间 21.8 s → 36.4 s、瞄准命中区间 12–22/1–2 → 8–22/0–2），只改注释与文档文字、代码零改动（§3.4.8、§17）**；**v3.17 修用户报告的栈溢出崩溃：`_handle_mouse()` 与 `_handle_survival_mouse()` 自 v3.8 起双向互调，生存页改装模式下任何一次网格点击都会无限递归——已改为单向转发，并新增走真实 `_input()` 的 `tests/mouse_input_smoke.gd` 作永久回归（§11.4.2.2、§17）**；**v3.18 按用户要求把编辑器三层做成「看得见的分层」：非选中层降到 22% alpha、光标件随层切换、坦克默认在建造区居中，并修掉层级行压面板分隔线与「工具」标签压按钮两处重叠（§11.4.2.3、§17）**；**v3.19 建立版本控制：`git init` + 初始提交 `fd3857f`（77 文件 / 22366 行，本地 `Trigger-CN` / `759025229@qq.com`），并用 `.gitattributes` 钉死 `eol=lf` 以保护以文件字节为基准的验证体系（§11.4.9.1、§17）**；**v3.20 按用户「优化坦克和其他物品的碰撞箱逻辑，坦克的整体碰撞箱和中弹判定都由配件构成，受到伤害和造成伤害都要有悬浮数字提示」把**碰撞箱**从整车外接 AABB 改为逐配件格子（新增 `cell_world_rects()` / `cell_overlap_rect()` / `cell_overlap_circle()` / `cells_overlap_tank()`），并给生存页与对战页加上伤害/受击悬浮数字（§11.4.2.4、§17）**；**v3.20.1 修用户报告的 `SCRIPT ERROR: Out of bounds get index '8' (on base: 'PackedStringArray') at: _preview_cells`：`_selected_index` 是 `_option_ids()` 的下标，却被两处当成 `survival.inventory` 的下标钳制，而 `_ensure_option_visible()` 根本不钳制它——已在收口点统一按可选件数量钳制、`_preview_cells()` 加防御式钳制、`_mount_selected_inventory()` 改用 module_id 反查库存，并新增反向对照可复现的 `tests/editor_bounds_smoke.gd`（§11.4.2.5、§17）**；**v3.21 按用户「精细化坦克配件的特效，要能体现弹药制造、弹药装填、护盾、维修等效果，例如在模块上加入进度条，小窗口显示坦克镜像也要显示模块的细节」给每个模块加上进度条 / 护盾脉冲 / 维修连线，并重做镜像面板的逐部件行（§11.4.2.6、§17）**；M3.5 Android 导出预设已写入工程但**因环境缺导出模板与 Android SDK 未产出 APK**（§13.7）；**移动端触屏操控已完成设计（§11.6）、Q24–Q26 已裁定但无任何实现代码**）
+> 版本：**v3.22** · 2026-10-23 · 状态：设计文档（**M2 建造编辑器与运行期 `BUILD_MODE`、M3 坦克物理与操控、M4 弹药输送网络、M5 战斗结算与可拆解摧毁、M6 机器人 AI 与完整对局、**M9 波次生存单人玩法**均已实现并验证**；`data/*.json` 是正式运行时数值来源；**M3 转向手感缺陷已于 v3.1 修正（§5.2、§5.6）**；**M5 的六条有意简化已写入 §8.9，其自击缺陷与撞墙不连锁两项已于 M6 修复**；**M6 的三层 AI、四档难度、12 张 Bot 蓝图已实现，实现记录在 §10.5**；**v3.4 把单人模式重写为「波次生存 + 升级菜单 + 波间商店 + 每 5 波 Boss」并禁止战斗期改装（§3.4、ADR-017），v3.6 已完成其实现：`survival` 块 36 键、竞技场 `props`、`boss_warlord.json`、`scripts/survival_run.gd` 与主场景的四个页面（§3.6 实现记录）**；**v3.7 补上「改装坦克」UI 入口：`STAGE_MODIFY` 子阶段 + 升级页/商店页按钮 + 改装页（§3.4.7）**；**v3.8 修用户报告的界面四项：窗口启动即最大化（`window/size/mode=2`，实测 `WINDOW_MODE mode=2 size=(1842, 1057)`）、所有菜单补齐 hover + 左键点击（含主菜单难度按钮与升级卡/商品格）、修掉主菜单「难度/提示」压在「退出」行上的重叠、并让改装页**复用建造页整套编辑器**而非自带第二套（§2.3、§3.4.7、§11.4.2.1）**；**v3.9 修用户报告的「炮弹似乎不能对敌人造成伤害」并重做生存页战斗 UI：起始坦克 20mm → 76mm（`SurvivalRun.build_starter()` 为唯一布局来源，§3.4.8）、命中事件补齐文案/动效/命中闪光、敌我坦克逐部件按血量着色、HUD 新增「总输出」、新增坦克镜像面板（§11.4.4.2）**；**v3.5 修复了 R17 列出的 9 个碰撞/损坏缺陷，并在修复过程中又发现并修掉 3 个实现级 bug（§8.7）**；**v3.6 同时把 `duel` 扩为任意 tag/team 集合，使同屏多敌人成立（§10.6）**；**v3.12 修正了 `scripts/` 文件计数（实为 18 个 `.gd`，非 16）并修复了截图取图时刻不固定导致「逐字节等价」证据链失效的缺陷（§11.4.9）**；**v3.13 对全部 7 个截图钩子做了可复现性重验（7/7 逐字节相同），并完成与历史截图的差异归因：静态 UI 区零差异（§11.4.9.1）**；**v3.14 新增 `--steps=N` 预热步数参数化，使战场区渲染回归可验证（裁切后同 N 两次逐字节相同，§11.4.9.2）**；**v3.15 按用户「配件、摆放更合理 / 初始敌人过于大 / 敌人不断地生成 / 不同等级不同坦克」重做生存模式坦克阵容：起始车 8×2 单履带 → 6×4 双履带（§3.4.8）、13 张 Bot 蓝图全部重写为每档三种不同轮廓且招募级从 30 格缩到 12–20 格（§14.8）、新增 `enemy_quota_for()` + 本波内按间隔补兵，并把通过条件改为「配额耗尽且场上无敌人」（§3.4、§14.8）**；**v3.16 更正 v3.15 的两个数字（弹药库殉爆死亡时间 21.8 s → 36.4 s、瞄准命中区间 12–22/1–2 → 8–22/0–2），只改注释与文档文字、代码零改动（§3.4.8、§17）**；**v3.17 修用户报告的栈溢出崩溃：`_handle_mouse()` 与 `_handle_survival_mouse()` 自 v3.8 起双向互调，生存页改装模式下任何一次网格点击都会无限递归——已改为单向转发，并新增走真实 `_input()` 的 `tests/mouse_input_smoke.gd` 作永久回归（§11.4.2.2、§17）**；**v3.18 按用户要求把编辑器三层做成「看得见的分层」：非选中层降到 22% alpha、光标件随层切换、坦克默认在建造区居中，并修掉层级行压面板分隔线与「工具」标签压按钮两处重叠（§11.4.2.3、§17）**；**v3.19 建立版本控制：`git init` + 初始提交 `fd3857f`（77 文件 / 22366 行，本地 `Trigger-CN` / `759025229@qq.com`），并用 `.gitattributes` 钉死 `eol=lf` 以保护以文件字节为基准的验证体系（§11.4.9.1、§17）**；**v3.20 按用户「优化坦克和其他物品的碰撞箱逻辑，坦克的整体碰撞箱和中弹判定都由配件构成，受到伤害和造成伤害都要有悬浮数字提示」把**碰撞箱**从整车外接 AABB 改为逐配件格子（新增 `cell_world_rects()` / `cell_overlap_rect()` / `cell_overlap_circle()` / `cells_overlap_tank()`），并给生存页与对战页加上伤害/受击悬浮数字（§11.4.2.4、§17）**；**v3.20.1 修用户报告的 `SCRIPT ERROR: Out of bounds get index '8' (on base: 'PackedStringArray') at: _preview_cells`：`_selected_index` 是 `_option_ids()` 的下标，却被两处当成 `survival.inventory` 的下标钳制，而 `_ensure_option_visible()` 根本不钳制它——已在收口点统一按可选件数量钳制、`_preview_cells()` 加防御式钳制、`_mount_selected_inventory()` 改用 module_id 反查库存，并新增反向对照可复现的 `tests/editor_bounds_smoke.gd`（§11.4.2.5、§17）**；**v3.21 按用户「精细化坦克配件的特效，要能体现弹药制造、弹药装填、护盾、维修等效果，例如在模块上加入进度条，小窗口显示坦克镜像也要显示模块的细节」给每个模块加上进度条 / 护盾脉冲 / 维修连线，并重做镜像面板的逐部件行（§11.4.2.6、§17）**；**v3.22 按用户「生存模式的战斗 UI 也应该能复用到其他模式」把整套战斗视图（竞技场 / 障碍 / 中立物 / 车体 / 弹道 / 动效 / 命中闪光 / 伤害数字）抽成 `scripts/combat_view.gd`，对局页与生存页共用同一份实现，模式差异改为参数表达；对局页因此真正获得命中闪光与按血量分档上色（§11.4.2.7、§17）**；M3.5 Android 导出预设已写入工程但**因环境缺导出模板与 Android SDK 未产出 APK**（§13.7）；**移动端触屏操控已完成设计（§11.6）、Q24–Q26 已裁定但无任何实现代码**）
 
 ---
 
@@ -2024,6 +2024,121 @@ PREVIEW_FAIL index_clamped_to_options
 
 **未做的部分（如实）**：镜像面板**仍然只显示玩家**，敌人没有镜像；维修连线只在维修器与目标都在同侧存活时出现，目标被摧毁后连线自然消失（因为 `repair_states()` 走的是当前 `parts`）；`module_states()` 不为 conveyor 提供进度，传送带上的弹药位置仍由 `strand_positions()` 承担。
 
+#### 11.4.2.7 战斗视图复用（v3.22）
+
+**用户请求**：「生存模式的战斗UI也应该能复用到其他模式」。
+
+##### 一、抽取前的事实：两套副本已经走偏
+
+`main.gd` 里生存页 `_draw_survival_arena()` 与对局页 `_draw_match()` 是两份逐行同构的绘制，差异只有六处（数据来源、房屋/残骸、着色语义、动效风格、绘制顺序、命中闪光）。**这些差异不是设计分化，而是副本各自演化后的淤积**：
+
+| 环节 | 生存页 | 对局页（抽取前） |
+| --- | --- | --- |
+| 障碍数据 | 读 `data/arenas/*.json`（**格单位**） | 读 `duel.obstacles`（**已是像素**） |
+| 房屋 / 残骸 | 有 | **没有** |
+| 车体着色 | 按 HP 分档（队伍色→琥珀→红） | **纯队伍色，不看 HP** |
+| 动效风格 | `0.6 + 0.4t`、20 段、1.5 宽、带填充 | `0.2 + 0.8grow`、24 段、2.0 宽、无填充 |
+| 弹道层级 | 动效**之下** | 动效**之上** |
+| 命中闪光 | 有 | **没有** |
+| 弹道坐标 | 含 `- arena.position` | **漏了 `- arena.position`** |
+
+最后一条是真实的潜在缺陷：现阶段 `arena.position == ZERO`，所以像素上看不出差，但只要哪天竞技场有了偏移，对局页的弹道就会整体错位。
+
+##### 二、`scripts/combat_view.gd`：无状态的可复用战斗视图
+
+新建 `scripts/combat_view.gd`（`extends RefCounted`，只 `preload` `palette.gd` 与 `fx_layer.gd`，**零 preload 回 `main.gd`**，保持依赖 DAG 单向）。
+
+**全部 `static`、无状态**。可变状态（动效层、命中闪光剩余时间）留在**页面层**，组件只做「把给定状态画出来」。**为什么不用实例**：若组件持有 `FxLayer`，就得回答「哪个实例才是真状态」；而两个战斗模式各自有独立的动效层，状态本就该属于页面。无状态还带来一个硬好处：**生存页切过去时不可能因为初始化顺序而改变一个字节的像素**，这正是「抽取不改观感」可被逐字节验证的前提。
+
+**函数一览**：
+
+| 函数 | 职责 |
+| --- | --- |
+| `to_screen(view, arena, world, scale)` | 世界→屏幕。三页原本各有一份逐字相同的副本 |
+| `fit_scale(view, arena)` | 竞技场铺满视图的缩放系数 |
+| `scale_obstacles(raw, cell_px)` | 把数据文件的**格单位**障碍正规化为世界像素 |
+| `draw_arena(canvas, view, arena, scale, obstacles, border_colour)` | 底板 0.94 + 边框 2.0 + 障碍（rect / circle） |
+| `draw_neutrals(canvas, view, arena, scale, houses, debris, cell_px)` | 房屋琥珀块 + 血条；残骸青色小方块 |
+| `draw_shots(canvas, view, arena, scale, shots, player_tag)` | 拖尾 + 弹头，玩家琥珀 / 其余品红 |
+| `draw_fx(canvas, view, arena, scale, entries, style)` | 动效圆环，观感由 `style` 字典控制 |
+| `draw_hit_flash(canvas, view, arena, scale, at_world, left, life)` | 命中闪光 |
+| `draw_damage_popups(canvas, view, arena, scale, entries, text_fn)` | 伤害悬浮数字 |
+| `push_damage(fx, at, amount, colour, mode) -> bool` | 把一次结算数值推入动效层（合并两页原本各一份的实现） |
+| `hull_damage_colour(part, base)` / `hull_damage_alpha(part)` | 按血量分档上色与填充透明度 |
+
+**绘制函数都接 `canvas: CanvasItem`**：Godot 允许在 `_draw()` 周期内从别处调用 `canvas.draw_*`，因此不必新增 `Node2D`。单场景架构下新增节点还要额外管 z 序与生命周期，而这里只需要一个「会画画的函数」。
+
+**文本绘制用 `text_fn: Callable` 注入**（签名与页面层 `_draw_text(text, position, size, color, mono)` 一致）：字体是页面持有的一对 `SystemFont`，组件不该自己加载字体，否则同一个字形会在两处被解析成不同的回退链。
+
+##### 三、模式差异如何表达：参数，不是分支
+
+这是本次抽取的核心设计。**新模式不需要改组件，只需要组合参数**：
+
+| 模式差异 | 表达方式 |
+| --- | --- |
+| 没有房屋 / 残骸 | `draw_neutrals(..., [], [], cell_px)` —— **空数组即无绘制**，不需要 `if is_survival` |
+| 障碍数据单位不同 | 统一在进组件前正规化（`scale_obstacles()` 或直接传 `duel.obstacles`） |
+| 动效观感不同 | `FX_STYLE_SURVIVAL` / `FX_STYLE_MATCH` 两个常量字典，字段 `radius_base` / `radius_grow` / `min_radius` / `arc_points` / `arc_width` / `fill_scale` / `alpha_scale` |
+| 着色语义 | `hull_damage_colour(part, base)` 的 `base` 由页面给（队伍色或驾驶舱琥珀），**分档阈值只有一份** |
+| 命中闪光有无 | 页面自己决定是否置位 `_hit_flash_left`；组件对 `left <= 0` 直接返回 |
+
+**为什么不用「模式枚举」**：枚举会让组件知道「世界上有哪些模式」，每加一个模式都要改组件。参数化后组件只知道「有竞技场、有中立物、有动效、有数字」，加模式不动它。
+
+##### 四、两页的接线结果
+
+`_draw_survival_arena()` 与 `_draw_match()` 现在是**同一调用序列**，只有参数不同：
+
+```
+draw_arena(...)          # 生存页传换算后的数据障碍；对局页传 duel.obstacles
+draw_neutrals(...)       # 生存页传 houses/debris；对局页传 [] / []
+for tag: _draw_*_hull()  # 各页自己的车体包装，颜色都走 hull_damage_colour
+draw_fx(..., style)      # 生存 FX_STYLE_SURVIVAL；对局 FX_STYLE_MATCH
+draw_shots(...)
+draw_hit_flash(...)
+draw_damage_popups(...)
+```
+
+**对局页因此真正获得三样东西**（这是复用的**目的**，不是回归）：
+1. **命中闪光** —— 旧版完全没有。新增 `_match_hit_flash_at` / `_match_hit_flash_left` 两个页面变量，在 `_match_step()` 的 `impact` 分支置位、`_match_tick_fx()` 在固定步长内递减。
+2. **按血量分档上色** —— `_match_part_colour()` 现在先定队伍色（驾驶舱琥珀），再过 `CombatView.hull_damage_colour`。旧版对局页整台只有一种队伍色、不看 HP，玩家看不出敌人被打残了。
+3. **弹道在动效之下、伤害数字在最上层** —— 统一到生存页的层级。旧版对局页把弹道画在动效之上，且伤害数字塞在 `_draw_match_fx` 内部。
+
+**顺带修掉的潜在缺陷**：对局页弹道坐标补上了 `- arena.position`。现阶段该值为零，所以像素上没有影响——**这是正确性改进，不是本轮引入的问题**。
+
+##### 五、刻意**不**抽的东西
+
+**车体逐格绘制 `_draw_hull_shared()` 留在 `main.gd`**。它已经带 `effects` 尾参、三页共用，且需要 `_time`（脉冲相位）与 `Palette`；搬进无状态组件只会让它多两个注入参数而没有任何收益。组件只提供它的**着色判据**。
+
+**坦克镜像面板不抽**。它与生存 run 的 `inventory` / `wave` / `level` 强耦合，抽出去只会把生存语义灌进通用组件。**镜像复用是独立的后续目标，本轮明确不做。**
+
+**HUD 不抽**。左/右 HUD 是模式专属信息（波次 vs 对局计时、经验条 vs 输出统计），共用它们只会制造条件分支。
+
+##### 六、确定性
+
+组件**零 `randf` / `randi`**，没有任何时间源：命中闪光的相位由调用方传入的 `left` 决定，伤害数字的上浮由 `left / life` 决定，动效圆环同理。因此同一 `--steps=N` 连拍仍逐字节相同。
+
+##### 七、验证
+
+| 项 | 结果 |
+| --- | --- |
+| `--check-only` | `combat_view` / `main` 均 **78 B / `6ca5b6ba`** |
+| 13 项 smoke | **`s7.txt` = `s9.txt` = 720 B / `f1606d4c`**，与 v3.20.1/v3.21 的历史基线**逐字节相同** |
+| **生存页截图** | `v22_surv_a.png` = `v22_surv_c.png` = **182717 B / `d6a8bec2`**，与 v3.21 基线 `v21_surv_a.png` **逐字节相同**（`--steps=420` 两次） |
+| 生存页区域归因 | **七个区域 diff_px 全为 0**，`REGION_TOTAL diff_px=0` |
+| 对局页截图 | `v22_match_b.png` **133659 B / `6d5654d1`**（`--steps=340`，两次相同）；v3.21 为 133138 B / `ceb34015` |
+| 对局页区域归因 | **六个非战场区域全为 0**；仅 battlefield 14689 px（bbox 737,233–938,522，max_delta 86） |
+| **试驾页截图** | `v22_drive.png` **213555 B / `f7ba692c`**，与 v3.21 基线**逐字节相同**（未被间接影响） |
+
+**三条结论必须分开陈述**：生存页**像素零变化**（抽取没改既有观感）；试驾页**像素零变化**（抽取没有副作用）；对局页**像素有变化，且那正是复用的目的**——不可说成「重构无可见变化」。
+
+##### 八、未做的部分（如实）
+
+- **坦克镜像仍未复用**（见第五节）。
+- **没有人真的进游戏玩过一局**观察对局页新出现的命中闪光与血量分档上色；所有结论来自脚本驱动的固定 `--steps=N` 截图 + 像素比对。
+- **`combat_view.gd` 没有专属 smoke 断言**。它是纯绘制层，13 项既有 smoke 覆盖其上游模拟，但组件本身只被截图间接覆盖。
+- **没有任何 Android 设备验证，且不存在任何 APK。**
+
+#### 11.4.3 两个 SETUP 界面
 #### 11.4.3 两个 SETUP 界面
 
 **`EXPEDITION_SETUP`（单人远征）**
@@ -3264,3 +3379,4 @@ M3 的物理验收基准（`M 61.0 u` / `I 104 064 u·px²` / `T 9000` / `v_max 
 | 2026-10-22 | v3.20 | **逐配件碰撞箱 + 伤害悬浮数字**（用户原话：「优化坦克和其他物品的碰撞箱逻辑，坦克的整体碰撞箱和中弹判定都是由配件构成，受到伤害和造成伤害都要有悬浮数字提示」）。① **先纠正前提**：**中弹判定本来就是逐配件的**，本轮零改动——`projectile_field._clip_to_tank()` 把弹道线段两端变换进坦克局部空间后，对 `target["cells"]` 每格做 `_clip_to_aabb` slab 求交并取最小 `t`，结果自带 `cell` / `part_index`；`damage_system.target_payload()` 逐格导出；`_resolve_target()` 按 模块 > 平台 > 行进 映射回部件。真正有缺陷的是**碰撞箱**。② **缺陷面**：`TankBody.world_bounds()` 取所有格四角旋转后的 min/max，得到**整车旋转 AABB**，被 5 处当作碰撞形状——矩形障碍推出、圆形障碍推出、坦克互撞、撞房屋四处错误（凹口虚空算实心、L 形车两角隔两格虚空仍互撞、车头没碰到房子也扣血）；**`apply_boundary()` 唯一正确**，因为竞技场边界轴对齐、外接框 min/max 就是格角极值，与逐格数学等价。我曾一度把它改成逐格并编造「外接框会提前撞墙」的差异，**已撤回**，不计入产品修复。③ **新增四个逐格查询**：`cell_world_rects()`（逐格旋转 OBB 四角，**碰撞箱唯一真相来源**）、`cell_overlap_rect()`（SAT 四轴，取**最浅**）、`cell_overlap_circle()`（局部最近点，取**最深**）、`cells_overlap_tank()`（逐格 OBB SAT）。`world_bounds()` 降级为粗筛，注释改写为「不再是碰撞依据」。④ **取最深的原因（实测，非风格）**：初期按「最小平移」取最浅格，探针 `diag2.txt` 记录 `DIAG_STEP 2 depth=0.000` → `DIAG_STALLED depth_zero` → `DIAG_FINAL_OVERLAP true`，两个相邻格互相拉扯、永不收敛；改取最深后 `diag3.txt` 一次到位 `depth=22.000 normal=(1.0,0.0) cell=(6,5)` → `DIAG_CONVERGED at step 1` → `DIAG_FINAL_OVERLAP false`。⑤ **迭代推出 + 单次结算**：`MAX_PUSH_ITERATIONS = 8`，循环内只改 `position`，结束后 `_resolve_contact([last_normal], 0.0)` 传穿透 0，只做一次伤害结算，保住 R17-4 的「墙角只扣一次血」。⑥ **圆心埋在车内的退化情形**：先判定圆心是否落在某格内（投影到格 u/v 轴两分量均 `<= half`），是则转交 `_resolve_circle_inside_hull()` 用旧的外接框膨胀语义——**这里外接框才是正确模型**。⑦ **撞房屋**：`_resolve_rammed_houses()` 要求 `cell_overlap_rect()` 命中；`_resolve_debris_crush()` 未改（残骸不是碰撞体）。⑧ **悬浮数字**：`duel._resolve_impact()` 在 `apply_hit()` **返回之后**把 `damage`/`shield`/`victim` 写回事件（延迟爆炸分支的 `damage` 已是过护甲值，用 `base_damage` 会偏高）；`FxLayer.push()` 增加可选 `text := ""` 尾参（默认空，旧调用点零改动，天然继承固定步长倒计时）；生存页 `_push_damage_popup()` + `_draw_damage_popups()`、对局页 `_push_match_damage()` + `_draw_match_damage_popups()` 各自实现（两页坐标系统不同）。符号：`dealt` → `+N`，`received`/`shield` → `-N`；颜色：打敌人青 / 自己挨打红 / 护盾绿；同侧同帧限流 6 条；`sqrt(progress)` 上浮、前 70% 不透明后 30% 淡出、字号 20→16、暗色描边；**零随机偏移**（保确定性）。两个 FX 绘制函数都 `continue` 掉 `kind == "damage"`，否则会多画零半径圆环。⑨ **发现并修复真实缺陷**：第一版用 `"%+d"` 导致本体被命中显示 `+17`（像加血），改为 `mode` 参数分流。⑩ **回归**：`--check-only` main.gd / tank_body.gd / survival_run.gd / fx_layer.gd / duel.gd / physics_smoke.gd 均 78 B / `6ca5b6ba`；**12 项 smoke `s3.txt` 638 B / `7ae7106a` 与历史基线逐字节相同**，`PHYSICS_OK mass=61.0 inertia=104064 v_max=192.1 turn180_s=1.35 spin_stop_s=0.62` 一字未变（机械属性未受影响）；`physics_smoke` 重写 `_check_circle_obstacle_push_out()` 为「圆心在车内 / 车外」两情形，并新增 `_check_cell_hull_differs_from_aabb()` 五条**区分性**断言（U 形凹口：外接框包含但逐格无格、凹口 10×10 矩形不交、真实格仍命中、凹口放单格车不相交、真实格放单格车必相交）。⑪ **截图**：`v20_surv_c.png` = `v20_surv_d.png` = 178927 B / `fa188823`（`--steps=420` 两次逐字节相同），目视见青色 `+52` 与红色 `-17`；对局页 `v20_match_s340.png` 132259 B / `62fee88c`，目视见红色 `-52`。⑫ **区域归因**：`region_diff.py` 比对修复前后（`rdiff4.txt`）left_hud / right_hud / right_hud_above_mirror / mirror_panel / status_bar **全 0**，唯一差异战场区 704 px、包围盒 69×73（就是两个数字）；比对历史基线（`rdiff2.txt`）状态栏 0、右 HUD 上半 0。**如实纠正**：镜像面板**不是静态区域**（逐格实时 HP 填充与部件血条会随受伤变化），不能拿它当「必须 0」的判据——这一点原先设想错了，已改正。⑬ **过程自伤 4 次（均已修复并复验）**：`world_bounds()` 函数体被误替换成空函数 + 孤儿 `world_bounds_impl()`；`survival_run.gd` 的 replace 范围少算一行导致循环体被吞（`c_sr1` 721 B）；第二次 replace 插入重复 `_resolve_rammed_houses`（`c_sr2` 755 B）；`apply_boundary` 的等价重写已撤回。另有一次**测试缺陷**：`PHYSICS_FAIL_CIRCLE_SHORT moved=18.69 expected=54.00` 是断言在验旧的外接框语义，已重写断言而非改回实现。**如实声明**：截图仍为**脚本驱动 + 像素检查，非人工交互验证**——**从未有人真的玩一局来观察伤害数字**；`match` 页 150 步与 420 步预热时都已超过 0.85 s 的数字寿命，是靠 `--steps=340` 才截到数字；**未在 Android 上验证，无 APK**；`boss_armor` / `safe_radius` / 商店稀有度权重方向三项旧缺口未动；房屋撞击仍无专项断言。 | §11.4.2.4 §17 |
 | 2026-10-22 | v3.20.1 | **修用户报告的 `_preview_cells()` 下标越界崩溃**（用户原话：`SCRIPT ERROR: Out of bounds get index '8' (on base: 'PackedStringArray') at: _preview_cells (res://scripts/main.gd:1559)`，栈形 `_preview_cells ← _draw_grid ← _draw_build ← _draw_survival ← _draw`）。① **根因：同一个字段被当成两套下标**。`_selected_index` 的真实语义是 **`_option_ids()` 的下标**；而改装期的 `_option_ids()` 不是库存副本，是「按 `_build_layer` 过滤 + 按 id 去重」后的结果，**与 `survival.inventory` 长度不等、顺序也不对应**。旧代码在三处把它当库存下标用：`_ensure_option_visible()` **只钳制 `_option_scroll`、根本不钳制 `_selected_index`**（收口点没在收口）；`_preview_cells()` 直接 `options[_selected_index]`（**越界就在这里抛出**，绘制路径每帧一次所以报错刷屏）；`_mount_selected_inventory()` 用 `clampi(_selected_index, 0, inventory.size() - 1)` 再 `inventory[index]`（即使不越界也会**贴装另一件**）。② **实测触发条件**：`inventory` 6 件（商店买满）、当前模块层去重后只剩 3 个可选 id，则 `_selected_index = 5` 对库存合法、对可选件**非法**。用户报的 `'8'` 是同一机理下数量更多的情形。③ **修法**：`_ensure_option_visible()` 第一件事按**可选件数量**钳制 `_selected_index`；`_preview_cells()` 再加一道防御式 `clampi`（绘制路径不依赖上游一定调过收口）；`_mount_selected_inventory()` 改为先把下标翻成 `module_id`、再用 `inventory.find(module_id)` 取**真实库存位置**；两处 `visible_count` 包 `maxi(..., 0)`。④ **新永久回归 `tests/editor_bounds_smoke.gd`**（6148 B）：实例化 `main.tscn`，走真实入口 `_enter_survival() → _open_shop() → 真实购买 6 格 → _survival_enter_modify()`，构造 `_selected_index = inventory_count - 1`（比可选件多、但比库存小——正是旧代码会留下的值）后调 `_preview_cells()`。实测 `inventory=6 > options=3`（**前提成立，不是假通过**），修复后 `PREVIEW_OK`。⑤ **反向对照（关键证据）**：用 `.me/tmp/main/negctl_apply.py` 把三处修复临时退回旧写法，**立刻复现用户报告的完全相同错误**——`SCRIPT ERROR: Out of bounds get index '5' (on base: 'PackedStringArray') at: _preview_cells`、`PREVIEW_AFTER_ENSURE index=5 options=3`、`PREVIEW_FAIL index_clamped_to_options`（`pb_neg.txt`）。恢复后 `scripts/main.gd` 回到 161231 B / `0c0c3580`，与备份三方同 hash。⑥ **回归**：`--check-only` 78 B / `6ca5b6ba`；**13 项 smoke 全绿**（`s4.txt` 720 B / `f1606d4c`，原 12 项数值与历史基线逐字一致，新增 `PREVIEW_OK`）；改装页截图 `v21_modify.png` **254891 B / `6db6db59` 与 v3.18 的 `l_mod2.png` 逐字节相同**（对渲染零影响）；真实窗口日志 `WINDOW_MODE mode=2 size=(1842, 1057)`、**无 `SCRIPT ERROR`**。⑦ **它为什么一直没被发现**：当库存每件都属于同一层且无重复 id 时，两个长度恰好相等，错误被掩盖；而商店卖的正是**各层混合**的模块，必然暴露。⑧ **测试装置缺陷（已修，不是产品缺陷）**：首版直接调 `_draw_build()`——在 `_draw()` 之外调绘制函数会刷屏 `ERROR: Drawing is only allowed inside this node's _draw()`，且首版没买东西使得 `inventory=0`；改为真实购买 + 只调 `_preview_cells()`。第二版贴装断言失败因为光标停在已被占用的驾驶舱格，改为先找本层空格。`main.gd` 159079 → 161231 B，`tests/` 12 → 13 个 `.gd`。**如实声明**：截图与测试均为**脚本驱动，非人工桌面交互验证**——本轮仍是用户报错后定位修复，**没有人真的在游戏里点着玩到崩溃复现**；**未在 Android 上验证，无 APK**；`boss_armor` / `safe_radius` / 商店稀有度权重方向三项旧缺口未动。 | §11.4.2.5 §17 |
 | 2026-10-22 | v3.21 | **配件特效 + 镜像面板模块细节**（用户原话：「精细化坦克配件的特效，要能体现弹药制造、弹药装填、护盾、维修等效果，例如在模块上加入进度条，小窗口显示坦克镜像也要显示模块的细节」）。① **先补数据层，不动绘制**：新增 `ammo_network.module_states()`（每件导出 `{part, role, module_id, cells, ratio, detail, loaded, queued}`，按角色算好制造 / 存量 / 加工 / 装填比例）、`damage_system.repair_states()`（导出维修周期进度 `ratio = _repair_clock / period_s` 与**下一次真正会修的目朇**）、`duel.network_of(tag)`。**护盾无需新接口**：`shields()` 早已公开，`ACTIVE` 画 `hp/hp_max`、`BROKEN` 画 `1 - charge/recharge_s`。② **抽 `_repair_candidate()`**：原来 `_repair_once()` 里的目标筛选（同车 / 非自身 / 未满血 / 半径内 / `_repair_less` 排序取第一个）抽成只读函数，**治疗逻辑与可视化共用同一份判据**——否则画出的绿线可能指向永远不会被修的部件，比不画更误导。③ **前置事实查清（此前未验证）**：`reload_remaining` 的满量**就是 `reload_s`**（`cannon_bank.gd:131` 开火赋值 / `ammo_network.gd:285` 测试路径 / `:263` `fill_cannons` 同步），所以 `1 - reload_remaining / reload_s` 成立，不再是猜测。④ **绘制：一份装配、三页共享**。新增 `_hull_effects(hull, damage, net) -> {parts, links}` 作为**唯一特效装配点**，归一成 `{fill, fill_colour, outline, outline_colour, bar, bar_colour, word, word_colour}` + 维修 `links`。`_draw_hull_shared(..., effects: Dictionary = {})` 新增**可选尾参**：**默认 `{}` 时一个分支都不走，像素与旧版逐字节相同**——这是基线可比的前提。match / drive / survival 三页全部接上，**没有一份副本**。⑤ **进度条几何**：画在部件包围盒底部、用局部格坐标（自动随车体旋转缩放）；`MODULE_BAR_MIN_SCREEN = 2.0` 保证生存页 0.594 缩放下仍看得见（纯局部 3.2 px 在屏幕上不足 2 px，会被格线淹。）。⑥ **脉冲与确定性**：全部用 `0.5 + 0.5 * sin(_time * MODULE_PULSE_SPEED)`，**零 `randf`/`randi`**；`_time` 在截图冻结时不动，所以同 `--steps=N` 连拍仍逐字节相同。⑦ **镜像面板**：`SURVIVAL_MIRROR_RECT` 与 `MIRROR_ROW_VISIBLE = 6` / `MIRROR_ROW_HEIGHT = 22.0` **均未变**（没有撒高面板）。镜像本体的有状态格叠特效色 + 2 px 迷你进度条；逐部件行改成**双行条**（上 HP、下模块进度）+ 2–3 字状态词（制造/存量/加工/装填/已上膛/护盾/充能/维修）；**状态词只在真的拿到状态时才画**，拿不到就留空——不编造「正常」冒充信息。镜像与战场**共用 `_hull_effects()`**，两边进度必然一致。⑧ **回归**：`--check-only` ammo_network / damage_system / duel / main 均 **78 B / `6ca5b6ba`**；**13 项 smoke `s5.txt` 720 B / `f1606d4c` 与 v3.20.1 的 `s4.txt` 逐字节相同**（全部旧数值未变）；生存页 `v21_surv_a.png` = `v21_surv_b.png` = **182717 B / `d6a8bec2`**（`--steps=420` 两次逐字节相同）。⑨ **区域归因**：对 `v20_surv_c.png`，`left_hud` **0**、`right_hud_above_mirror` **0**、`mirror_title_strip` **0**、`status_bar` **0**；战场 6045 px、镜像面板 61460 px——**两者都是本轮有意改动的区域**。**镜像面板差异不是回归**（这轮就是要改它，且它本来就不是静态区域）；真正能证明未破坏布局的是 `mirror_title_strip` **0 差异**。⑩ **目视证据**：`v21_match.png`（133138 B / `ceb34015`）双方车体上可见进度条与红色 `-52`；`v21_drive.png`（213555 B / `f7ba692c`）可见车体进度条且原有装填条仍在；`crop_mirror.png` 放大后确认镜像行里「76mm弹药 · 制造 · 100%」「76mm炮管 · 装填 · 100%」与双进度条真的画出来了；`crop_hull.png` 确认车体上的琥珀色进度条存在。**如实声明**：截图仍为**脚本驱动 + 像素检查，非人工交互验证**——**从未有人真的玩一局来观察这些进度条与特效**；**镜像面板仍然只显示玩家，敌人没有镜像**；`module_states()` 不为 conveyor 提供进度（其弹药位置仍由 `strand_positions()` 承担）；**未在 Android 上验证，任何 APK 均不存在**；`boss_armor` / `safe_radius` / 商店稀有度权重方向三项旧缺口本轮未动。 | §11.4.2.6 §17 |
+| 2026-10-23 | v3.22 | **战斗视图复用（用户原话：「生存模式的战斗UI也应该能复用到其他模式」）**。① **先摸底再动手**：逐行对照 `_draw_survival_arena()` 与 `_draw_match()`，可复用面 = 竞技场底板 / 边框 / 障碍 / 中立物 / 弹道 / 动效 / 命中闪光 / 伤害数字 / 车体着色判据；模式专属的只有 HUD 与状态机。② **新建 `scripts/combat_view.gd`**（`extends RefCounted`，只 preload `palette.gd` 与 `fx_layer.gd`，**零 preload 回 `main.gd`**，依赖 DAG 保持单向）。**全部 `static`、无状态**：可变状态（`FxLayer` 实例、命中闪光剩余时间）留在页面层。**为什么不用实例**：若组件持有动效层，就得回答「哪个实例才是真状态」；而两个战斗模式各有独立的动效层。无状态的硬好处是**生存页切过去时不可能因初始化顺序改变一个像素**，这正是「抽取不改观感」可被逐字节验证的前提。③ **API**：`to_screen` / `fit_scale` / `scale_obstacles` / `draw_arena` / `draw_neutrals` / `draw_shots` / `draw_fx` / `draw_hit_flash` / `draw_damage_popups` / `push_damage` / `hull_damage_colour` / `hull_damage_alpha`。绘制函数都接 `canvas: CanvasItem` 并用 `canvas.draw_*`（Godot 允许在 `_draw()` 周期内从别处调用），因此**不必新增 Node2D**；文本绘制以 `text_fn: Callable` 注入（字体属于页面，组件不该自己加载，否则同一字形会在两处解析出不同回退链）。④ **模式差异用参数表达，不用分支**：没有房屋/残骸 → `draw_neutrals(..., [], [], cell_px)`（**空数组即无绘制**）；障碍单位不同 → 进组件前正规化（生存页用 `scale_obstacles()`，对局页直接传已是像素的 `duel.obstacles`）；动效观感 → `FX_STYLE_SURVIVAL` / `FX_STYLE_MATCH` 两个常量字典（`radius_base` / `radius_grow` / `min_radius` / `arc_points` / `arc_width` / `fill_scale` / `alpha_scale`）。**为什么不用模式枚举**：枚举会让组件知道「世界上有哪些模式」，每加一个模式都要改组件。⑤ **两页接线后是同一调用序列**，只有参数不同。**对局页因此真正获得三样东西**（这是复用的**目的**，不是回归）：命中闪光（旧版完全没有；新增 `_match_hit_flash_at` / `_match_hit_flash_left` 页面变量，在 `_match_step()` 的 `impact` 分支置位、`_match_tick_fx()` 在固定步长内递减）、按血量分档上色（`_match_part_colour()` 先定队伍色/驾驶舱琥珀，再过 `CombatView.hull_damage_colour`；旧版整台只有一种队伍色、不看 HP）、层级统一（弹道在动效之下、伤害数字在最上层）。⑥ **顺带修掉一个潜在缺陷**：对局页弹道坐标原为 `DRIVE_VIEW.position + pos * scale`，**漏了 `- arena.position`**；走 `to_screen` 后正确。现阶段 `arena.position == ZERO` 所以像素无影响——**这是正确性改进，不是本轮引入的问题**。⑦ **刻意不抽**：`_draw_hull_shared()` 留在 `main.gd`（已带 `effects` 尾参、三页共用、需要 `_time` 与 `Palette`，搬进无状态组件只会多两个注入参数）；**坦克镜像面板不抽**（与生存 run 的 inventory / wave / level 强耦合，抽出去只会把生存语义灌进通用组件，**列为独立后续目标**）；HUD 不抽（模式专属信息，共用只会制造条件分支）。⑧ **清理**：删除 `_draw_match_damage_popups` 与 `_survival_fx` / `_draw_damage_popups` / `_draw_survival_hit_flash` / `_draw_match_fx` 四个已无调用点的包装，以及 `HIT_FLASH_TIME` / `DAMAGE_POPUP_RISE` / `DAMAGE_POPUP_LIFE` / `DAMAGE_POPUP_PER_SIDE` 四个页面常量（全部搬到组件，避免同一套数值写两份而只改了一份）。`main.gd` 172866 B / 3585 行 → **166082 B / 3418 行**。⑨ **回归（三条结论必须分开陈述）**：`--check-only` `combat_view` / `main` 均 **78 B / `6ca5b6ba`**；**13 项 smoke `s7.txt` = `s9.txt` = 720 B / `f1606d4c`，与 v3.20.1/v3.21 的历史基线逐字节相同**（两次独立运行）；**生存页** `v22_surv_a.png` = `v22_surv_c.png` = **182717 B / `d6a8bec2`，与 v3.21 基线逐字节相同**，区域归因**七个区域 diff_px 全为 0**（`REGION_TOTAL diff_px=0`）→ **像素零变化**；**试驾页** `v22_drive.png` **213555 B / `f7ba692c`，与基线逐字节相同** → **未被间接影响**；**对局页** `v22_match_b.png` **133659 B / `6d5654d1`**（v3.21 为 133138 B / `ceb34015`），区域归因**六个非战场区域全为 0**，仅 battlefield 14689 px（bbox 737,233–938,522，max_delta 86）→ **有变化，且那正是复用的目的**，不可说成「重构无可见变化」。`Image_View` 目视确认敌方车体呈血量分档渐变色、红色 `-52` 数字、障碍/弹道/HUD 正常。⑩ **过程自伤 1 次（已修并复验）**：`_match_part_colour` 那次 `replace` 把范围写成 1919–1948，连带删掉了 `_draw_match_hull` 与 `_draw_match_fx` 两个函数体；立即读回发现并补回，随后又清掉一条因补写产生的重复注释。**同类事故总数已达 6 次**——教训固定为：`File.Edit` 报 `succeeded` 不证明字节正确，改完必须 `File.Read` 读回函数前后。**如实声明**：截图与测试均为**脚本驱动 + 像素检查，非人工交互验证**——**从未有人真的进游戏玩过一局**去观察对局页新出现的命中闪光与血量分档上色；**`combat_view.gd` 没有专属 smoke 断言**（纯绘制层，只被截图间接覆盖）；**镜像面板仍未复用**；**未在 Android 上验证，任何 APK 均不存在**；`boss_armor` / `safe_radius` / 商店稀有度权重方向 / 房屋撞毁断言等旧缺口本轮一条未动。 | §11.4.2.7 §17 |
