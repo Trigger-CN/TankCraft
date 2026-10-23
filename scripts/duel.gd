@@ -252,6 +252,11 @@ func alive_tags() -> Array[String]:
 	return result
 
 ## 开火：走该方炮管组与口径校验，炮弹带该方的升级聚合（design §8.6）。
+##
+## v3.23：每真正发射一发就追加一个 `muzzle` 事件 —— 炮口特效**不需要调用方配合**。
+## 为什么放在这里而不是各页面：开火入口有 4 处（对局 AI / 对局玩家 / 生存玩家 / 生存 AI），
+## 分散去推 FX 必然漏一两处；而所有调用方都已经在 `step()` 后统一 `drain_events()`。
+## 试驾页是唯一例外（它绕过 Duel 直接调 bank.fire），所以那边单独处理。
 func fire(tag: String) -> int:
 	if not sides.has(tag):
 		return 0
@@ -271,6 +276,16 @@ func fire(tag: String) -> int:
 		for shot in shots:
 			field.spawn(Vector2(shot["origin"]), Vector2(shot["dir"]), String(shot["ammo_id"]), tag, upgrades, 1.0, team)
 			tank.apply_recoil(float(shot["recoil_px"]), Vector2(shot["dir"]), Vector2(shot["world_r"]))
+			## 炮口事件：位置与方向直接取自 `bank.fire()` 的实际发射结果，
+			## 不是重新算一遍炮口——那样一旦炮管瞄准/车体姿态的算法变了，特效就会和弹道错位。
+			events.append({
+				"kind": "muzzle",
+				"tag": tag,
+				"team": team,
+				"pos": Vector2(shot["origin"]),
+				"dir": Vector2(shot["dir"]),
+				"ammo_id": String(shot["ammo_id"]),
+			})
 			fired += 1
 	return fired
 

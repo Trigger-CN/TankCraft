@@ -36,6 +36,13 @@ const DAMAGE_POPUP_LIFE := 0.85
 const DAMAGE_POPUP_PER_SIDE := 6
 ## 同帧多条数字的垂直错开步长（像素）。
 const DAMAGE_POPUP_STACK_STEP := 14.0
+## 炮口闪光 / 消散特效的时长与尺寸（v3.23）。
+## 两者都比命中闪光（0.14 s）长，因为它们要表达「发生了什么」而不只是「打到了」。
+const MUZZLE_FLASH_TIME := 0.18
+const MUZZLE_FLASH_LEN := 26.0
+const MUZZLE_FLASH_MIN_LEN := 10.0
+const EXPIRE_FLASH_TIME := 0.26
+const EXPIRE_FLASH_RADIUS := 16.0
 
 ## 动效圆环的默认风格：生存页这一套（半径随剩余寿命线性收，带半透明填充）。
 const FX_STYLE_SURVIVAL := {
@@ -212,6 +219,71 @@ static func draw_hit_flash(canvas: CanvasItem, view: Rect2, arena: Rect2, scale_
 	var radius := 6.0 + 10.0 * (1.0 - t)
 	canvas.draw_circle(at, radius, Color(Palette.ACCENT_AMBER, 0.30 * t))
 	canvas.draw_arc(at, radius, 0.0, TAU, 24, Color(Palette.TEXT_HI, 0.9 * t), 2.0)
+
+
+## 炮口闪光（v3.23）：发射瞬间从炮口沿炮管方向射出的一道锥形光 + 一圈冲击环。
+##
+## **为什么画成锥形而不是一个圆**：圆无法表达「朝哪边打的」。玩家在混战里最需要确认的
+## 就是「我这发到底向哪个方向出去了」——炮管朝向与车体朝向可以不同（`aim` 偏移），
+## 只有沿 `dir` 拉长的形状才能一眼看出。
+##
+## 长度随寿命收缩、亮度随寿命淡出；全程无随机，同一模拟两次跑出同一像素。
+## `life` 由调用方传入剩余时间，页面层负责在固定步长里递减。
+static func draw_muzzle_flash(canvas: CanvasItem, view: Rect2, arena: Rect2, scale_factor: float, at_world: Vector2, dir: Vector2, left: float, colour: Color, life: float = MUZZLE_FLASH_TIME) -> void:
+	if left <= 0.0:
+		return
+	var t := clampf(left / maxf(life, 0.001), 0.0, 1.0)
+	var at := to_screen(view, arena, at_world, scale_factor)
+	var forward := dir.normalized() if dir.length_squared() > 0.000001 else Vector2.RIGHT
+	var side := forward.orthogonal()
+	## 长度随剩余寿命从满收缩到零；最小屏幕长度保证极小缩放下仍可见。
+	var length := maxf(MUZZLE_FLASH_LEN * t * scale_factor, MUZZLE_FLASH_MIN_LEN)
+	var half := length * 0.32
+	## ① 锥形光：炮口 → 两侧张开的宽口，用两个三角形拼出一个尖头向外的光锥。
+	var tip := at + forward * length
+	canvas.draw_colored_polygon(PackedVector2Array([
+		at,
+		tip + side * half,
+		tip - side * half,
+	]), Color(colour, 0.55 * t))
+	## ② 中心亮芯：一条细长亮线，保证光锥在小尺寸下也有可读的「指向」。
+	canvas.draw_line(at, tip, Color(Palette.TEXT_HI, 0.85 * t), maxf(1.5 * scale_factor, 1.0))
+	## ③ 炮口冲击环：以炮口为中心的短促圆环，让「刚刚开火」这件事在静止画面里也成立。
+	var ring := 4.0 + 8.0 * (1.0 - t)
+	canvas.draw_arc(at, ring, 0.0, TAU, 20, Color(colour, 0.75 * t), 1.5)
+
+
+## 射程耗尽消散（v3.23）：炮弹未命中、飞满射程后原地消失的特效。
+##
+## **必须与命中闪光明显不同**，否则玩家分不清「打中了」与「打空了」：
+## - 命中闪光：实心琥珀圆 + 白亮描边，向外**扩张**（半径 6 → 16），0.14 s；
+## - 消散特效：三圈同心描边 + 向外的短刻线，半径**收缩**并向上漂，0.26 s，颜色按敌我。
+## 二者形状、时长、运动方向全不同，不看颜色也能分辨。
+##
+## `rise` 让消散点向上漂几像素：射程尽头通常在空旷处，纯原地消失容易被弹道残影混淆。
+static func draw_expire_flash(canvas: CanvasItem, view: Rect2, arena: Rect2, scale_factor: float, at_world: Vector2, left: float, colour: Color, life: float = EXPIRE_FLASH_TIME) -> void:
+	if left <= 0.0:
+		return
+	var t := clampf(left / maxf(life, 0.001), 0.0, 1.0)
+	## 进度 0 → 1（与 t 相反）：半径从大收到小、透明度从有到无。
+	var progress := 1.0 - t
+	var at := to_screen(view, arena, at_world, scale_factor) + Vector2(0.0, -6.0 * progress)
+	var radius := maxf(EXPIRE_FLASH_RADIUS * scale_factor * (1.0 - 0.55 * progress), 2.0)
+	## ① 三圈同心描边：由外向内收缩，形成「散掉」而不是「炸开」的感觉。
+	var ring_alpha := 0.85 * t
+	for ring_index in range(3):
+		var ring := radius * (1.0 - 0.22 * float(ring_index))
+		canvas.draw_arc(at, ring, 0.0, TAU, 18, Color(colour, ring_alpha / (1.0 + float(ring_index))), 1.5)
+	## ② 四根向外短刻线：固定角度（45° 起点、90° 步进），无随机。
+	var spoke := radius * 1.25
+	for spoke_index in range(4):
+		var angle := PI * 0.25 + PI * 0.5 * float(spoke_index)
+		var outer := at + Vector2(cos(angle), sin(angle)) * spoke
+		var inner := at + Vector2(cos(angle), sin(angle)) * radius
+		canvas.draw_line(inner, outer, Color(colour, 0.6 * t), 1.5)
+	## ③ 中心一点微光：只在最初 40% 寿命里存在，避免结束时留下一个亮点。
+	if t > 0.6:
+		canvas.draw_circle(at, maxf(2.0 * scale_factor, 1.5), Color(colour, 0.35 * t))
 
 
 ## 伤害悬浮数字：从命中点向上飘升并淡出。

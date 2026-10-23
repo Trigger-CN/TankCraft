@@ -2,10 +2,10 @@
   "schema": "tankcraft.ammo_catalog",
   "version": 1,
   "items": [
-    {"id":"cal_20","name":"20 mm","caliber_mm":20,"base_damage":8,"speed_px_s":900,"slot":1,"radius_px":1.5,"processing_factor":0.7},
-    {"id":"cal_40","name":"40 mm","caliber_mm":40,"base_damage":20,"speed_px_s":780,"slot":1,"radius_px":2.0,"processing_factor":0.85},
-    {"id":"cal_76","name":"76 mm","caliber_mm":76,"base_damage":55,"speed_px_s":620,"slot":2,"radius_px":3.0,"processing_factor":1.0},
-    {"id":"cal_120","name":"120 mm","caliber_mm":120,"base_damage":130,"speed_px_s":500,"slot":3,"radius_px":4.0,"processing_factor":1.25},
-    {"id":"cal_155","name":"155 mm","caliber_mm":155,"base_damage":240,"speed_px_s":420,"slot":4,"radius_px":5.0,"processing_factor":1.5}
+    {"id":"cal_20","name":"20 mm","caliber_mm":20,"base_damage":8,"speed_px_s":900,"range_px":1900,"slot":1,"radius_px":1.5,"processing_factor":0.7},
+    {"id":"cal_40","name":"40 mm","caliber_mm":40,"base_damage":20,"speed_px_s":780,"range_px":1820,"slot":1,"radius_px":2.0,"processing_factor":0.85},
+    {"id":"cal_76","name":"76 mm","caliber_mm":76,"base_damage":55,"speed_px_s":620,"range_px":1740,"slot":2,"radius_px":3.0,"processing_factor":1.0},
+    {"id":"cal_120","name":"120 mm","caliber_mm":120,"base_damage":130,"speed_px_s":500,"range_px":1660,"slot":3,"radius_px":4.0,"processing_factor":1.25},
+    {"id":"cal_155","name":"155 mm","caliber_mm":155,"base_damage":240,"speed_px_s":420,"range_px":1580,"slot":4,"radius_px":5.0,"processing_factor":1.5}
   ]
 }

@@ -163,22 +163,27 @@ func _check_recoil(body: TankBody, bank: CannonBank) -> bool:
 		return false
 	return true
 
-## 弹道：超出 projectile_lifetime_s × speed 或 max_range_px 即终止；边界命中产生事件。
+## 弹道：**飞满该口径射程**即终止；边界命中产生 impact 事件。
+##
+## v3.23 重写了这里的断言：射程从「全局单值 + 可能被寿命截断」改成了「口径属性」，
+## 旧断言 `travelled == minf(max_range, speed * lifetime)` 编码的正是被替换掉的旧语义。
+## 按项目惯例（验旧语义的断言必须重写而非回退实现），这里改为从**弹药定义**读 `range_px`。
 func _check_projectile(definitions: ModuleDefs) -> float:
 	var field := ProjectileField.new()
 	if not field.setup(definitions):
 		_fail("CANNON_FAIL_FIELD")
 		return -1.0
 	var ammo := definitions.get_ammo("cal_76")
-	var speed := float(ammo.get("speed_px_s", 620.0))
-	var max_range := definitions.global_number("max_range_px", 1400.0)
-	var lifetime := definitions.global_number("projectile_lifetime_s", 3.5)
-	## 空旷竞技场内沿 +X 飞行，边界距离 > 弹道射程，因此应在射程/寿命处结束。
+	var range_px := float(ammo.get("range_px", 0.0))
+	if range_px <= 0.0:
+		_fail("CANNON_FAIL_NO_RANGE_FIELD")
+		return -1.0
+	## 空旷竞技场内沿 +X 飞行，边界距离 > 弹道射程，因此应在射程处结束。
 	var origin := Vector2(60.0, 576.0)
 	field.spawn(origin, Vector2.RIGHT, "cal_76", "player")
 	var travelled := 0.0
 	var reason := ""
-	for step in range(1200):
+	for step in range(3000):
 		var events := field.step(1.0 / 60.0, ARENA, [])
 		if not events.is_empty():
 			reason = String(events[0]["reason"])
@@ -187,9 +192,47 @@ func _check_projectile(definitions: ModuleDefs) -> float:
 	if reason.is_empty():
 		_fail("CANNON_FAIL_NEVER_TERMINATED")
 		return -1.0
-	var max_travel := speed * lifetime
-	if absf(travelled - minf(max_range, max_travel)) > 1.0:
-		_fail("CANNON_FAIL_RANGE %.1f expected %.1f" % [travelled, minf(max_range, max_travel)])
+	## ① 必须以 range 结束，不能是 lifetime 或 impact。
+	##    `impact` 意味着射程超过了竞技场尺寸 —— 那样「射程耗尽消散」在实战里永远不会发生。
+	if reason != "range":
+		_fail("CANNON_FAIL_REASON:%s" % reason)
+		return -1.0
+	## ② 实际飞行距离必须等于该口径射程（容差 1 px）。
+	if absf(travelled - range_px) > 1.0:
+		_fail("CANNON_FAIL_RANGE %.1f expected %.1f" % [travelled, range_px])
+		return -1.0
+	## ③ 区分性断言：**换用最慢的大口径** `cal_155` —— 它的射程必须超过旧寿命（3.5 s）能飞的距离，
+	##    而实际飞行也确实超过了那个距离。这才能证明「寿命不再截断射程」真的生效。
+	##    为什么不用 cal_76：它的旧寿命跨度（2170）本来就大于新射程（1740），
+	##    在它身上测不出「寿命是否截断」这件事——区分性前提不成立。
+	var slow_ammo := definitions.get_ammo("cal_155")
+	var slow_speed := float(slow_ammo.get("speed_px_s", 420.0))
+	var slow_range := float(slow_ammo.get("range_px", 0.0))
+	var lifetime := definitions.global_number("projectile_lifetime_s", 3.5)
+	var old_life_span := slow_speed * lifetime
+	if slow_range <= old_life_span:
+		_fail("CANNON_FAIL_PREMISE range=%.0f old_span=%.0f" % [slow_range, old_life_span])
+		return -1.0
+	var slow := ProjectileField.new()
+	slow.setup(definitions)
+	slow.spawn(origin, Vector2.RIGHT, "cal_155", "player")
+	var slow_travelled := 0.0
+	var slow_reason := ""
+	for step in range(3000):
+		var events := slow.step(1.0 / 60.0, ARENA, [])
+		if not events.is_empty():
+			slow_reason = String(events[0]["reason"])
+			slow_travelled = float(slow.events[slow.events.size() - 1].get("pos", origin).x) - origin.x
+			break
+	if slow_reason != "range":
+		_fail("CANNON_FAIL_SLOW_REASON:%s" % slow_reason)
+		return -1.0
+	if absf(slow_travelled - slow_range) > 1.0:
+		_fail("CANNON_FAIL_SLOW_RANGE %.1f expected %.1f" % [slow_travelled, slow_range])
+		return -1.0
+	## 这条是真正的区分点：旧实现下 cal_155 只能飞 1470（寿命到），现在飞满 1580（射程到）。
+	if slow_travelled <= old_life_span:
+		_fail("CANNON_FAIL_LIFE_STILL_CAPS %.1f <= %.1f" % [slow_travelled, old_life_span])
 		return -1.0
 	## 朝边界短距离发射必须在边界命中并产生 impact 事件。
 	var near := ProjectileField.new()
@@ -230,5 +273,45 @@ func _check_projectile(definitions: ModuleDefs) -> float:
 			break
 	if tunnel_hit != "obstacle":
 		_fail("CANNON_FAIL_TUNNELING:%s" % tunnel_hit)
+		return -1.0
+	## ---- v3.23 新增：矩形障碍不得变成无限高的隐形墙 ----
+	## 上面三个子测试都是从**矩形左侧**打过去的，起点在障碍左边、命中点落在左边缘，
+	## 所以它们**全都抓不到**旧实现的缺陷：旧 `_clip_to_rect()` 只算 `rect.end`，
+	## 相当于假设「起点在矩形内部、向外射出」，因此任何跨过 `rect.end.x` 的弹道
+	## 都会被判成命中，不管 y 在哪里。下面两条就是从矩形**上方/下方**绕过去的。
+	##
+	## 这个缺陷对用户直接可见：有矩形障碍的竞技场里，炮弹永远撞到隐形墙，
+	## 「未命中飞满射程后消散」永远不会发生。
+	var bypass_from := Vector2(100.0, 200.0)
+	var bypass_obstacle := {"shape": "rect", "rect": Rect2(400.0, 500.0, 120.0, 160.0)}
+	var bypass := ProjectileField.new()
+	bypass.setup(definitions)
+	bypass.spawn(bypass_from, Vector2.RIGHT, "cal_76", "player")
+	var bypass_kind := ""
+	var bypass_reason := ""
+	var bypass_x := 0.0
+	for step in range(3000):
+		var events := bypass.step(1.0 / 60.0, ARENA, [bypass_obstacle])
+		if not events.is_empty():
+			bypass_kind = String(events[0]["kind"])
+			bypass_reason = String(events[0].get("reason", ""))
+			bypass_x = float(Vector2(events[0]["pos"]).x)
+			break
+	if bypass_kind != "expire" or bypass_reason != "range":
+		_fail("CANNON_FAIL_RECT_BYPASS:%s/%s x=%.1f" % [bypass_kind, bypass_reason, bypass_x])
+		return -1.0
+	## 同时必须仍然穿不过去：从矩形**正前方**（y 落在 500..660 内）打，必须命中。
+	## 这两条一起才构成区分性——只靠绕行那一条，把矩形碰撞整个删掉也能过。
+	var through := ProjectileField.new()
+	through.setup(definitions)
+	through.spawn(Vector2(100.0, 580.0), Vector2.RIGHT, "cal_76", "player")
+	var through_hit := ""
+	for step in range(120):
+		var events := through.step(1.0 / 60.0, ARENA, [bypass_obstacle])
+		if not events.is_empty():
+			through_hit = String(events[0]["target"])
+			break
+	if through_hit != "obstacle":
+		_fail("CANNON_FAIL_RECT_THROUGH:%s" % through_hit)
 		return -1.0
 	return travelled

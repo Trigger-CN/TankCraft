@@ -144,6 +144,9 @@ var _drive_fx := FxLayer.new()
 ## M5：装填完成是一次边沿（loaded false → true），电平本身无法表达「脉冲一次」。
 var _drive_cannon_pulse: Dictionary = {}
 var _drive_cannon_loaded: Array = []
+## v3.23：试驾页的炮口闪光与消散（多实例；与另两页共用同一套推进/绘制）。
+var _drive_muzzles: Array = []
+var _drive_expires: Array = []
 ## M6 对局：MatchState 包一层对局实体的 Duel，AI 驱动敌方侧。
 var match_session: MatchState
 var match_ai: BotAI
@@ -154,10 +157,14 @@ var _match_accumulator := 0.0
 var _match_held: Dictionary = {}
 var _match_event := ""
 var _match_fx := FxLayer.new()
-## v3.22：对局页也拿到命中闪光（旧版只有生存页有）。状态留在页面层，
-## 绘制走 `CombatView.draw_hit_flash()`，两个战斗模式互不干扰。
 var _match_hit_flash_at := Vector2.ZERO
 var _match_hit_flash_left := 0.0
+## v3.23：炮口闪光与射程耗尽消散。都是**多实例**的（一次齐射会有多门炮、一轮弹幕会有
+## 多发弹同时消散），所以用「数组 + 逐项倒计时」而不是像命中闪光那样只存最新一个。
+## 为什么不用 FxLayer：这两个特效需要「方向」与「所属队伍」两个额外字段，
+## 而 FxLayer 的公共字段集是给通用圆环用的；把方向塞进去会弄脏所有旧调用点。
+var _match_muzzles: Array = []
+var _match_expires: Array = []
 ## M9 波次生存：SurvivalRun 承载 run 状态，玩家坦克由 survival_builder 持有（波间不回滚）。
 var survival: SurvivalRun
 var survival_builder: GridBuilder
@@ -1008,6 +1015,31 @@ func _match_step(step_time: float) -> void:
 			_match_event = "击毁 %s" % String(battle_event.get("module_id", ""))
 		elif kind == "depot_explosion" or kind == "engine_explosion" or kind == "explosion":
 			_match_event = "殉爆 / 爆炸"
+		elif kind == "muzzle":
+			## 炮口闪光：位置/方向取自 `Duel.fire()` 的真实发射结果，不重新算炮口。
+			var muzzle_at := Vector2(battle_event.get("pos", Vector2.ZERO))
+			var muzzle_colour := Palette.ACCENT_CYAN if String(battle_event.get("tag", "")) == Duel.TAG_PLAYER else Palette.ACCENT_MAGENTA
+			_match_muzzles.append({
+				"pos": muzzle_at,
+				"dir": Vector2(battle_event.get("dir", Vector2.RIGHT)),
+				"colour": muzzle_colour,
+				"left": CombatView.MUZZLE_FLASH_TIME,
+			})
+			## 同侧限流：多炮齐射时不要堆成一团（与伤害数字同一思路）。
+			while _match_muzzles.size() > CombatView.DAMAGE_POPUP_PER_SIDE:
+				_match_muzzles.remove_at(0)
+		elif kind == "expire":
+			## 射程耗尽消散：与「打中了」必须能一眼区分（形状/时长/运动方向都不同）。
+			var expire_at := Vector2(battle_event.get("pos", Vector2.ZERO))
+			var expire_colour := Palette.ACCENT_CYAN if String(battle_event.get("shooter", "")) == Duel.TAG_PLAYER else Palette.ACCENT_MAGENTA
+			_match_expires.append({
+				"pos": expire_at,
+				"colour": expire_colour,
+				"left": CombatView.EXPIRE_FLASH_TIME,
+			})
+			_match_event = "炮弹飞满射程消散"
+			while _match_expires.size() > CombatView.DAMAGE_POPUP_PER_SIDE:
+				_match_expires.remove_at(0)
 	if match_session.is_over():
 		_match_event = "对局结束：%s" % _match_outcome_text()
 	_match_tick_fx(step_time)
@@ -1031,11 +1063,31 @@ func _push_match_damage(at: Vector2, amount: float, colour: Color, mode: String)
 
 ## 对局页动效倒计时：只在 `_match_step` 的固定步长里累减。
 ## 递减逻辑已收归 `FxLayer.step()`（v3.11）——三页共用一份，不会再出现「调错 tick 对象」。
-## 命中闪光与生存页一样在固定步长内倒计时，绝不放 `_process`。
+## 命中闪光、炮口闪光与消散同样在固定步长内倒计时，绝不放 `_process`。
 func _match_tick_fx(step_time: float) -> void:
 	if _match_hit_flash_left > 0.0:
 		_match_hit_flash_left = maxf(_match_hit_flash_left - step_time, 0.0)
 	_match_fx.step(step_time)
+	_advance_timed(_match_muzzles, step_time)
+	_advance_timed(_match_expires, step_time)
+
+## 通用「带剩余时间的瞬时特效列表」推进器。
+##
+## 为什么不塞进 `FxLayer`：`FxLayer.entries` 的字段集（kind / pos / radius / colour / left / life / text）
+## 是三个页面共用的通用模型；炮口闪光需要 `dir` 与 `colour`、消散需要 `colour`，而它们都**不需要**
+## `radius` / `text`。为了两种特效给公共模型加三个字段，会把所有旧调用点都卷进来。
+## 这里只维护「`left` 递减、过期丢弃」这一件共同的事，字段由各自定义。
+func _advance_timed(entries: Array, step_time: float) -> void:
+	if entries.is_empty():
+		return
+	var kept: Array = []
+	for raw_entry in entries:
+		var entry: Dictionary = raw_entry
+		entry["left"] = float(entry["left"]) - step_time
+		if float(entry["left"]) > 0.0:
+			kept.append(entry)
+	entries.clear()
+	entries.append_array(kept)
 
 ## ===== 试驾沙盒（M3）：建造结果 → 自建刚体 → 差速操控与开火 =====
 
@@ -1194,6 +1246,10 @@ func _drive_step(step_time: float) -> void:
 		var event: Dictionary = raw_event
 		_drive_record_event(event)
 		_drive_resolve_impact(event)
+		## v3.23：试驾页的炮口闪光（这条路径绕过 Duel，所以要自己收集）。
+		## 消散不在这里处理：`_drive_record_event()` 已经把 reason=range 写成「超出射程」，
+		## 而特效状态统一在下面按同一份事件推入。
+		_consume_combat_particles(event)
 	if damage != null:
 		damage.step(step_time)
 		_drive_consume_damage_events(damage.drain_events())
@@ -1220,10 +1276,43 @@ func _drive_fire() -> void:
 			var upgrades: Array = damage.cannon_upgrades(tank) if damage != null else []
 			field.spawn(Vector2(shot["origin"]), Vector2(shot["dir"]), String(shot["ammo_id"]), "player", upgrades)
 			tank.apply_recoil(float(shot["recoil_px"]), Vector2(shot["dir"]), Vector2(shot["world_r"]))
+			## 试驾页不经过 `Duel.fire()`，所以炮口特效要在这里自己收。
+			_consume_combat_particles({
+				"kind": "muzzle",
+				"tag": "player",
+				"pos": Vector2(shot["origin"]),
+				"dir": Vector2(shot["dir"]),
+			})
 	if fired == 0:
 		_set_status("炮管还在装填，或当前蓝图没有炮管。")
 		return
 	_set_status("开火：%d 发离膛。" % fired)
+
+## 试驾页的炮口/消散事件收集器。
+##
+## 为什么单独写一份而不直接复用另两页的分支：三个页面的**状态存放位置不同**
+## （`_drive_*` / `_match_*` / `_survival_*` 三组变量），而 GDScript 没有引用传递的
+## 字段名。真正该共用的是**绘制与推进**（已收归 `CombatView` 与 `_advance_timed`），
+## 这里只剩「把两个字段塞进哪个数组」这行赋值，重复它比引入一套间接层便宜。
+func _consume_combat_particles(event: Dictionary) -> void:
+	var kind := String(event.get("kind", ""))
+	if kind == "muzzle":
+		_drive_muzzles.append({
+			"pos": Vector2(event.get("pos", Vector2.ZERO)),
+			"dir": Vector2(event.get("dir", Vector2.RIGHT)),
+			"colour": Palette.ACCENT_CYAN,
+			"left": CombatView.MUZZLE_FLASH_TIME,
+		})
+		while _drive_muzzles.size() > CombatView.DAMAGE_POPUP_PER_SIDE:
+			_drive_muzzles.remove_at(0)
+	elif kind == "expire":
+		_drive_expires.append({
+			"pos": Vector2(event.get("pos", Vector2.ZERO)),
+			"colour": Palette.ACCENT_CYAN,
+			"left": CombatView.EXPIRE_FLASH_TIME,
+		})
+		while _drive_expires.size() > CombatView.DAMAGE_POPUP_PER_SIDE:
+			_drive_expires.remove_at(0)
 
 func _drive_record_event(event: Dictionary) -> void:
 	if String(event.get("kind", "")) == "impact":
@@ -1334,6 +1423,8 @@ func _push_drive_fx(kind: String, at: Vector2, radius: float, colour: Color, lif
 ## 动效倒计时在固定步长里累减，保持确定性（绝不放 _process，绝不用 randf）。
 func _drive_tick_fx(step_time: float) -> void:
 	_drive_fx.step(step_time)
+	_advance_timed(_drive_muzzles, step_time)
+	_advance_timed(_drive_expires, step_time)
 
 ## 预热步数的统一入口：传了 `--steps=N` 就用 N，否则用该页原本的默认值。
 ## 用函数而不是直接读变量，是为了让三个页面的默认值各自写在调用处、一眼能看出原值。
@@ -1723,10 +1814,28 @@ func _draw_match() -> void:
 	for tag in [Duel.TAG_ENEMY, Duel.TAG_PLAYER]:
 		_draw_match_hull(String(tag), scale_factor)
 	CombatView.draw_fx(self, DRIVE_VIEW, duel.arena, scale_factor, _match_fx.entries, CombatView.FX_STYLE_MATCH)
+	## 消散画在弹道**之下**：残余弹道残影不应该被遮住，而且消散本身没有实体。
+	_draw_timed_expires(_match_expires, duel.arena, scale_factor)
 	CombatView.draw_shots(self, DRIVE_VIEW, duel.arena, scale_factor, duel.field.shots, Duel.TAG_PLAYER)
+	## 炮口闪光画在弹道**之上**：它是「刚刚发出这一发」的因果提示，必须盖在拖尾上。
+	_draw_timed_muzzles(_match_muzzles, duel.arena, scale_factor)
 	CombatView.draw_hit_flash(self, DRIVE_VIEW, duel.arena, scale_factor, _match_hit_flash_at, _match_hit_flash_left)
 	CombatView.draw_damage_popups(self, DRIVE_VIEW, duel.arena, scale_factor, _match_fx.entries, _draw_text)
 	_draw_match_hud()
+
+## 炮口闪光与消散的绘制包装：两个页面共用同一个循环形状，只有竞技场与缩放不同。
+##
+## 为什么不把循环也搬进 `CombatView`：那需要把「颜色属于谁」的判据也搬进去，
+## 而队伍色是**页面知识**（哪个 tag 是玩家）。组件只该知道「给我位置、方向、颜色」。
+func _draw_timed_muzzles(entries: Array, arena: Rect2, scale_factor: float) -> void:
+	for raw_entry in entries:
+		var entry: Dictionary = raw_entry
+		CombatView.draw_muzzle_flash(self, DRIVE_VIEW, arena, scale_factor, Vector2(entry["pos"]), Vector2(entry["dir"]), float(entry["left"]), Color(entry["colour"]))
+
+func _draw_timed_expires(entries: Array, arena: Rect2, scale_factor: float) -> void:
+	for raw_entry in entries:
+		var entry: Dictionary = raw_entry
+		CombatView.draw_expire_flash(self, DRIVE_VIEW, arena, scale_factor, Vector2(entry["pos"]), float(entry["left"]), Color(entry["colour"]))
 
 ## 坦克绘制的唯一实现：试驾 / 对局 / 生存三页原本各有一份逐行同构的副本，
 ## 差异只在「每部件颜色」「填充透明度」「部件格偏移」「额外的格装饰」。
@@ -2003,7 +2112,9 @@ func _draw_drive() -> void:
 	_draw_drive_field()
 	_draw_drive_hull()
 	_draw_drive_conveyors()
+	_draw_timed_expires(_drive_expires, _drive_arena, _drive_scale())
 	_draw_drive_shots()
+	_draw_timed_muzzles(_drive_muzzles, _drive_arena, _drive_scale())
 	_draw_drive_shields()
 	_draw_drive_fx()
 	_draw_drive_hud()
@@ -2514,6 +2625,11 @@ var _survival_fx := FxLayer.new()
 ## 最近一次命中的世界坐标与剩余闪光时间：让“打中了”这件事在画面上无法被忽略。
 var _hit_flash_at := Vector2.ZERO
 var _hit_flash_left := 0.0
+## v3.23：炮口闪光与射程耗尽消散（多实例，与对局页同一套推进/绘制）。
+## 生存页一次有多个敌人开火，所以必须逐条存，不能只存最新一个；
+## 否则同一帧里第二个敌人的炮口会直接把第一个的抹掉。
+var _survival_muzzles: Array = []
+var _survival_expires: Array = []
 
 ## 改装页复用建造页的整套编辑器（网格 / 模块目录 / 工具 / 属性校验）。
 ## 两页只差模型来源：建造页用 `builder`，改装页用 `survival_builder`；
@@ -2792,6 +2908,28 @@ func _survival_step(step_time: float) -> void:
 			_survival_event = "整块脱落"
 		elif kind == "level_up_opened":
 			_survival_event = "升级：选择一项奖励"
+		elif kind == "muzzle":
+			## 炮口闪光。**所有敌人与玩家走同一条分支**：颜色按 tag 判，不按谁开火。
+			var muzzle_colour := Palette.ACCENT_CYAN if String(entry.get("tag", "")) == Duel.TAG_PLAYER else Palette.ACCENT_MAGENTA
+			_survival_muzzles.append({
+				"pos": Vector2(entry.get("pos", Vector2.ZERO)),
+				"dir": Vector2(entry.get("dir", Vector2.RIGHT)),
+				"colour": muzzle_colour,
+				"left": CombatView.MUZZLE_FLASH_TIME,
+			})
+			## 同侧限流：生存页一次可能有好几个敌人同时开火，不限制会堆成一片。
+			while _survival_muzzles.size() > CombatView.DAMAGE_POPUP_PER_SIDE:
+				_survival_muzzles.remove_at(0)
+		elif kind == "expire":
+			## 射程耗尽消散。`shooter` 是发射方 tag（v3.23 新补的字段）。
+			var expire_colour := Palette.ACCENT_CYAN if String(entry.get("shooter", "")) == Duel.TAG_PLAYER else Palette.ACCENT_MAGENTA
+			_survival_expires.append({
+				"pos": Vector2(entry.get("pos", Vector2.ZERO)),
+				"colour": expire_colour,
+				"left": CombatView.EXPIRE_FLASH_TIME,
+			})
+			while _survival_expires.size() > CombatView.DAMAGE_POPUP_PER_SIDE:
+				_survival_expires.remove_at(0)
 	_survival_tick_fx(step_time)
 	if survival.stage != SurvivalRun.STAGE_BATTLE:
 		_survival_held.clear()
@@ -2814,11 +2952,13 @@ func _push_damage_popup(at: Vector2, amount: float, colour: Color, mode: String)
 	CombatView.push_damage(_survival_fx, at, amount, colour, mode)
 
 ## 动效倒计时在固定步长里累减，保持确定性（绝不放 `_process`，绝不用 `randf`）。
-## 命中闪光的倒计时是生存页独有的（不属于通用动效列表），因此留在这里。
+## 命中闪光、炮口闪光与消散都在固定步长里倒计时；后两者是多实例，走 `_advance_timed()`。
 func _survival_tick_fx(step_time: float) -> void:
 	if _hit_flash_left > 0.0:
 		_hit_flash_left = maxf(_hit_flash_left - step_time, 0.0)
 	_survival_fx.step(step_time)
+	_advance_timed(_survival_muzzles, step_time)
+	_advance_timed(_survival_expires, step_time)
 
 func _draw_survival() -> void:
 	if survival == null:
@@ -2857,7 +2997,10 @@ func _draw_survival_arena() -> void:
 	for raw_tag in duel.alive_tags():
 		_draw_survival_hull(String(raw_tag), scale_factor)
 	CombatView.draw_fx(self, DRIVE_VIEW, duel.arena, scale_factor, _survival_fx.entries, CombatView.FX_STYLE_SURVIVAL)
+	## 消散画在弹道之下（与对局页同一层级）；炮口闪光画在弹道之上。
+	_draw_timed_expires(_survival_expires, duel.arena, scale_factor)
 	CombatView.draw_shots(self, DRIVE_VIEW, duel.arena, scale_factor, duel.field.shots, Duel.TAG_PLAYER)
+	_draw_timed_muzzles(_survival_muzzles, duel.arena, scale_factor)
 	## 命中闪光画在炮弹之上，确保不会被格线淹掉。
 	CombatView.draw_hit_flash(self, DRIVE_VIEW, duel.arena, scale_factor, _hit_flash_at, _hit_flash_left)
 	## 伤害数字画在最后：必须盖在炮弹、命中闪光与所有地形之上。

@@ -110,6 +110,9 @@ func validate_ammo_catalog(path: String, data: Variant) -> PackedStringArray:
 			ids[item_id] = true
 		_require_positive_number_at(path, item_path + ".base_damage", item, "base_damage", errors)
 		_require_positive_number_at(path, item_path + ".speed_px_s", item, "speed_px_s", errors)
+		## v3.23：射程从「全局单值」改为**口径属性**——每种口径必须有自己明确的默认射程，
+		## 漏写就会退化成全局值，而那正是要废除的耦合，所以这里强制必填。
+		_require_positive_number_at(path, item_path + ".range_px", item, "range_px", errors)
 		_require_positive_int_at(path, item_path + ".slot", item, "slot", errors)
 		_require_positive_number_at(path, item_path + ".radius_px", item, "radius_px", errors)
 		_require_number_range_at(path, item_path + ".processing_factor", item, "processing_factor", 0.1, 10.0, errors)
