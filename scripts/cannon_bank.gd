@@ -9,7 +9,9 @@ const TankBody := preload("res://scripts/tank_body.gd")
 
 var definitions: ModuleDefs
 var body: TankBody
-## 每门炮：{part_index, module_id, cell, caliber, reload_s, recoil_px, loaded, reload_remaining, shots_fired}
+## 每门炮：{part_index, module_id, cell, caliber, reload_s, recoil_px, loaded, reload_remaining, shots_fired, upgrades}
+## `upgrades` 是**已上膛那一发携带的升级载荷**（v3.24）。炮管只是搬运工：
+## 载荷由弹药网络在装填时交来，开火时随发射事件交给 `Duel.fire()`。
 var cannons: Array[Dictionary] = []
 
 func setup(module_defs: ModuleDefs, tank: TankBody) -> bool:
@@ -47,12 +49,14 @@ func reload_from_body() -> void:
 			"loaded": false,
 			"reload_remaining": 0.0,
 			"shots_fired": 0,
+			"upgrades": [],
 		}
 		for old in previous:
 			if String(old["module_id"]) == module_id and Vector2i(old["cell"]) == Vector2i(snapshot["cell"]):
 				snapshot["loaded"] = bool(old["loaded"])
 				snapshot["reload_remaining"] = float(old["reload_remaining"])
 				snapshot["shots_fired"] = int(old["shots_fired"])
+				snapshot["upgrades"] = (old.get("upgrades", []) as Array).duplicate()
 				break
 		cannons.append(snapshot)
 
@@ -69,13 +73,15 @@ func step(dt: float) -> void:
 			cannon["reload_remaining"] = remaining
 
 ## 直接装填一发（弹药网络落地前由 demo 代替供给）。
-func load_round(index: int) -> bool:
+## `upgrades` 是这一发从改进装置那里攒到的升级载荷；由 `AmmoNetwork.fill_cannons()` 传入。
+func load_round(index: int, upgrades: Array = []) -> bool:
 	if index < 0 or index >= cannons.size():
 		return false
 	var cannon: Dictionary = cannons[index]
 	if bool(cannon["loaded"]) or float(cannon["reload_remaining"]) > 0.0:
 		return false
 	cannon["loaded"] = true
+	cannon["upgrades"] = (upgrades as Array).duplicate()
 	return true
 
 func load_all() -> int:
@@ -127,7 +133,9 @@ func _fire_one(index: int, cannon: Dictionary, ammo_id: String) -> Dictionary:
 		return {}
 	var dir := muzzle_dir(cannon)
 	var origin := muzzle_origin(cannon)
+	var payload: Array = (cannon.get("upgrades", []) as Array).duplicate()
 	cannon["loaded"] = false
+	cannon["upgrades"] = []
 	cannon["reload_remaining"] = float(cannon["reload_s"])
 	cannon["shots_fired"] = int(cannon["shots_fired"]) + 1
 	return {
@@ -135,6 +143,7 @@ func _fire_one(index: int, cannon: Dictionary, ammo_id: String) -> Dictionary:
 		"origin": origin,
 		"dir": dir,
 		"ammo_id": ammo_id,
+		"upgrades": payload,
 		"recoil_px": float(cannon["recoil_px"]),
 		"world_r": origin - body.position,
 	}

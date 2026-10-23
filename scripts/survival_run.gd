@@ -56,6 +56,10 @@ var level_choices: Array = []
 var shop_slots: Array = []
 var shop_rerolls: int = 0
 var collected_upgrades: Array[String] = []
+## v3.24：上一次领奖的反馈文本（页面层直接显示）。升级现在是**实体**：
+## 领到就立即装进某件改进装置的空槽；装不下才暂存到 `collected_upgrades`，
+## 并在 UI 里明确说“没有空槽，已暂存”，绝不静默生效。
+var upgrade_note: String = ""
 ## 还没发出去的升级次数：`_add_xp` 每升一级 +1，`take_level_choice` 领取一份 -1。
 ## 这是升级菜单的唯一触发依据（不能靠重算剩余经验——等级已经被抬完了）。
 var pending_level_ups: int = 0
@@ -766,11 +770,12 @@ func take_level_choice(index: int) -> bool:
 		CHOICE_MASS_CAP:
 			if builder != null:
 				builder.mass_cap_level += 1
+			upgrade_note = "质量上限 +1 级"
 		CHOICE_UPGRADE:
-			## 改进升级即刻生效：记进 run 的升级池，改装时按池子注入。
-			collected_upgrades.append(String(entry["id"]))
+			upgrade_note = _install_upgrade(String(entry["id"]))
 		_:
 			inventory.append(String(entry["id"]))
+			upgrade_note = "配件已进库存"
 	level_choices.clear()
 	## 每领一份就消耗一次待处理升级；还有剩余就继续三选一，否则进商店。
 	pending_level_ups = maxi(pending_level_ups - 1, 0)
@@ -779,6 +784,62 @@ func take_level_choice(index: int) -> bool:
 	else:
 		_open_shop()
 	return true
+# ─── 升级落地（v3.24）──────────────────────────────────────────────────────
+
+## 把一张升级卡装进坦克上某个改进装置的空槽。返回给 UI 看的反馈文本。
+##
+## 设计约束（用户 2026-10-17 的原始需求）：升级是**实体模块上的槽配置**，
+## 不是抽象的整台增益。所以这里必须真的写进某件 `modifier_mk1/2/3` 的 `part["upgrades"]`，
+## 而且选择顺序是确定的：按 `module_parts` 数组顺序取第一件“还有空槽”的改进装置。
+##
+## 没有可用槽位时**不得凭空生效**：升级 id 进 `collected_upgrades` 暂存，
+## 等玩家在改装页装了改进器后再用；同时返回明确文案，让玩家知道没装上。
+func _install_upgrade(upgrade_id: String) -> String:
+	if builder == null or definitions == null:
+		collected_upgrades.append(upgrade_id)
+		return "没有可用的改进装置，升级已暂存（%s）" % upgrade_id
+	for part in builder.module_parts:
+		var def: Dictionary = definitions.get_module(String(part.get("id", "")))
+		if not def.has("upgrade_slots"):
+			continue
+		var slots := maxi(int(def.get("upgrade_slots", 1)), 1)
+		var current: Array = (part.get("upgrades", []) as Array).duplicate()
+		if current.size() >= slots:
+			continue
+		current.append(upgrade_id)
+		part["upgrades"] = current
+		return "已装入 %s（%d/%d）" % [String(def.get("name", part["id"])), current.size(), slots]
+	collected_upgrades.append(upgrade_id)
+	return "没有空槽的改进装置，升级已暂存（%s）" % upgrade_id
+
+## 把暂存池里的升级尽量装进现有改进装置。改装页进出时调一次。
+## 返回实际装上的数量；装不下的仍留在池里。
+##
+## 实现注意：`_install_upgrade()` 在装不下时**会自己 append 到 `collected_upgrades`**，
+## 所以不能边遍历边让它写回同一个数组（会把失败项重复压入）。这里先清空、再逐条试。
+func flush_collected_upgrades() -> int:
+	if collected_upgrades.is_empty():
+		return 0
+	var pending: Array[String] = collected_upgrades.duplicate()
+	collected_upgrades.clear()
+	var installed := 0
+	for upgrade_id in pending:
+		var before := collected_upgrades.size()
+		_install_upgrade(upgrade_id)
+		if collected_upgrades.size() == before:
+			installed += 1
+	return installed
+
+## 只读：本车当前装上的升级（按改进装置槽逐条展开），供 HUD / 改装页展示。
+func installed_upgrades() -> Array:
+	var result: Array = []
+	if builder == null:
+		return result
+	for part in builder.module_parts:
+		for raw in (part.get("upgrades", []) as Array):
+			result.append(String(raw))
+	return result
+
 # ─── 商店（design §3.4.3）─────────────────────────────────────────────────────
 
 func _open_shop() -> void:
@@ -886,6 +947,9 @@ func enter_modification() -> bool:
 	## 所以这里必须自己取基线，不能指望 credits_total 兜底。
 	modify_credit_baseline = builder.credits_spent()
 	stage = STAGE_MODIFY
+	## v3.24：进入改装就先把暂存池里能装的升级尽量装进现有改进装置。
+	## 玩家刚刚可能在这一页之前买了/装了一台改进器，那时才有空槽。
+	flush_collected_upgrades()
 	return true
 
 ## 本次改装到目前为止的支出：按**净增**建造支出算。
@@ -1039,6 +1103,7 @@ func close_run() -> void:
 	level = 1
 	inventory.clear()
 	collected_upgrades.clear()
+	upgrade_note = ""
 	level_choices.clear()
 	pending_level_ups = 0
 	modify_return_stage = ""

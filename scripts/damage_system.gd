@@ -38,8 +38,6 @@ var _sequence: int = 0
 
 var _slow_remaining: float = 0.0
 var _slow_power: float = 1.0
-## part_key → Array[String]，供测试直接注入改进装置的升级列表。
-var _modifier_upgrades: Dictionary = {}
 
 var _damage_floor: float = 0.15
 var _pierce_cap: float = 0.8
@@ -134,7 +132,6 @@ func reset() -> void:
 	_burn.clear()
 	_repair_clock.clear()
 	_pending.clear()
-	_modifier_upgrades.clear()
 	defeated = false
 	_slow_remaining = 0.0
 	_slow_power = 1.0
@@ -239,49 +236,16 @@ func statuses() -> Array:
 		})
 	return result
 
-## 整台聚合的改进升级列表（design §7.1 的简化为「整台聚合」，见 design §8.9）。
-func cannon_upgrades(tank: TankBody) -> Array[String]:
-	var result: Array[String] = []
-	if tank == null or definitions == null:
-		return result
-	for part in tank.parts:
-		var def := definitions.get_module(String(part["module_id"]))
-		if not def.has("upgrade_slots"):
-			continue
-		var key := String(part.get("key", ""))
-		var payload: Array = []
-		if _modifier_upgrades.has(key):
-			payload = _modifier_upgrades[key]
-		elif part.has("upgrades"):
-			payload = part["upgrades"]
-		for raw in payload:
-			var upgrade_id := String(raw)
-			if not result.has(upgrade_id):
-				result.append(upgrade_id)
-	return result
-
-## 把坦克上改进装置自带的 upgrades 收进聚合表；测试也可先注入再调用。
-func set_modifier_upgrades(tank: TankBody) -> void:
-	_modifier_upgrades.clear()
-	if tank == null:
-		return
-	for part in tank.parts:
-		var def := definitions.get_module(String(part["module_id"]))
-		if not def.has("upgrade_slots"):
-			continue
-		if not part.has("upgrades"):
-			continue
-		var payload: Array = []
-		for raw in part["upgrades"]:
-			payload.append(String(raw))
-		_modifier_upgrades[String(part.get("key", ""))] = payload
-
-## 供测试或建造期 UI 直接指定某个改进装置的升级列表。
-func inject_upgrades(part_key_value: String, upgrades: Array) -> void:
-	var payload: Array = []
-	for raw in upgrades:
-		payload.append(String(raw))
-	_modifier_upgrades[part_key_value] = payload
+## ===== 升级载荷：v3.24 起**不在这一层聚合** =====
+##
+## 旧实现 `cannon_upgrades()` 把整台坦克上所有改进装置的槽配置并成一个列表，开火时
+## 统一塞给每一发炮弹。那是「整台一个升级池」的简化，与 design §7.1「弹药实例携带自己的
+## 升级列表」以及「流经改进器才被染色」的规则相矛盾 —— 一台坦克两门炮走两条不同的
+## 流水线时，两门炮打出去的炮弹会拿到同一套升级。
+##
+## 现在载荷由 `ammo_network` 逐发携带：改进器加工时写入 → 管路搬运 → `fill_cannons()`
+## 交给 `CannonBank` → `Duel.fire()` 从 `shot["upgrades"]` 取出 → `field.spawn()`。
+## 本文件只负责**消费** `apply_hit(..., upgrades, ...)` 收到的那个数组。
 
 ## 由 main 在收到 projectile impact 时调用。damage_scale 供 up_split 的子弹丸按比例结算。
 func apply_hit(tank: TankBody, cell: Vector2i, part_index: int, ammo_id: String, upgrades: Array, dir: Vector2, damage_scale: float = 1.0) -> Dictionary:
@@ -294,6 +258,8 @@ func apply_hit(tank: TankBody, cell: Vector2i, part_index: int, ammo_id: String,
 	if base <= 0.0:
 		return result
 	var profile := _upgrade_profile(upgrades)
+	## 子弹丸要继承母弹的升级载荷，所以把它带进 profile —— 否则分裂出来的弹丸是白板。
+	profile["source_upgrades"] = (upgrades as Array).duplicate()
 	profile["damage_scale"] = maxf(damage_scale, 0.0)
 	var raw := base * (1.0 + float(profile["damage_mult"])) * maxf(damage_scale, 0.0)
 	if float(profile["delay"]) > 0.0:
@@ -393,6 +359,7 @@ func _strike(tank: TankBody, cell: Vector2i, raw: float, profile: Dictionary, am
 			"count": int(profile["split"]),
 			"scale": float(profile["split_scale"]),
 			"ammo_id": ammo_id,
+			"upgrades": (profile.get("source_upgrades", []) as Array).duplicate(),
 			"pos": tank.world_position_of_cell(cell),
 			"dir": dir,
 			"damage_scale": float(profile["damage_scale"]),

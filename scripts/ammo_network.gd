@@ -7,6 +7,18 @@ extends RefCounted
 ## 端口几何不在 data 里：data/modules/systems.json 的 ports 只有端口 id 字符串，
 ## 缺 kind/side/cell。方向一律由 _port_specs() 按模块 id + rot 推导，
 ## 具体格由 _port_cell() 按该侧在部件占位里的极值格算（design §7.8）。
+##
+## **v3.24 弹药携带升级载荷**：一发弹药不再只是 `ammo_id` 字符串，它还可以携带一个
+## `upgrades` 数组（升级 id 列表）。改进装置逐个加工流经的弹药时，把**自己槽里配置的
+## 升级**追加到这笔载荷上，于是「改进器 → 炮管」这条流水线真的改变了打出去的炮弹。
+## 为什么必须这么做：在此之前 `ammo_id` 进出改进器完全相同，升级信息在物理上**无处存放**，
+## 只能靠「整台坦克的抽象升级列表」凑，而那与实际流水线是脱节的。
+## 载荷只在弹药对象上流转，一旦装膛就随炮弹一起被 `take_loaded_upgrades()` 取走。
+## 不绘制、不读输入，可由无头脚本直接驱动。
+##
+## 端口几何不在 data 里：data/modules/systems.json 的 ports 只有端口 id 字符串，
+## 缺 kind/side/cell。方向一律由 _port_specs() 按模块 id + rot 推导，
+## 具体格由 _port_cell() 按该侧在部件占位里的极值格算（design §7.8）。
 
 const ModuleDefs := preload("res://scripts/module_defs.gd")
 
@@ -94,7 +106,8 @@ func rebuild(source: Object) -> void:
 		if cells.is_empty():
 			continue
 		var role := _role_of(module_id, def)
-		parts.append(_make_part(parts.size(), module_id, def, role, int(entry["rot"]), cells))
+		## 把该件在建造期配置的升级带进网络（只有改进器会真的用到）。
+		parts.append(_make_part(parts.size(), module_id, def, role, int(entry["rot"]), cells, entry.get("upgrades", [])))
 	_build_nodes()
 	_build_links()
 	_compute_levels()
@@ -166,6 +179,7 @@ func strand_positions() -> Array:
 			"cells": part["cells"],
 			"progress": float(r["progress"]),
 			"ammo_id": String(r["ammo_id"]),
+			"upgrades": (r.get("upgrades", []) as Array).duplicate(),
 			"forward": bool(r["forward"]),
 			"congested": float(r["progress"]) >= 1.0 and not _downstream_open(part_index, String(r["ammo_id"])),
 		})
@@ -211,6 +225,7 @@ func cannon_states() -> Array:
 			"loaded": bool(state["loaded"]),
 			"queued": bool(state["queued"]),
 			"reload_remaining": float(state["reload_remaining"]),
+			"loaded_upgrades": (state.get("loaded_upgrades", []) as Array).duplicate(),
 			"delivered": int(state.get("delivered", 0)),
 		})
 	return result
@@ -245,6 +260,7 @@ func module_states() -> Array:
 			"detail": "",
 			"loaded": false,
 			"queued": false,
+			"upgrades": (part["upgrades"] as Array).duplicate(),
 		}
 		match role:
 			ROLE_FACTORY:
@@ -258,10 +274,10 @@ func module_states() -> Array:
 				entry["ratio"] = clampf(float(stored.size()) / float(capacity), 0.0, 1.0)
 				entry["detail"] = "%d/%d" % [stored.size(), capacity]
 			ROLE_MODIFIER:
-				var work := String(state["work"])
+				var work: Dictionary = state["work"]
 				var pending := (state["queue"] as Array).size() + (state["output"] as Array).size()
 				if not work.is_empty():
-					var work_total := maxf(float(part["processing_time_s"]) * _processing_factor(work), 0.001)
+					var work_total := maxf(float(part["processing_time_s"]) * _processing_factor(String(work["ammo_id"])), 0.001)
 					entry["ratio"] = clampf(1.0 - float(state["work_remaining"]) / work_total, 0.0, 1.0)
 					pending += 1
 				entry["detail"] = "%d" % pending
@@ -288,6 +304,56 @@ func drain_events() -> Array:
 	var result: Array = events.duplicate(true)
 	events.clear()
 	return result
+
+## 给某个改进装置设「槽里配了哪些升级」。校验：id 必须存在、数量不超过槽数、
+## 同一 effect 的层数不超过该升级的 stack_limit（design §6.4 / §14）。
+##
+## 返回 false 表示参数非法（id 不存在或超出槽数），此时**不改动**原有配置。
+func configure_modifier(part_index: int, upgrades: Array) -> bool:
+	if part_index < 0 or part_index >= parts.size():
+		return false
+	var part: Dictionary = parts[part_index]
+	if String(part["role"]) != ROLE_MODIFIER:
+		return false
+	var slots := int(part["upgrade_slots"])
+	if upgrades.size() > slots:
+		return false
+	var accepted: Array = []
+	var per_effect: Dictionary = {}
+	for raw in upgrades:
+		var upgrade_id := String(raw)
+		## `ModuleDefs` 没有 `get_upgrade()` —— 升级表在 `registry` 上（`data_registry.gd`）。
+		## 这里一度写成 `definitions.get_upgrade(...)`，运行期直接报 "Nonexistent function"。
+		var def: Dictionary = definitions.registry.get_upgrade(upgrade_id) if (definitions != null and definitions.registry != null) else {}
+		if def.is_empty():
+			return false
+		var effect := String(def.get("effect", upgrade_id))
+		var limit := maxi(int(def.get("stack_limit", 1)), 1)
+		var used := int(per_effect.get(effect, 0))
+		if used >= limit:
+			continue
+		per_effect[effect] = used + 1
+		accepted.append(upgrade_id)
+	part["upgrades"] = accepted
+	return true
+
+## 只读：这件改进装置当前配置的升级 id 列表（UI 与测试用）。
+func modifier_slots(part_index: int) -> Array:
+	if part_index < 0 or part_index >= parts.size():
+		return []
+	var part: Dictionary = parts[part_index]
+	if String(part["role"]) != ROLE_MODIFIER:
+		return []
+	return (part["upgrades"] as Array).duplicate()
+
+## 只读：某门炮「已上膛那一发」携带的升级载荷。
+func loaded_upgrades(part_index: int) -> Array:
+	if part_index < 0 or part_index >= parts.size():
+		return []
+	var part: Dictionary = parts[part_index]
+	if String(part["role"]) != ROLE_CANNON:
+		return []
+	return ((part["state"] as Dictionary).get("loaded_upgrades", []) as Array).duplicate()
 
 # ─── 对外：与 CannonBank 的接缝 ───────────────────────────────────────────────
 
@@ -328,9 +394,12 @@ func fill_cannons(bank) -> int:
 			continue
 		if bool(state["loaded"]) or float(state["reload_remaining"]) > 0.0:
 			continue
-		if bank.load_round(index):
+		var payload: Array = (state.get("queued_upgrades", []) as Array).duplicate()
+		if bank.load_round(index, payload):
 			state["queued"] = false
+			state["queued_upgrades"] = []
 			state["loaded"] = true
+			state["loaded_upgrades"] = payload
 			loaded += 1
 	return loaded
 
@@ -345,6 +414,7 @@ func release_cannon(part_index: int) -> bool:
 	if not bool(state["loaded"]):
 		return false
 	state["loaded"] = false
+	state["loaded_upgrades"] = []
 	state["reload_remaining"] = float(part["reload_s"])
 	state["fired"] = int(state.get("fired", 0)) + 1
 	return true
@@ -372,10 +442,13 @@ func _collect_parts(source: Object) -> Array:
 	if source.has_method("part_cells"):
 		for item in (source.module_parts as Array):
 			var part: Dictionary = item
+			## `upgrades` 是**这个改进器槽里配置的升级 id 列表**（v3.24）。
+			## 只有改进器会带它；其它模块的 part 里根本没有这个键，所以这里用 `get` 取空数组。
 			result.append({
 				"module_id": String(part.get("id", "")),
 				"rot": int(part.get("rot", 0)),
 				"cells": source.part_cells(part),
+				"upgrades": (part.get("upgrades", []) as Array).duplicate(),
 			})
 		return result
 	for item in (source.parts as Array):
@@ -386,11 +459,13 @@ func _collect_parts(source: Object) -> Array:
 			"module_id": String(part.get("module_id", "")),
 			"rot": int(part.get("rot", 0)),
 			"cells": part.get("cells", []),
+			"upgrades": (part.get("upgrades", []) as Array).duplicate(),
 		})
 	return result
 
 ## 角色判据用各模块的专属字段，绝不用 caliber 或 ports（二者在多个角色上重叠）。
-func _role_of(module_id: String, def: Dictionary) -> String:
+## 静态：页面层画端口箭头时要走**同一条**判据，不能自己再写一份会漂移的副本。
+static func _role_of(module_id: String, def: Dictionary) -> String:
 	if module_id.begins_with("conveyor_"):
 		return ROLE_CONVEYOR
 	if def.has("craft_time_s"):
@@ -403,7 +478,7 @@ func _role_of(module_id: String, def: Dictionary) -> String:
 		return ROLE_CANNON
 	return ROLE_OTHER
 
-func _make_part(index: int, module_id: String, def: Dictionary, role: String, rot: int, cells: Array) -> Dictionary:
+func _make_part(index: int, module_id: String, def: Dictionary, role: String, rot: int, cells: Array, configured_upgrades: Array = []) -> Dictionary:
 	var state: Dictionary = {}
 	match role:
 		ROLE_FACTORY:
@@ -411,9 +486,12 @@ func _make_part(index: int, module_id: String, def: Dictionary, role: String, ro
 		ROLE_DEPOT:
 			state = {"stored": [], "blocked": {}}
 		ROLE_MODIFIER:
-			state = {"queue": [], "work": "", "work_remaining": 0.0, "output": [], "blocked": {}}
+			state = {"queue": [], "work": {}, "work_remaining": 0.0, "output": [], "blocked": {}}
 		ROLE_CANNON:
-			state = {"loaded": false, "queued": false, "reload_remaining": 0.0}
+			state = {"loaded": false, "queued": false, "reload_remaining": 0.0, "queued_upgrades": [], "loaded_upgrades": []}
+	## `upgrades` 是改进装置**槽里配置的升级 id 列表**，只有 ROLE_MODIFIER 会带，其它角色恒为空。
+	## 为什么挂在 part 而不在 state 里：它是**建造期配置**（改装页设的），不随模拟状态变化；
+	## 而 `state` 是运行期可变状态，混在一起会让 undo/蓝图序列化多出无意义字段。
 	return {
 		"index": index,
 		"module_id": module_id,
@@ -432,11 +510,12 @@ func _make_part(index: int, module_id: String, def: Dictionary, role: String, ro
 		"processing_time_s": float(def.get("processing_time_s", 0.5)),
 		"reload_s": float(def.get("reload_s", 0.0)),
 		"bank_index": -1,
+		"upgrades": (configured_upgrades as Array).duplicate(),
 	}
 
 ## 端口只推导出「朝向」，具体落在哪一格由 _port_cell() 从部件占位反推。
 ## 这样 1/2 弧（占 2 格）和 2 格炮管的端口位置都不需要写死格序。
-func _port_specs(module_id: String, role: String, rot: int) -> Array:
+static func _port_specs(module_id: String, role: String, rot: int) -> Array:
 	var specs: Array = []
 	if role == ROLE_CONVEYOR:
 		for entry in (CONVEYOR_PORTS.get(module_id, []) as Array):
@@ -455,8 +534,21 @@ func _port_specs(module_id: String, role: String, rot: int) -> Array:
 		specs.append({"id": "in0", "kind": "in", "side": _side_name(_rotate_vec(Vector2i(-1, 0), rot))})
 	return specs
 
+## 页面层（建造/改装 UI）画端口箭头的唯一入口。
+##
+## 它把 `_role_of()` + `_port_specs()` 包成一次调用，**保证 UI 与仿真看到的是同一套端口**。
+## 之前 UI 里没有任何端口指示，玩家看不出弹药从哪进、往哪出；若页面层自己再判一次角色，
+## 那么一旦判据变化（比如新增一种带端口的模块），箭头就会与真实连线对不上。
+##
+## 返回每项 `{id, kind: "in"|"out", side: "N"|"E"|"S"|"W"}`，已按 rot 旋转。
+static func ui_ports(module_id: String, def: Dictionary, rot: int) -> Array:
+	if def.is_empty():
+		return []
+	return _port_specs(module_id, _role_of(module_id, def), rot)
+
 ## 该侧最外沿的占位格：E 取 x 最大、W 取 x 最小、S 取 y 最大、N 取 y 最小；同值取小坐标保确定性。
-func _port_cell(cells: Array, side: String) -> Vector2i:
+## 静态：页面层画端口箭头时要用同一条取格规则，否则箭头会落在别的格上。
+static func _port_cell(cells: Array, side: String) -> Vector2i:
 	var best := Vector2i(cells[0])
 	for raw in cells:
 		var cell := Vector2i(raw)
@@ -749,8 +841,11 @@ func _apply_module_requests(requests: Array) -> void:
 		var r: Dictionary = _rounds[uid]
 		var target := int(request["target"])
 		var ammo_id := String(r["ammo_id"])
+		## v3.24：弹药在途携带的升级载荷必须随它一起被接收，否则
+		## 「改进器 → 炮管」这一段会把载荷丢在半路。
+		var upgrades: Array = (r.get("upgrades", []) as Array).duplicate()
 		if String(request["kind"]) == "origin":
-			if not _accept(target, ammo_id):
+			if not _accept(target, ammo_id, upgrades):
 				## 源暂时装不下（例如缓存满）：本 tick 不处理，下 tick 重试，绝不丢弃。
 				continue
 			## 退回源头成功：记录该源不再向这条链投放同口径弹药，避免退回—重发的活锁。
@@ -760,7 +855,7 @@ func _apply_module_requests(requests: Array) -> void:
 			_rounds.erase(uid)
 			_push_event("returned", r, target)
 			continue
-		if not _accept(target, ammo_id):
+		if not _accept(target, ammo_id, upgrades):
 			continue
 		var tee := int(request.get("tee", -1))
 		if tee >= 0:
@@ -781,25 +876,31 @@ func _module_emit(index: int) -> void:
 		if (buffer as Array).size() < int(part["buffer_slots"]):
 			state["craft"] = float(state["craft"]) - tick_dt()
 			if float(state["craft"]) <= 0.0:
-				buffer.append(String(part["caliber"]))
+				buffer.append(_make_round(String(part["caliber"])))
 				state["craft"] = float(part["craft_time_s"])
 		if not buffer.is_empty():
-			if _emit_from(index, String(buffer[0])):
+			var made: Dictionary = buffer[0]
+			if _emit_from(index, String(made["ammo_id"]), made.get("upgrades", [])):
 				buffer.pop_front()
 		return
 	if role == ROLE_DEPOT:
 		var stored: Array = state["stored"]
 		if not stored.is_empty():
-			if _emit_from(index, String(stored[0])):
+			var held: Dictionary = stored[0]
+			if _emit_from(index, String(held["ammo_id"]), held.get("upgrades", [])):
 				stored.pop_front()
 		return
 	if role == ROLE_MODIFIER:
 		var output: Array = state["output"]
 		if not output.is_empty():
-			if _emit_from(index, String(output[0])):
+			## output 里存的是**弹药对象**（`{ammo_id, upgrades}`），不再是纯字符串 ——
+			## 否则改进器加工后的升级载荷在投放到管路时就会丢掉。
+			var head: Dictionary = output[0]
+			if _emit_from(index, String(head["ammo_id"]), head.get("upgrades", [])):
 				output.pop_front()
 
-func _emit_from(part_index: int, ammo_id: String) -> bool:
+## `upgrades` 是这笔弹药已经携带的升级载荷；从工厂/仓库发起时为空数组。
+func _emit_from(part_index: int, ammo_id: String, upgrades: Array = []) -> bool:
 	var part: Dictionary = parts[part_index]
 	var outs: Array = part["node_out"]
 	if outs.is_empty():
@@ -814,11 +915,11 @@ func _emit_from(part_index: int, ammo_id: String) -> bool:
 	if _probe(target, ammo_id) != "ok":
 		return false
 	if String(parts[target]["role"]) == ROLE_CONVEYOR:
-		_spawn_round(ammo_id, part_index, target, String(outs[0]))
+		_spawn_round(ammo_id, part_index, target, String(outs[0]), upgrades)
 		return true
-	if not _accept(target, ammo_id):
+	if not _accept(target, ammo_id, upgrades):
 		return false
-	_push_event(_delivery_kind(String(parts[target]["role"])), {"uid": 0, "ammo_id": ammo_id, "part": part_index}, target)
+	_push_event(_delivery_kind(String(parts[target]["role"])), {"uid": 0, "ammo_id": ammo_id, "part": part_index, "upgrades": upgrades}, target)
 	return true
 
 ## 投递事件的种类由目标角色决定：只有炮管是 delivered，弹药库是 stored。
@@ -837,15 +938,21 @@ func _module_advance(index: int, dt: float) -> void:
 	var state: Dictionary = part["state"]
 	if role == ROLE_MODIFIER:
 		var queue: Array = state["queue"]
-		if String(state["work"]).is_empty() and not queue.is_empty():
-			var next := String(queue.pop_front())
+		var work: Dictionary = state["work"]
+		if work.is_empty() and not queue.is_empty():
+			var next: Dictionary = queue.pop_front()
 			state["work"] = next
-			state["work_remaining"] = float(part["processing_time_s"]) * _processing_factor(next)
-		if not String(state["work"]).is_empty():
+			state["work_remaining"] = float(part["processing_time_s"]) * _processing_factor(String(next["ammo_id"]))
+			work = next
+		if not work.is_empty():
 			state["work_remaining"] = float(state["work_remaining"]) - dt
 			if float(state["work_remaining"]) <= 0.0:
-				(state["output"] as Array).append(String(state["work"]))
-				state["work"] = ""
+				## 加工完成：把这件改进器**槽里配置的升级**追加进这笔载荷（v3.24）。
+				## 这里不去重 —— 同一升级可以占多个槽来叠层，最终由 `_upgrade_profile()` 按 stack_limit 封顶。
+				var payload: Array = (work.get("upgrades", []) as Array).duplicate()
+				payload.append_array((part["upgrades"] as Array).duplicate())
+				(state["output"] as Array).append({"ammo_id": String(work["ammo_id"]), "upgrades": payload})
+				state["work"] = {}
 				state["work_remaining"] = 0.0
 		return
 	if role == ROLE_CANNON:
@@ -856,6 +963,8 @@ func _module_advance(index: int, dt: float) -> void:
 			## 无 CannonBank 的测试路径：冷却结束即自行入膛，不依赖外部装填器。
 			state["queued"] = false
 			state["loaded"] = true
+			state["loaded_upgrades"] = (state.get("queued_upgrades", []) as Array).duplicate()
+			state["queued_upgrades"] = []
 
 # ─── 内部：接收判定 ───────────────────────────────────────────────────────────
 
@@ -880,7 +989,7 @@ func _probe(target: int, ammo_id: String) -> String:
 		return "ok" if _factory_has_room(part) else "full"
 	return "reject"
 
-func _accept(target: int, ammo_id: String) -> bool:
+func _accept(target: int, ammo_id: String, upgrades: Array = []) -> bool:
 	var part: Dictionary = parts[target]
 	var role := String(part["role"])
 	var state: Dictionary = part["state"]
@@ -890,23 +999,25 @@ func _accept(target: int, ammo_id: String) -> bool:
 		if bool(state["loaded"]) or bool(state["queued"]) or float(state["reload_remaining"]) > 0.0:
 			return false
 		## 只登记「待装填」；真正入膛由 fill_cannons() 调 CannonBank.load_round() 完成。
+		## 载荷随「待装填」一起暂存，装填那一刻交给炮管组（v3.24）。
 		state["queued"] = true
+		state["queued_upgrades"] = (upgrades as Array).duplicate()
 		state["delivered"] = int(state.get("delivered", 0)) + 1
 		return true
 	if role == ROLE_DEPOT:
 		if not _depot_has_room(part, ammo_id):
 			return false
-		(state["stored"] as Array).append(ammo_id)
+		(state["stored"] as Array).append(_make_round(ammo_id, upgrades))
 		return true
 	if role == ROLE_MODIFIER:
 		if not _modifier_has_room(part):
 			return false
-		(state["queue"] as Array).append(ammo_id)
+		(state["queue"] as Array).append(_make_round(ammo_id, upgrades))
 		return true
 	if role == ROLE_FACTORY:
 		if not _factory_has_room(part):
 			return false
-		(state["buffer"] as Array).append(ammo_id)
+		(state["buffer"] as Array).append(_make_round(ammo_id, upgrades))
 		return true
 	return false
 
@@ -920,13 +1031,13 @@ func _depot_has_room(part: Dictionary, ammo_id: String) -> bool:
 		return false
 	var used := _slot_of(ammo_id)
 	for item in (part["state"]["stored"] as Array):
-		used += _slot_of(String(item))
+		used += _slot_of(_ammo_of(item))
 	return used <= capacity
 
 func _modifier_has_room(part: Dictionary) -> bool:
 	var state: Dictionary = part["state"]
 	var total := (state["queue"] as Array).size() + (state["output"] as Array).size()
-	if not String(state["work"]).is_empty():
+	if not (state["work"] as Dictionary).is_empty():
 		total += 1
 	return total < int(part["upgrade_slots"]) + 1
 
@@ -957,9 +1068,20 @@ func _caliber_of(ammo_id: String) -> String:
 		return ammo_id
 	return String(ammo.get("caliber", ammo_id))
 
+## 网络内部统一用 `{ammo_id, upgrades}` 表示一发弹药（v3.24）。
+## 工厂新造出来的弹药没有载荷；仓库/改进器/管路里流转的都是这个形状。
+static func _make_round(ammo_id: String, upgrades: Array = []) -> Dictionary:
+	return {"ammo_id": ammo_id, "upgrades": (upgrades as Array).duplicate()}
+
+## 兼容取法：条目可能是弹药对象，也可能是旧式纯字符串。
+static func _ammo_of(entry: Variant) -> String:
+	if entry is Dictionary:
+		return String((entry as Dictionary).get("ammo_id", ""))
+	return String(entry)
+
 # ─── 内部：在途弹药 ───────────────────────────────────────────────────────────
 
-func _spawn_round(ammo_id: String, origin_part: int, target: int, origin_port: String) -> int:
+func _spawn_round(ammo_id: String, origin_part: int, target: int, origin_port: String, upgrades: Array = []) -> int:
 	if _owner.has(target):
 		return 0
 	var uid := _next_uid
@@ -967,6 +1089,7 @@ func _spawn_round(ammo_id: String, origin_part: int, target: int, origin_port: S
 	_rounds[uid] = {
 		"uid": uid,
 		"ammo_id": ammo_id,
+		"upgrades": (upgrades as Array).duplicate(),
 		"part": target,
 		"progress": 0.0,
 		"forward": true,
@@ -1004,6 +1127,7 @@ func _snapshot_rounds() -> Array:
 		var part_index := int(r["part"])
 		result.append({
 			"ammo_id": String(r["ammo_id"]),
+			"upgrades": (r.get("upgrades", []) as Array).duplicate(),
 			"module_id": String(parts[part_index]["module_id"]),
 			"cell": Vector2i((parts[part_index]["cells"] as Array)[0]),
 			"progress": float(r["progress"]),
@@ -1019,13 +1143,14 @@ func _reattach_rounds(survivor: Array) -> void:
 		var saved: Dictionary = item
 		var part_index := _find_round_host(String(saved["module_id"]), Vector2i(saved["cell"]))
 		if part_index < 0 or _owner.has(part_index):
-			_orphans.append({"ammo_id": String(saved["ammo_id"]), "grace": 0.0})
+			_orphans.append({"ammo_id": String(saved["ammo_id"]), "upgrades": (saved.get("upgrades", []) as Array).duplicate(), "grace": 0.0})
 			continue
 		var uid := _next_uid
 		_next_uid += 1
 		_rounds[uid] = {
 			"uid": uid,
 			"ammo_id": String(saved["ammo_id"]),
+			"upgrades": (saved.get("upgrades", []) as Array).duplicate(),
 			"part": part_index,
 			"progress": float(saved["progress"]),
 			"forward": bool(saved["forward"]),

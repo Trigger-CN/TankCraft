@@ -5,6 +5,9 @@ extends RefCounted
 
 const ModuleDefs := preload("res://scripts/module_defs.gd")
 
+## 层名常量。`part_at()` 的 layer 参数只区分 mobility 与 module（platform 用 `platform_shape_at`）。
+const LAYER_MODULE := "module"
+
 var definitions: ModuleDefs
 var grid_size := Vector2i(24, 24)
 var platform_cells: Dictionary = {}
@@ -63,6 +66,11 @@ func _add_part_direct(parts: Array, module_id: String, start: Vector2i, rotation
 	var part := {"id": module_id, "start": start, "rot": posmod(rotation, 360)}
 	if module_id.begins_with("cannon_"):
 		part["aim"] = posmod(aim, 360)
+	## v3.24：改进装置自带「槽里配了哪些升级」。必须在**建造期**就存进 part，
+	## 否则 `AmmoNetwork._collect_parts()` 拿不到配置，流经的弹药也就无从被染色。
+	## 只给真带 `upgrade_slots` 的模块加这个键，其它模块的 part 保持原样。
+	if definitions != null and definitions.get_module(module_id).has("upgrade_slots"):
+		part["upgrades"] = []
 	parts.append(part)
 
 func place_module(module_id: String, start: Vector2i, rotation: int = 0, aim: int = 0) -> String:
@@ -73,6 +81,49 @@ func place_module(module_id: String, start: Vector2i, rotation: int = 0, aim: in
 	_add_part_direct(module_parts, module_id, start, rotation, aim)
 	_recalculate_spent()
 	return ""
+
+## v3.24：给某个改进装置设「槽里配了哪些升级」。`cell` 是它的任意占位格。
+## 校验走与 `AmmoNetwork.configure_modifier()` 同一套规则（id 存在、不超槽数、按 stack_limit 截断），
+## 因此建造期与运行期的判定不会漂移。成功返回空串，失败返回拒绝原因。
+##
+## 注意 `part_at()` 返回的是 `{index, part}` 包装，真正的 part 字典是 `["part"]`——
+## 改这个字典就是改 `module_parts` 里的那一件（Array 存的是引用）。
+func set_modifier_upgrades(cell: Vector2i, upgrades: Array) -> String:
+	var hit := part_at(LAYER_MODULE, cell)
+	if hit.is_empty():
+		return "拒绝：该格没有功能模块。"
+	var part: Dictionary = hit["part"]
+	var def := definitions.get_module(String(part["id"])) if definitions != null else {}
+	if not def.has("upgrade_slots"):
+		return "拒绝：该模块不是改进装置。"
+	var slots := maxi(int(def.get("upgrade_slots", 1)), 1)
+	if upgrades.size() > slots:
+		return "拒绝：该改进装置只有 %d 个槽。" % slots
+	var accepted: Array = []
+	var per_effect: Dictionary = {}
+	for raw in upgrades:
+		var upgrade_id := String(raw)
+		var upgrade_def: Dictionary = definitions.registry.get_upgrade(upgrade_id)
+		if upgrade_def.is_empty():
+			return "拒绝：未知升级 %s。" % upgrade_id
+		var effect := String(upgrade_def.get("effect", upgrade_id))
+		var limit := maxi(int(upgrade_def.get("stack_limit", 1)), 1)
+		var used := int(per_effect.get(effect, 0))
+		if used >= limit:
+			continue
+		per_effect[effect] = used + 1
+		accepted.append(upgrade_id)
+	_push_undo()
+	part["upgrades"] = accepted
+	return ""
+
+## 只读：该格改进装置当前配置的升级列表；不是改进装置则返回空数组。
+func modifier_upgrades_at(cell: Vector2i) -> Array:
+	var hit := part_at(LAYER_MODULE, cell)
+	if hit.is_empty():
+		return []
+	var part: Dictionary = hit["part"]
+	return (part.get("upgrades", []) as Array).duplicate()
 
 func place_mobility(module_id: String, start: Vector2i, rotation: int = 0) -> String:
 	var reason := _can_place("mobility", module_id, start, rotation, 0)

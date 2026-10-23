@@ -116,7 +116,8 @@ func add_side(tag: String, builder: GridBuilder, spawn_pos: Vector2, spawn_headi
 	var damage := DamageSystem.new()
 	damage.setup(definitions)
 	damage.rebuild(tank, builder)
-	damage.set_modifier_upgrades(tank)
+	damage.rebuild(tank, builder)
+	## v3.24：升级不再整台聚合。载荷由弹药网络逐发携带，见 damage_system 的说明段。
 	## design §8.5：撞墙伤害也走同一条连锁，殉爆 / detach / 判负才不会被跳过。
 	tank.damage_router = Callable(damage, "apply_part_damage")
 	tank.position = spawn_pos
@@ -251,7 +252,11 @@ func alive_tags() -> Array[String]:
 	result.sort()
 	return result
 
-## 开火：走该方炮管组与口径校验，炮弹带该方的升级聚合（design §8.6）。
+## 开火：走该方炮管组与口径校验。炮弹带**这一发自己的**升级载荷（design §7.1 / v3.24）。
+##
+## v3.24：载荷不再由 `damage.cannon_upgrades()` 整台聚合 —— 那是「整台一个升级池」的旧简化，
+## 与「弹药流经改进器被逐发染色」的设计相矛盾。现在载荷随弹药走：
+## 改进器写进 round → 管路搬运 → `fill_cannons()` 交给 `CannonBank` → 开火时由 `shot["upgrades"]` 取出。
 ##
 ## v3.23：每真正发射一发就追加一个 `muzzle` 事件 —— 炮口特效**不需要调用方配合**。
 ## 为什么放在这里而不是各页面：开火入口有 4 处（对局 AI / 对局玩家 / 生存玩家 / 生存 AI），
@@ -263,17 +268,16 @@ func fire(tag: String) -> int:
 	var side: Dictionary = sides[tag]
 	var bank: CannonBank = side["bank"]
 	var tank: TankBody = side["tank"]
-	var damage: DamageSystem = side["damage"]
 	var fired := 0
 	for index in range(bank.cannons.size()):
 		var cannon: Dictionary = bank.cannons[index]
 		var ammo_id := String(cannon["caliber"])
 		if ammo_id.is_empty():
 			continue
-		var upgrades: Array = damage.cannon_upgrades(tank)
 		var team := team_of(tag)
 		var shots := bank.fire(ammo_id)
 		for shot in shots:
+			var upgrades: Array = (shot.get("upgrades", []) as Array).duplicate()
 			field.spawn(Vector2(shot["origin"]), Vector2(shot["dir"]), String(shot["ammo_id"]), tag, upgrades, 1.0, team)
 			tank.apply_recoil(float(shot["recoil_px"]), Vector2(shot["dir"]), Vector2(shot["world_r"]))
 			## 炮口事件：位置与方向直接取自 `bank.fire()` 的实际发射结果，

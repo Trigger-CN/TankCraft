@@ -72,6 +72,13 @@ const DRIVE_RELOAD_PULSE_TIME := 0.5
 const UI_ENTER_TIME := 0.16
 const FOCUS_RAIL_SPEED := 4.0
 const POINTER_TRANSITION := 0.18
+## v3.24 端口箭头（改装/建造 UI）：表示**物料流向**，与 `_draw_aim_line()` 的**弹道方向**是两件事。
+## 输入用冷色（cyan）指向模块内部，输出用暖色（amber）背离模块；两者都短（13 px）且只沿四正交方向。
+## 炮管同时有 in0 与 aim：如果画成同一种箭头，玩家会以为可以从炮口装弹。
+const PORT_ARROW_LEN := 13.0
+const PORT_ARROW_WIDTH := 2.0
+const PORT_ARROW_WING := 5.0
+const PORT_ARROW_WING_ANGLE := 0.6
 
 var definitions: ModuleDefs
 var builder: GridBuilder
@@ -84,6 +91,9 @@ var _selected_index := 0
 var _option_scroll := 0
 var _rotation := 0
 var _aim := 0
+## v3.24：改装页「待装进改进器」的升级候选下标（`_upgrade_ids()` 的下标）。
+## 玩家用 Q/E 在改进器上切换候选、T 追加到下一个空槽、Shift+T 清空。
+var _upgrade_pick_index := 0
 var _cursor := Vector2i(9, 8)
 var _mouse_position := Vector2.ZERO
 var _mouse_over_grid := false
@@ -464,6 +474,10 @@ func _handle_build_key(event: InputEventKey) -> void:
 		_rotate_current()
 	elif key == KEY_X:
 		_remove_current()
+	elif key == KEY_T and event.shift_pressed:
+		_set_status(_clear_cursor_modifier())
+	elif key == KEY_T:
+		_set_status(_append_upgrade_to_cursor_modifier())
 	elif key == KEY_M and event.shift_pressed:
 		_set_status(_editor_model().refund_mass_upgrade())
 	elif key == KEY_M:
@@ -527,9 +541,24 @@ func _ensure_option_visible() -> void:
 func _adjust_aim_or_selection(step: int) -> void:
 	if _build_layer == LAYER_MODULE:
 		var selected_part: Dictionary = _editor_model().part_at(LAYER_MODULE, _cursor)
-		if not selected_part.is_empty() and String(selected_part["part"]["id"]).begins_with("cannon_"):
-			_set_status(_editor_model().adjust_aim(_cursor, step))
-			return
+		if not selected_part.is_empty():
+			var part: Dictionary = selected_part["part"]
+			if String(part["id"]).begins_with("cannon_"):
+				_set_status(_editor_model().adjust_aim(_cursor, step))
+				return
+			## v3.24：光标下是改进装置时，Q/E 改为切换「待装升级」候选。
+			## 只在改装期开：建造期还没有升级可装，给一个空候选只会让人困惑。
+			var def: Dictionary = definitions.get_module(String(part["id"]))
+			if _in_modify_mode() and def.has("upgrade_slots"):
+				var ids: PackedStringArray = _upgrade_ids()
+				if ids.is_empty():
+					_set_status("没有可用的升级类型。")
+					return
+				_upgrade_pick_index = posmod(_upgrade_pick_index + step, ids.size())
+				var pick := String(ids[_upgrade_pick_index])
+				var upgrade_def: Dictionary = definitions.registry.get_upgrade(pick)
+				_set_status("待装升级：%s · T 装入 / Shift+T 清空" % String(upgrade_def.get("name", pick)))
+				return
 	_cycle_selection(step)
 
 func _rotate_current() -> void:
@@ -778,6 +807,64 @@ func _layer_label(layer: String) -> String:
 	if layer == LAYER_MOBILITY:
 		return "行进机构层"
 	return "功能模块层"
+
+## v3.24：可选升级类型（按 id 排序，保证确定性）。
+## 改装页给改进器选槽时用它；不依赖 `collected_upgrades`，因为数据表就是权威清单。
+func _upgrade_ids() -> PackedStringArray:
+	var ids := PackedStringArray()
+	if definitions == null or definitions.registry == null:
+		return ids
+	for raw_id in definitions.registry.upgrades.keys():
+		ids.append(String(raw_id))
+	ids.sort()
+	return ids
+
+## v3.24：把「待装升级」追加到光标下改进装置的下一个空槽。
+##
+## 为什么用 `GridBuilder.set_modifier_upgrades()` 而不是直接改 part：
+## 那个入口带 `_push_undo()` 与同一套槽数 / stack_limit 校验，
+## 所以这里不需要（也不应该）再写一遍规则。
+func _append_upgrade_to_cursor_modifier() -> String:
+	if not _in_modify_mode() or survival == null:
+		return "建造期不能配置改进槽。"
+	if _build_layer != LAYER_MODULE:
+		return "切到功能模块层再配置改进槽。"
+	var hit: Dictionary = _editor_model().part_at(LAYER_MODULE, _cursor)
+	if hit.is_empty():
+		return "光标下没有功能模块。"
+	var part: Dictionary = hit["part"]
+	var def: Dictionary = definitions.get_module(String(part["id"]))
+	if not def.has("upgrade_slots"):
+		return "光标下的模块不是改进装置。"
+	var ids: PackedStringArray = _upgrade_ids()
+	if ids.is_empty():
+		return "数据里没有升级类型。"
+	var pick := String(ids[clampi(_upgrade_pick_index, 0, ids.size() - 1)])
+	var current: Array = (part.get("upgrades", []) as Array).duplicate()
+	current.append(pick)
+	var reason: String = _editor_model().set_modifier_upgrades(_cursor, current)
+	if not reason.is_empty():
+		return reason
+	var name := String(definitions.registry.get_upgrade(pick).get("name", pick))
+	return "改进器已加槽：%s（%d/%d）" % [name, current.size(), int(def.get("upgrade_slots", 1))]
+
+## v3.24：清空光标下改进装置的所有槽（同样走 `_push_undo()`）。
+func _clear_cursor_modifier() -> String:
+	if not _in_modify_mode():
+		return "建造期不能配置改进槽。"
+	if _build_layer != LAYER_MODULE:
+		return "切到功能模块层再配置改进槽。"
+	var hit: Dictionary = _editor_model().part_at(LAYER_MODULE, _cursor)
+	if hit.is_empty():
+		return "光标下没有功能模块。"
+	var part: Dictionary = hit["part"]
+	var def: Dictionary = definitions.get_module(String(part["id"]))
+	if not def.has("upgrade_slots"):
+		return "光标下的模块不是改进装置。"
+	var reason: String = _editor_model().set_modifier_upgrades(_cursor, [])
+	if not reason.is_empty():
+		return reason
+	return "已清空改进器槽配置。"
 
 func _selected_definition() -> Dictionary:
 	var options: PackedStringArray = _option_ids()
@@ -1109,11 +1196,10 @@ func _enter_drive() -> void:
 	network.setup(definitions)
 	network.rebuild(builder)
 	network.bind_bank(bank)
-	## M5：战斗结算实例；护盾表按部件重建，改进装置的升级整台聚合（design §8.9）。
+	## M5：战斗结算实例；护盾表按部件重建。v3.24：升级载荷随弹药走，不再整台聚合。
 	damage = DamageSystem.new()
 	damage.setup(definitions)
 	damage.rebuild(tank, builder)
-	damage.set_modifier_upgrades(tank)
 	## M6：撞墙 / 障碍撞击伤害也走 damage_system，殉爆 / detach / 判负才不会被静默跳过。
 	tank.damage_router = Callable(damage, "apply_part_damage")
 	_drive_fx.clear()
@@ -1273,7 +1359,7 @@ func _drive_fire() -> void:
 		for raw_shot in bank.fire(caliber):
 			var shot: Dictionary = raw_shot
 			fired += 1
-			var upgrades: Array = damage.cannon_upgrades(tank) if damage != null else []
+			var upgrades: Array = (shot.get("upgrades", []) as Array).duplicate()
 			field.spawn(Vector2(shot["origin"]), Vector2(shot["dir"]), String(shot["ammo_id"]), "player", upgrades)
 			tank.apply_recoil(float(shot["recoil_px"]), Vector2(shot["dir"]), Vector2(shot["world_r"]))
 			## 试驾页不经过 `Duel.fire()`，所以炮口特效要在这里自己收。
@@ -1410,7 +1496,7 @@ func _drive_spawn_split(event: Dictionary) -> void:
 		direction = Vector2.RIGHT
 	direction = direction.normalized()
 	var ammo_id := String(event.get("ammo_id", ""))
-	var upgrades: Array = damage.cannon_upgrades(tank) if damage != null else []
+	var upgrades: Array = (event.get("upgrades", []) as Array).duplicate()
 	for index in range(count):
 		var offset := (float(index) - float(count - 1) * 0.5) * 0.35
 		var child_dir := direction.rotated(offset)
@@ -1629,6 +1715,11 @@ func _draw_grid() -> void:
 		var color: Color = Palette.ACCENT_CYAN if is_core else Palette.ACCENT_AMBER
 		for cell in _editor_model().part_cells(part):
 			_draw_cell(cell, color, _module_glyph(String(definition.get("name", "模"))), is_core, module_alpha)
+		## v3.24：所有带端口的模块都要标出物料进出方向（用户：「不只是升级效果模块，
+		## 其他所有有输出或者有输入的模块都要显示箭头，方便规划流水线」）。
+		## 放在 `_draw_cell` 循环之后、`_draw_aim_line` 之前：箭头贴着格子边缘，
+		## 而瞄准线从首格中心向外延伸，两者在几何上就不会混在一起。
+		_draw_port_arrows(part, definition, module_alpha)
 		if String(part["id"]).begins_with("cannon_"):
 			_draw_aim_line(part, module_alpha)
 	var preview_cells: Array[Vector2i] = _preview_cells()
@@ -1655,6 +1746,57 @@ func _preview_cells() -> Array[Vector2i]:
 	if _build_layer == LAYER_PLATFORM and String(options[index]) == "platform_cell":
 		return [_cursor]
 	return _editor_model().part_cells(part)
+
+## 端口箭头：把 `AmmoNetwork.ui_ports()` 给出的每个端口画成一个小箭头。
+##
+## 为什么必须有它：改装/建造页此前只画炮管的瞄准线，玩家看不出弹药从哪进、往哪出，
+## 也就无法规划流水线。用户要求「不只是升级效果模块，其他所有有输出或者有输入的模块
+## 都要显示箭头，方便规划流水线」。
+##
+## 与 `_draw_aim_line()` 的区分（炮管同时有 in0 与 aim，两者必须一眼分开）：
+##   - 端口箭头 = **物料流向**：只有四个正交方向、短（13 px）、贴端口格边缘；
+##     输入用冷色 cyan 且箭头**指向模块内部**，输出用暖色 amber 且**背离模块**。
+##   - 瞄准线 = **弹道方向**：可对角（8 档）、细长亮绿线段、从首格中心出发。
+##
+## 全部尺寸与位置由格坐标和常量算出：零随机、零时间依赖（确定性要求）。
+func _draw_port_arrows(part: Dictionary, definition: Dictionary, alpha: float = 1.0) -> void:
+	var specs: Array = AmmoNetwork.ui_ports(String(part.get("id", "")), definition, int(part.get("rot", 0)))
+	if specs.is_empty():
+		return
+	var cells: Array[Vector2i] = _editor_model().part_cells(part)
+	if cells.is_empty():
+		return
+	for raw in specs:
+		var spec: Dictionary = raw
+		var side := String(spec["side"])
+		var kind := String(spec["kind"])
+		## 取格规则直接复用 `AmmoNetwork._port_cell()`，绝不在页面层再写一份——
+		## 两份推导一旦漂移，箭头就会指到没有端口的格子上。
+		var cell := AmmoNetwork._port_cell(cells, side)
+		var centre := _cell_rect(cell).get_center()
+		## `side` 是「端口朝外」的方向；in 的箭头朝内，out 的箭头朝外。
+		var outward := _side_direction(side)
+		var arrow_dir := -outward if kind == "in" else outward
+		var colour: Color = Palette.ACCENT_CYAN if kind == "in" else Palette.ACCENT_AMBER
+		var edge := centre + outward * (GRID_CELL * 0.5 - 4.0)
+		var tip := edge + arrow_dir * PORT_ARROW_LEN
+		draw_line(edge, tip, Color(colour, alpha), PORT_ARROW_WIDTH)
+		## 两片箭翼：固定角度，不用随机也不依赖时间。
+		var wing_a := arrow_dir.rotated(PORT_ARROW_WING_ANGLE)
+		var wing_b := arrow_dir.rotated(-PORT_ARROW_WING_ANGLE)
+		draw_line(tip, tip - wing_a * PORT_ARROW_WING, Color(colour, alpha), PORT_ARROW_WIDTH)
+		draw_line(tip, tip - wing_b * PORT_ARROW_WING, Color(colour, alpha), PORT_ARROW_WIDTH)
+
+## side 名称 → 屏幕方向（+y 向下，与格坐标一致）。
+static func _side_direction(side: String) -> Vector2:
+	match side:
+		"E":
+			return Vector2.RIGHT
+		"S":
+			return Vector2.DOWN
+		"W":
+			return Vector2.LEFT
+	return Vector2.UP
 
 func _draw_aim_line(part: Dictionary, alpha: float = 1.0) -> void:
 	var cells: Array[Vector2i] = _editor_model().part_cells(part)
@@ -1732,7 +1874,7 @@ func _draw_build_footer() -> void:
 		_draw_text(labels[index], rect.position + Vector2(18, 25), 14, Palette.ACCENT_CYAN if selected or hovered else Palette.TEXT_LO, true)
 	## 底部提示按页面切换：改装页不提供蓝图存读与质量上限购买（后者在 budget_enabled=false 时免费）。
 	if _in_modify_mode():
-		_draw_text("方向键 / 鼠标定位   Enter/左键贴装   R 旋转   X/右键拆解（退回库存）   Esc 完成", Vector2(620, 1018), 14, Palette.TEXT_LO, false)
+		_draw_text("方向键 / 鼠标定位   Enter/左键贴装   R 旋转   X/右键拆解（退回库存）   T 给改进器加槽   Esc 完成", Vector2(620, 1018), 14, Palette.TEXT_LO, false)
 	else:
 		_draw_text("方向键 / 鼠标定位   Enter/左键放置   R 旋转   X/右键拆除   M 升级   Esc 返回", Vector2(620, 1018), 14, Palette.TEXT_LO, false)
 	var message_color: Color = Palette.ACCENT_RED if _status_error else Palette.TEXT_HI
@@ -3276,7 +3418,11 @@ func _draw_survival_level_up() -> void:
 		elif kind == SurvivalRun.CHOICE_MASS_CAP:
 			_draw_text("立即提高可承载质量", rect.position + Vector2(18.0, rect.size.y - 40.0), 13, Palette.TEXT_LO, false)
 		else:
-			_draw_text("注入改装池，波间改装时可用", rect.position + Vector2(18.0, rect.size.y - 40.0), 13, Palette.TEXT_LO, false)
+			_draw_text("领到即装入改进装置的空槽；无空槽则暂存", rect.position + Vector2(18.0, rect.size.y - 40.0), 13, Palette.TEXT_LO, false)
+	## v3.24：上一次领奖的实际去向（已装入哪件改进器 / 无空槽已暂存）。
+	## 之前这里只写「注入改装池」，而那个注入从未实现——玩家永远看不到升级去哪了。
+	if not survival.upgrade_note.is_empty():
+		_draw_text(survival.upgrade_note, Vector2(DRIVE_VIEW.position.x + 32.0, DRIVE_VIEW.position.y + DRIVE_VIEW.size.y - 56.0), 15, Palette.ACCENT_AMBER, true)
 	_draw_text("按 1 / 2 / 3 选择 · M 或点击下方按钮进入改装", Vector2(DRIVE_VIEW.position.x + 32.0, DRIVE_VIEW.position.y + DRIVE_VIEW.size.y - 28.0), 16, Palette.TEXT_LO, false)
 	_draw_survival_modify_button()
 
@@ -3445,7 +3591,7 @@ func _survival_enter_modify() -> void:
 	var seats: Array[Vector2i] = survival_builder.cockpit_cells()
 	_cursor = seats[0] if not seats.is_empty() else Vector2i.ZERO
 	_survival_event = "改装：选库存配件后回车贴装"
-	_status_message = "改装：1/2/3 选层 · A/D 选件 · 回车贴装 · X 拆解 · Esc 完成"
+	_status_message = "改装：1/2/3 选层 · A/D 选件 · 回车贴装 · X 拆解 · 改进器上 Q/E 选升级、T 加槽、Shift+T 清空 · Esc 完成"
 	_status_error = false
 	queue_redraw()
 
@@ -3555,6 +3701,15 @@ func _survival_capture_modify() -> void:
 	var extra := Vector2i(bounds.end.x, bounds.position.y)
 	if not survival_builder.platform_cells.has(extra):
 		survival.place_platform_at(extra)
+	## v3.24：截图里必须能看见改进装置的端口箭头 —— 起始车本来没有改进器，
+	## 这里给一张 `modifier_mk1` 并真的装到刚铺的那一格上（走 `mount_from_inventory`，
+	## 与玩家手动装同一条路径），再给它配一个升级槽。**仅截图钩子如此，不改起始车。**
+	if not survival.inventory.has("modifier_mk1"):
+		survival.inventory.append("modifier_mk1")
+	var modifier_index := survival.inventory.find("modifier_mk1")
+	if modifier_index >= 0:
+		survival.mount_from_inventory(modifier_index, extra, 0, 0)
+		survival_builder.set_modifier_upgrades(extra, ["up_damage"])
 	_cursor = extra
 	_survival_modify_index = 0
 	_build_layer = LAYER_MODULE
