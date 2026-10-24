@@ -267,6 +267,11 @@ func _process(delta: float) -> void:
 		_survival_simulate(delta)
 		queue_redraw()
 
+	## v3.26：战斗页每帧把准星与炮口同步到真实光标。
+	## 不能只依赖 `InputEventMouseMotion`——切页后不动鼠标、或坦克行驶而鼠标静止时，
+	## 瞄准都会停在上一个状态（详见 `_sync_battle_pointer()`）。
+	_sync_battle_pointer()
+
 func _load_fonts() -> void:
 	_font_regular = SystemFont.new()
 	_font_regular.font_names = PackedStringArray(["Microsoft YaHei", "Noto Sans SC", "SimHei", "sans-serif"])
@@ -2325,6 +2330,36 @@ func _is_battle_screen() -> bool:
 		return _survival_ready and survival != null and survival.stage == SurvivalRun.STAGE_BATTLE
 	return false
 
+## 战斗页当前的鼠标位置（设计坐标）。
+##
+## v3.26：`_mouse_position` 只在 `InputEventMouseMotion` 到达时更新。实测两个可见后果：
+## ① 从菜单点进战斗页（或改过窗口尺寸后）玩家不动鼠标，准星停在上一页的旧点上——最远偏 570×140 px；
+## ② 坦克行驶而鼠标静止时，炮口保持旧角度，不再指向准星下的世界点——行驶 400 px 后偏 5.05°。
+## 两者的根因相同：瞄准只在「鼠标动了」时重算。
+func _battle_pointer() -> Vector2:
+	## 截图路径例外：`--cursor=` 已经把鼠标位置钉死，这里必须原样返回，
+	## 否则截图会随桌面上真实鼠标的位置漂移，历史基线也不再可比。
+	if not _capture_target.is_empty():
+		return _mouse_position
+	return get_viewport().get_mouse_position()
+
+## 战斗页每帧执行：同步准星位置，并让炮口重新指向「光标下的世界点」。
+##
+## 为什么必须每帧而不是只在鼠标动时：准星标的是**战场上的一个世界点**，不是屏幕上的一个角度。
+## 坦克一移动，同一个屏幕点对应的世界点就变了；只在鼠标动时重算，准星就会「说谎」——
+## 玩家看到准星压在敌人身上，弹道却按十几帧前的几何飞出去。
+func _sync_battle_pointer() -> void:
+	if not _is_battle_screen():
+		return
+	## 截图路径不参与：`--cursor=` 已经显式设过 `_mouse_position` 与炮口方向，
+	## 这里再干预会让截图随桌面真实鼠标漂移。
+	if not _capture_target.is_empty():
+		return
+	var pointer := _battle_pointer()
+	_mouse_position = pointer
+	if _aim_with_mouse(pointer):
+		queue_redraw()
+
 ## 把鼠标位置换算成世界坐标并让玩家全部炮管指过去。三页共用。
 ## 返回是否真的改了方向（供调用方决定要不要重绘）。
 func _aim_with_mouse(position: Vector2) -> bool:
@@ -2385,12 +2420,15 @@ func _draw_aim_reticle() -> void:
 	if info.is_empty():
 		return
 	var view: Rect2 = info["view"]
-	if not view.has_point(_mouse_position):
+	## v3.26：位置取自 `_battle_pointer()` 而不是缓存的 `_mouse_position`——
+	## 准星必须与 OS 光标逐像素重合，哪怕这一帧根本没收到 motion 事件。
+	var pointer := _battle_pointer()
+	if not view.has_point(pointer):
 		return
 	var colour := Palette.ACCENT_LIME
-	draw_arc(_mouse_position, AIM_RETICLE_RADIUS, 0.0, TAU, 24, Color(colour, 0.85), AIM_RETICLE_WIDTH, true)
-	draw_line(_mouse_position - Vector2(AIM_RETICLE_CROSS, 0.0), _mouse_position + Vector2(AIM_RETICLE_CROSS, 0.0), Color(colour, 0.55), 1.0)
-	draw_line(_mouse_position - Vector2(0.0, AIM_RETICLE_CROSS), _mouse_position + Vector2(0.0, AIM_RETICLE_CROSS), Color(colour, 0.55), 1.0)
+	draw_arc(pointer, AIM_RETICLE_RADIUS, 0.0, TAU, 24, Color(colour, 0.85), AIM_RETICLE_WIDTH, true)
+	draw_line(pointer - Vector2(AIM_RETICLE_CROSS, 0.0), pointer + Vector2(AIM_RETICLE_CROSS, 0.0), Color(colour, 0.55), 1.0)
+	draw_line(pointer - Vector2(0.0, AIM_RETICLE_CROSS), pointer + Vector2(0.0, AIM_RETICLE_CROSS), Color(colour, 0.55), 1.0)
 
 func _draw_drive() -> void:
 	_draw_drive_field()
