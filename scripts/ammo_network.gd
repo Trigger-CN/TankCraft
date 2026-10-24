@@ -73,6 +73,8 @@ var _orphans: Array = []
 var _accum := 0.0
 var _next_uid := 1
 var _tick_count := 0
+## `rejected` 事件累计数（v3.27 新增，供 HUD 与测试读取；不随 `drain_events()` 清零）。
+var rejected_total := 0
 var _bank = null
 
 func setup(module_defs: ModuleDefs) -> bool:
@@ -152,8 +154,10 @@ func tick_once() -> void:
 	# 排序键是目标端口 id，因此二合一的 in0 天然优先于 in1，且与部件索引无关。
 	var strand_requests: Array = []
 	var module_requests: Array = []
+	var swap_requests: Array = []
 	for uid in order:
-		_collect_request(uid, dt, strand_requests, module_requests)
+		_collect_request(uid, dt, strand_requests, module_requests, swap_requests)
+	_apply_swaps(swap_requests)
 	_apply_strand_requests(strand_requests)
 
 	# 步骤 3：模块输出（制造装置产出、弹药库/改进装置向管路投放）。
@@ -205,11 +209,16 @@ func route_status() -> Array:
 		if role != ROLE_FACTORY and role != ROLE_DEPOT and role != ROLE_MODIFIER:
 			continue
 		var sinks := _reachable_sinks(int(part["index"]))
+		## v3.27：把「因拒收而暂时停发」的口径一并报出去。
+		## 没有这个字段时，玩家只能看到「管子堵了」，不知道是自己接错了口径。
+		var blocked_keys: Array = (part["state"].get("blocked", {}) as Dictionary).keys()
+		blocked_keys.sort()
 		result.append({
 			"part": int(part["index"]),
 			"module_id": String(part["module_id"]),
 			"reachable": not sinks.is_empty(),
 			"sinks": sinks,
+			"blocked": blocked_keys,
 		})
 	return result
 
@@ -436,6 +445,7 @@ func _reset_state() -> void:
 	_accum = 0.0
 	_next_uid = 1
 	_tick_count = 0
+	rejected_total = 0
 
 func _collect_parts(source: Object) -> Array:
 	var result: Array = []
@@ -696,7 +706,7 @@ func _request_before(a: Dictionary, b: Dictionary) -> bool:
 		return key_a < key_b
 	return int(a["uid"]) < int(b["uid"])
 
-func _collect_request(uid: int, dt: float, strand_requests: Array, module_requests: Array) -> void:
+func _collect_request(uid: int, dt: float, strand_requests: Array, module_requests: Array, swap_requests: Array = []) -> void:
 	var r: Dictionary = _rounds[uid]
 	var part_index := int(r["part"])
 	var part: Dictionary = parts[part_index]
@@ -766,6 +776,16 @@ func _collect_request(uid: int, dt: float, strand_requests: Array, module_reques
 		return
 	var previous := int(trail[trail.size() - 2])
 	if _owner.has(previous):
+		## v3.27：退弹在相邻段遇到一发**正向、且被自己挡住**的弹药时，两者交换段位。
+		## 旧实现直接 `return`：退弹等前一格腾空，前一格的正向弹等本格腾空 —— 两发互为
+		## 对方的阻塞条件，永久死锁（实测 `combo5` X4 / `combo3` C2：360 tick 后仍是
+		## `p2@0.00R p1@1.00`，好的一支炮管 0 发）。
+		## 交换是局部的、不瞬移（两发各留在相邻格里）、不破坏「每段容量 1 发」。
+		var other_uid := int(_owner[previous])
+		var other: Dictionary = _rounds.get(other_uid, {})
+		if not other.is_empty() and bool(other["forward"]) and int(other["part"]) == previous:
+			if _single_out_to(previous, part_index):
+				swap_requests.append({"down": uid, "up": other_uid})
 		return
 	strand_requests.append({
 		"uid": uid,
@@ -777,6 +797,59 @@ func _collect_request(uid: int, dt: float, strand_requests: Array, module_reques
 		"reverse": true,
 	})
 
+## `previous` 是否只有一条出口且恰好指向 `part_index`（交换的前置条件）。
+func _single_out_to(previous: int, part_index: int) -> bool:
+	var hits := 0
+	for key in (parts[previous]["node_out"] as Array):
+		var link := String(_links_out.get(String(key), ""))
+		if link.is_empty():
+			continue
+		if int(nodes[link]["part"]) != part_index:
+			return false
+		hits += 1
+	return hits == 1
+
+## 退弹与正向弹交换段位（见 `_collect_request()` 逆向分支）。
+## 交换在应用段移动**之前**执行：两发都仍在原先的两格里，不涉及其它段的占用。
+func _apply_swaps(requests: Array) -> void:
+	requests.sort_custom(_swap_before)
+	var done: Dictionary = {}
+	for item in requests:
+		var a := int(item["down"])
+		var b := int(item["up"])
+		if done.has(a) or done.has(b) or a == b:
+			continue
+		if not _rounds.has(a) or not _rounds.has(b):
+			continue
+		var ra: Dictionary = _rounds[a]
+		var rb: Dictionary = _rounds[b]
+		if bool(ra["forward"]) or not bool(rb["forward"]):
+			continue
+		var pa := int(ra["part"])
+		var pb := int(rb["part"])
+		if int(_owner.get(pa, -1)) != a or int(_owner.get(pb, -1)) != b:
+			continue
+		var ta: Array = ra["trail"]
+		if ta.size() < 2 or int(ta[ta.size() - 2]) != pb:
+			continue
+		## 下游那发（退弹）退回上一段；上游那发向前占住它腾出的段。
+		ta.pop_back()
+		ra["part"] = pb
+		ra["progress"] = 1.0
+		(rb["trail"] as Array).append(pa)
+		rb["part"] = pa
+		rb["progress"] = 0.0
+		_owner[pb] = a
+		_owner[pa] = b
+		done[a] = true
+		done[b] = true
+
+func _swap_before(x: Dictionary, y: Dictionary) -> bool:
+	var ax := int(x["down"])
+	var ay := int(y["down"])
+	if ax != ay:
+		return ax < ay
+	return int(x["up"]) < int(y["up"])
 func _out_order(part: Dictionary, r: Dictionary) -> Array:
 	var outs: Array = part["node_out"]
 	var ordered: Array = []
@@ -845,12 +918,14 @@ func _apply_module_requests(requests: Array) -> void:
 		## 「改进器 → 炮管」这一段会把载荷丢在半路。
 		var upgrades: Array = (r.get("upgrades", []) as Array).duplicate()
 		if String(request["kind"]) == "origin":
-			if not _accept(target, ammo_id, upgrades):
-				## 源暂时装不下（例如缓存满）：本 tick 不处理，下 tick 重试，绝不丢弃。
-				continue
-			## 退回源头成功：记录该源不再向这条链投放同口径弹药，避免退回—重发的活锁。
-			var blocked: Dictionary = parts[target]["state"]["blocked"]
-			blocked[ammo_id] = true
+			## v3.27：退弹**无条件回收到源头**，不受缓存 / 槽位上限约束。
+			## 旧实现在缓存已满时 `continue` 等下一 tick —— 但源头的缓存正是因为第一段管路
+			## 被这发退弹占着才腾不出来，两件事互为条件，形成**永久死锁**（实测 `combo5` X4：
+			## 300 tick 后仍是 `strands: p2@0.00R p1@1.00`、`buf=3`，好的一支炮管 0 发）。
+			## 退弹本来就是从这里出发的那一发，往返一次不改变系统弹药总量，
+			## 因此「容器暂时超容」是安全且有界的（超出量 ≤ 在途弹药数）。
+			_absorb_source(target, ammo_id, upgrades)
+			_start_backoff(parts[target], ammo_id)
 			_owner.erase(int(r["part"]))
 			_rounds.erase(uid)
 			_push_event("returned", r, target)
@@ -900,19 +975,28 @@ func _module_emit(index: int) -> void:
 				output.pop_front()
 
 ## `upgrades` 是这笔弹药已经携带的升级载荷；从工厂/仓库发起时为空数组。
+## `upgrades` 是这笔弹药已经携带的升级载荷；从工厂/仓库发起时为空数组。
 func _emit_from(part_index: int, ammo_id: String, upgrades: Array = []) -> bool:
 	var part: Dictionary = parts[part_index]
 	var outs: Array = part["node_out"]
 	if outs.is_empty():
 		return false
-	var blocked: Dictionary = part["state"].get("blocked", {})
-	if bool(blocked.get(ammo_id, false)):
+	if _in_backoff(part, ammo_id):
 		return false
 	var link := String(_links_out.get(String(outs[0]), ""))
 	if link.is_empty():
 		return false
 	var target := int(nodes[link]["part"])
-	if _probe(target, ammo_id) != "ok":
+	var probe := _probe(target, ammo_id)
+	if probe == "reject":
+		## v3.27：出口直达一个**明确拒收**的模块（口径不符）。
+		## 旧实现把 reject 与 full 一视同仁地 `return false` —— 每 tick 重试一次，
+		## 既不上报也不退避，整条上游永久堵死且玩家看不到原因（实测 `combo3` E1：
+		## 240 tick 内 0 条 `rejected`，`modifier out=2` 与 `congestion` 一直不动）。
+		_start_backoff(part, ammo_id)
+		_push_event("rejected", {"uid": 0, "ammo_id": ammo_id, "part": part_index, "upgrades": upgrades}, part_index)
+		return false
+	if probe != "ok":
 		return false
 	if String(parts[target]["role"]) == ROLE_CONVEYOR:
 		_spawn_round(ammo_id, part_index, target, String(outs[0]), upgrades)
@@ -1050,6 +1134,45 @@ func _downstream_open(part_index: int, ammo_id: String) -> bool:
 			return true
 	return false
 
+## v3.27：源的「退避」不再是永久标记，而是**到期自动重试**。
+##
+## 旧实现把 `blocked[ammo_id]` 置成 `true` 后**全代码没有任何清除点**（只有 `rebuild()`
+## 重置）。一件口径不符的支路会让那个源永久不再投放该口径 —— 实测 `combo3` C1/C2：
+## 240 tick 内 `emitted / rejected / returned` 各只有 1 条，之后彻底静止。
+##
+## 时长复用已有的数据参数 `conveyor_strand_grace_s`（1.0 s → 20 tick），不引入新的魔法数字。
+func retry_ticks() -> int:
+	return maxi(int(round(grace_s / tick_dt())), 1)
+
+func _in_backoff(part: Dictionary, ammo_id: String) -> bool:
+	var blocked: Dictionary = part["state"].get("blocked", {})
+	if not blocked.has(ammo_id):
+		return false
+	if _tick_count >= int(blocked[ammo_id]):
+		## 到期即清除，既恢复投放也让字典不会无限增长。
+		blocked.erase(ammo_id)
+		return false
+	return true
+
+func _start_backoff(part: Dictionary, ammo_id: String) -> void:
+	part["state"]["blocked"][ammo_id] = _tick_count + retry_ticks()
+
+## 退弹回源头：**不看容量**（理由见 `_apply_module_requests()` 的 origin 分支）。
+func _absorb_source(target: int, ammo_id: String, upgrades: Array) -> void:
+	var part: Dictionary = parts[target]
+	var state: Dictionary = part["state"]
+	match String(part["role"]):
+		ROLE_FACTORY:
+			(state["buffer"] as Array).append(_make_round(ammo_id, upgrades))
+		ROLE_DEPOT:
+			(state["stored"] as Array).append(_make_round(ammo_id, upgrades))
+		ROLE_MODIFIER:
+			(state["queue"] as Array).append(_make_round(ammo_id, upgrades))
+
+## 累计「明确拒收」次数（`rejected` 事件总数）。
+## 旧实现里模块出口的拒收完全不产生事件，玩家只看到「管子堵了」却没有任何原因提示。
+func rejected_count() -> int:
+	return rejected_total
 func _slot_of(ammo_id: String) -> int:
 	if definitions == null:
 		return 1
@@ -1184,6 +1307,8 @@ func _push_event(kind: String, r: Dictionary, part_index: int) -> void:
 		"ammo_id": String(r.get("ammo_id", "")),
 		"part": part_index,
 	})
+	if kind == "rejected":
+		rejected_total += 1
 	if events.size() > MAX_EVENTS:
 		events = events.slice(events.size() - MAX_EVENTS)
 

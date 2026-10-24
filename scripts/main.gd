@@ -2787,7 +2787,12 @@ func _draw_drive_hud() -> void:
 		for entry in network.route_status():
 			if not bool(entry["reachable"]):
 				broken += 1
-		supply = "M4 管路 · 在途 %d · 拥塞 %d · 断链 %d" % [network.rounds_in_flight(), network.congestion().size(), broken]
+		## v3.27：把「拒收」单列出来。之前模块出口遇到口径不符会静默重试、永不报告，
+		## 玩家只能看到「管子堵了」；现在同一行里能直接看出是接错了口径还是真的拥塞。
+		## 标签缩写是为了不超出 DRIVE_HUD_RIGHT 的 272 px 文本区。
+		supply = "M4 在途%d 拥塞%d 断链%d 拒收%d" % [
+			network.rounds_in_flight(), network.congestion().size(), broken, network.rejected_count(),
+		]
 	_draw_text(supply, Vector2(right, hint_y + 150.0), 12, Palette.TEXT_LO, false)
 	draw_rect(DRIVE_STATUS, Color(Palette.BG_BASE, 0.86), true)
 	draw_rect(DRIVE_STATUS, Color(Palette.WIRE, 0.55), false, 1.0)
