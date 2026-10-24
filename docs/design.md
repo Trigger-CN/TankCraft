@@ -2,7 +2,7 @@
 
 > 权威范围：**全部玩法机制、系统规格、数值、架构草案、决策记录**。
 > 术语必须与 `agent_note.md` §5 一致；改动后的同步义务见 `agent_note.md` §1 元规则。
-> 版本：**v3.27** · 2026-10-23 · 状态：设计文档（**M2 建造编辑器与运行期 `BUILD_MODE`、M3 坦克物理与操控、M4 弹药输送网络、M5 战斗结算与可拆解摧毁、M6 机器人 AI 与完整对局、**M9 波次生存单人玩法**均已实现并验证**；`data/*.json` 是正式运行时数值来源；**M3 转向手感缺陷已于 v3.1 修正（§5.2、§5.6），v3.25 再次调整（横向阻力 + 始终生效的角阻尼，§5.2、§11.4.2.10）**；**M5 的六条有意简化已写入 §8.9，其自击缺陷与撞墙不连锁两项已于 M6 修复**；**M6 的三层 AI、四档难度、12 张 Bot 蓝图已实现，实现记录在 §10.5**；**v3.4 把单人模式重写为「波次生存 + 升级菜单 + 波间商店 + 每 5 波 Boss」并禁止战斗期改装（§3.4、ADR-017），v3.6 已完成其实现：`survival` 块 36 键、竞技场 `props`、`boss_warlord.json`、`scripts/survival_run.gd` 与主场景的四个页面（§3.6 实现记录）**；**v3.7 补上「改装坦克」UI 入口：`STAGE_MODIFY` 子阶段 + 升级页/商店页按钮 + 改装页（§3.4.7）**；**v3.8 修用户报告的界面四项：窗口启动即最大化（`window/size/mode=2`，实测 `WINDOW_MODE mode=2 size=(1842, 1057)`）、所有菜单补齐 hover + 左键点击（含主菜单难度按钮与升级卡/商品格）、修掉主菜单「难度/提示」压在「退出」行上的重叠、并让改装页**复用建造页整套编辑器**而非自带第二套（§2.3、§3.4.7、§11.4.2.1）**；**v3.9 修用户报告的「炮弹似乎不能对敌人造成伤害」并重做生存页战斗 UI：起始坦克 20mm → 76mm（`SurvivalRun.build_starter()` 为唯一布局来源，§3.4.8）、命中事件补齐文案/动效/命中闪光、敌我坦克逐部件按血量着色、HUD 新增「总输出」、新增坦克镜像面板（§11.4.4.2）**；**v3.5 修复了 R17 列出的 9 个碰撞/损坏缺陷，并在修复过程中又发现并修掉 3 个实现级 bug（§8.7）**；**v3.6 同时把 `duel` 扩为任意 tag/team 集合，使同屏多敌人成立（§10.6）**；**v3.12 修正了 `scripts/` 文件计数（实为 18 个 `.gd`，非 16）并修复了截图取图时刻不固定导致「逐字节等价」证据链失效的缺陷（§11.4.9）**；**v3.13 对全部 7 个截图钩子做了可复现性重验（7/7 逐字节相同），并完成与历史截图的差异归因：静态 UI 区零差异（§11.4.9.1）**；**v3.14 新增 `--steps=N` 预热步数参数化，使战场区渲染回归可验证（裁切后同 N 两次逐字节相同，§11.4.9.2）**；**v3.15 按用户「配件、摆放更合理 / 初始敌人过于大 / 敌人不断地生成 / 不同等级不同坦克」重做生存模式坦克阵容：起始车 8×2 单履带 → 6×4 双履带（§3.4.8）、13 张 Bot 蓝图全部重写为每档三种不同轮廓且招募级从 30 格缩到 12–20 格（§14.8）、新增 `enemy_quota_for()` + 本波内按间隔补兵，并把通过条件改为「配额耗尽且场上无敌人」（§3.4、§14.8）**；**v3.16 更正 v3.15 的两个数字（弹药库殉爆死亡时间 21.8 s → 36.4 s、瞄准命中区间 12–22/1–2 → 8–22/0–2），只改注释与文档文字、代码零改动（§3.4.8、§17）**；**v3.17 修用户报告的栈溢出崩溃：`_handle_mouse()` 与 `_handle_survival_mouse()` 自 v3.8 起双向互调，生存页改装模式下任何一次网格点击都会无限递归——已改为单向转发，并新增走真实 `_input()` 的 `tests/mouse_input_smoke.gd` 作永久回归（§11.4.2.2、§17）**；**v3.18 按用户要求把编辑器三层做成「看得见的分层」：非选中层降到 22% alpha、光标件随层切换、坦克默认在建造区居中，并修掉层级行压面板分隔线与「工具」标签压按钮两处重叠（§11.4.2.3、§17）**；**v3.19 建立版本控制：`git init` + 初始提交 `fd3857f`（77 文件 / 22366 行，本地 `Trigger-CN` / `759025229@qq.com`），并用 `.gitattributes` 钉死 `eol=lf` 以保护以文件字节为基准的验证体系（§11.4.9.1、§17）**；**v3.20 按用户「优化坦克和其他物品的碰撞箱逻辑，坦克的整体碰撞箱和中弹判定都由配件构成，受到伤害和造成伤害都要有悬浮数字提示」把**碰撞箱**从整车外接 AABB 改为逐配件格子（新增 `cell_world_rects()` / `cell_overlap_rect()` / `cell_overlap_circle()` / `cells_overlap_tank()`），并给生存页与对战页加上伤害/受击悬浮数字（§11.4.2.4、§17）**；**v3.20.1 修用户报告的 `SCRIPT ERROR: Out of bounds get index '8' (on base: 'PackedStringArray') at: _preview_cells`：`_selected_index` 是 `_option_ids()` 的下标，却被两处当成 `survival.inventory` 的下标钳制，而 `_ensure_option_visible()` 根本不钳制它——已在收口点统一按可选件数量钳制、`_preview_cells()` 加防御式钳制、`_mount_selected_inventory()` 改用 module_id 反查库存，并新增反向对照可复现的 `tests/editor_bounds_smoke.gd`（§11.4.2.5、§17）**；**v3.21 按用户「精细化坦克配件的特效，要能体现弹药制造、弹药装填、护盾、维修等效果，例如在模块上加入进度条，小窗口显示坦克镜像也要显示模块的细节」给每个模块加上进度条 / 护盾脉冲 / 维修连线，并重做镜像面板的逐部件行（§11.4.2.6、§17）**；**v3.22 按用户「生存模式的战斗 UI 也应该能复用到其他模式」把整套战斗视图（竞技场 / 障碍 / 中立物 / 车体 / 弹道 / 动效 / 命中闪光 / 伤害数字）抽成 `scripts/combat_view.gd`，对局页与生存页共用同一份实现，模式差异改为参数表达；对局页因此真正获得命中闪光与按血量分档上色（§11.4.2.7、§17）**；**v3.23 按用户「实现开火特效，提高所有口径炮弹的默认射程，炮弹没有命中时飞行到最远射程后也要有一个消失特效」把射程从全局单值 `max_range_px` 改为五口径各自的 `range_px`（1900/1820/1740/1660/1580，全部提高）、寿命改由射程反推（否则 76/120/155 只名义提高）、新增锥形炮口闪光与三环收缩消散（形状/时长/运动方向与命中闪光全不同），并修复了一个让「未命中飞满射程消散」永远无法发生的投影物矩形碰撞缺陷（§11.4.2.8、§17）**；**v3.24 按用户「升级效果模组应该也要和最初设计一样，需要安装在坦克上，并且需要输入弹药和输出弹药，来给弹药升级，在改装UI中，这些模块要显示输入输出箭头来辨别方向，不只是升级效果模块，其他所有有输出或者有输入的模块都要显示箭头，方便规划流水线，后续计划要深化流水线的概念」把升级从「整台聚合的抽象池」改为**逐发弹药携带的升级载荷**（改进器加工时写入、管路搬运、`CannonBank` 装填时接收、开火时交给 `field.spawn()`），给改装/建造 UI 的全部五类带端口模块加上输入/输出箭头，并把「深化流水线」写成后续计划（§11.4.2.9、§17）**；**v3.25 按用户「生存模式难度过高，敌人虽然用的小口径但是射速很快，玩家的默认坦克口径虽然大但是射速低，而且现在的摩擦力很低转向难以控制，难以瞄准，就造成打不中容错率低，瞄准方式改为鼠标瞄准，点击鼠标左键发射炮弹」把玩家侧战斗期瞄准从「建造期 `aim` 锁定 + 靠车身转向」改为**鼠标覆盖**（`CannonBank.aim_override` / `aim_world`，`muzzle_dir()` 双路径，Bot 零改动）、三个战斗页左键开火、准星空心环，并把速度拆成纵向/横向分量 + 新增始终生效的 `k_ang_damp` 改善转向手感；难度侧改 `craft_time_s`（不是 `reload_s`）、`enemy_quota_multiplier`、`enemy_reinforce_delay_s` 与 `aim_error_deg_recruit`（§6.5 更正、§11.4.2.10、§16.1 Q24 更正、§17）**；**v3.26 按用户「查看鼠标移动和瞄准光标有没有错位」核查并修复了鼠标指针同步：确认坐标系与准星均无错位（真实窗口 7 点最大偏差 0.98 设计像素、准星与 OS 光标差 0.000/0.000），但发现并修掉「只在鼠标动了才重算」导致的两种可见错位（切页 / 改窗口尺寸后准星停旧点、最远偏 570×140 px；坦克行驶 400 px 后炮口偏 5.05°），新增 `_battle_pointer()` / `_sync_battle_pointer()` 与永久回归 `tests/pointer_sync_smoke.gd`（§11.4.2.11、§17）**；**v3.27 按用户「目前测试到改进模块和管道模块不会继续传递弹药，导致阻塞通路，能否是某些测试用例来测试某些模块组合的实际效果能否达到需求」建立**模块组合矩阵测试**（新增 `tests/ammo_combo_smoke.gd`：23 条正向组合 + 4 条契约断言，覆盖直管 rot0/90/180、四分之一弧四向、二分之一弧两向、一分二两向、二合一双源、四通双源双汇两向、改进器六种串法、两格模块两向），并修掉三个真实缺陷：`blocked` 永久化让源**永久停发**该口径、模块出口遇到 reject **静默重试**永不上报、退弹与源头缓存满**互相死锁**；另把「拒收」计数接到试驾页 HUD（§7.8、§11.4.2.12、§17）**；M3.5 Android 导出预设已写入工程但**因环境缺导出模板与 Android SDK 未产出 APK**（§13.7）；**移动端触屏操控已完成设计（§11.6）、代码零实现；Q25（暂不支持手柄）与 Q26（只做横屏）仍然有效，但 **Q24「不需要右侧瞄准摇杆」的裁定依据已被 v3.25 的鼠标瞄准推翻，需用户重新确认**（见 §16.1）**）
+> 版本：**v3.28** · 2026-10-23 · 状态：设计文档（**M2 建造编辑器与运行期 `BUILD_MODE`、M3 坦克物理与操控、M4 弹药输送网络、M5 战斗结算与可拆解摧毁、M6 机器人 AI 与完整对局、**M9 波次生存单人玩法**均已实现并验证**；`data/*.json` 是正式运行时数值来源；**M3 转向手感缺陷已于 v3.1 修正（§5.2、§5.6），v3.25 再次调整（横向阻力 + 始终生效的角阻尼，§5.2、§11.4.2.10）**；**M5 的六条有意简化已写入 §8.9，其自击缺陷与撞墙不连锁两项已于 M6 修复**；**M6 的三层 AI、四档难度、12 张 Bot 蓝图已实现，实现记录在 §10.5**；**v3.4 把单人模式重写为「波次生存 + 升级菜单 + 波间商店 + 每 5 波 Boss」并禁止战斗期改装（§3.4、ADR-017），v3.6 已完成其实现：`survival` 块 36 键、竞技场 `props`、`boss_warlord.json`、`scripts/survival_run.gd` 与主场景的四个页面（§3.6 实现记录）**；**v3.7 补上「改装坦克」UI 入口：`STAGE_MODIFY` 子阶段 + 升级页/商店页按钮 + 改装页（§3.4.7）**；**v3.8 修用户报告的界面四项：窗口启动即最大化（`window/size/mode=2`，实测 `WINDOW_MODE mode=2 size=(1842, 1057)`）、所有菜单补齐 hover + 左键点击（含主菜单难度按钮与升级卡/商品格）、修掉主菜单「难度/提示」压在「退出」行上的重叠、并让改装页**复用建造页整套编辑器**而非自带第二套（§2.3、§3.4.7、§11.4.2.1）**；**v3.9 修用户报告的「炮弹似乎不能对敌人造成伤害」并重做生存页战斗 UI：起始坦克 20mm → 76mm（`SurvivalRun.build_starter()` 为唯一布局来源，§3.4.8）、命中事件补齐文案/动效/命中闪光、敌我坦克逐部件按血量着色、HUD 新增「总输出」、新增坦克镜像面板（§11.4.4.2）**；**v3.5 修复了 R17 列出的 9 个碰撞/损坏缺陷，并在修复过程中又发现并修掉 3 个实现级 bug（§8.7）**；**v3.6 同时把 `duel` 扩为任意 tag/team 集合，使同屏多敌人成立（§10.6）**；**v3.12 修正了 `scripts/` 文件计数（实为 18 个 `.gd`，非 16）并修复了截图取图时刻不固定导致「逐字节等价」证据链失效的缺陷（§11.4.9）**；**v3.13 对全部 7 个截图钩子做了可复现性重验（7/7 逐字节相同），并完成与历史截图的差异归因：静态 UI 区零差异（§11.4.9.1）**；**v3.14 新增 `--steps=N` 预热步数参数化，使战场区渲染回归可验证（裁切后同 N 两次逐字节相同，§11.4.9.2）**；**v3.15 按用户「配件、摆放更合理 / 初始敌人过于大 / 敌人不断地生成 / 不同等级不同坦克」重做生存模式坦克阵容：起始车 8×2 单履带 → 6×4 双履带（§3.4.8）、13 张 Bot 蓝图全部重写为每档三种不同轮廓且招募级从 30 格缩到 12–20 格（§14.8）、新增 `enemy_quota_for()` + 本波内按间隔补兵，并把通过条件改为「配额耗尽且场上无敌人」（§3.4、§14.8）**；**v3.16 更正 v3.15 的两个数字（弹药库殉爆死亡时间 21.8 s → 36.4 s、瞄准命中区间 12–22/1–2 → 8–22/0–2），只改注释与文档文字、代码零改动（§3.4.8、§17）**；**v3.17 修用户报告的栈溢出崩溃：`_handle_mouse()` 与 `_handle_survival_mouse()` 自 v3.8 起双向互调，生存页改装模式下任何一次网格点击都会无限递归——已改为单向转发，并新增走真实 `_input()` 的 `tests/mouse_input_smoke.gd` 作永久回归（§11.4.2.2、§17）**；**v3.18 按用户要求把编辑器三层做成「看得见的分层」：非选中层降到 22% alpha、光标件随层切换、坦克默认在建造区居中，并修掉层级行压面板分隔线与「工具」标签压按钮两处重叠（§11.4.2.3、§17）**；**v3.19 建立版本控制：`git init` + 初始提交 `fd3857f`（77 文件 / 22366 行，本地 `Trigger-CN` / `759025229@qq.com`），并用 `.gitattributes` 钉死 `eol=lf` 以保护以文件字节为基准的验证体系（§11.4.9.1、§17）**；**v3.20 按用户「优化坦克和其他物品的碰撞箱逻辑，坦克的整体碰撞箱和中弹判定都由配件构成，受到伤害和造成伤害都要有悬浮数字提示」把**碰撞箱**从整车外接 AABB 改为逐配件格子（新增 `cell_world_rects()` / `cell_overlap_rect()` / `cell_overlap_circle()` / `cells_overlap_tank()`），并给生存页与对战页加上伤害/受击悬浮数字（§11.4.2.4、§17）**；**v3.20.1 修用户报告的 `SCRIPT ERROR: Out of bounds get index '8' (on base: 'PackedStringArray') at: _preview_cells`：`_selected_index` 是 `_option_ids()` 的下标，却被两处当成 `survival.inventory` 的下标钳制，而 `_ensure_option_visible()` 根本不钳制它——已在收口点统一按可选件数量钳制、`_preview_cells()` 加防御式钳制、`_mount_selected_inventory()` 改用 module_id 反查库存，并新增反向对照可复现的 `tests/editor_bounds_smoke.gd`（§11.4.2.5、§17）**；**v3.21 按用户「精细化坦克配件的特效，要能体现弹药制造、弹药装填、护盾、维修等效果，例如在模块上加入进度条，小窗口显示坦克镜像也要显示模块的细节」给每个模块加上进度条 / 护盾脉冲 / 维修连线，并重做镜像面板的逐部件行（§11.4.2.6、§17）**；**v3.22 按用户「生存模式的战斗 UI 也应该能复用到其他模式」把整套战斗视图（竞技场 / 障碍 / 中立物 / 车体 / 弹道 / 动效 / 命中闪光 / 伤害数字）抽成 `scripts/combat_view.gd`，对局页与生存页共用同一份实现，模式差异改为参数表达；对局页因此真正获得命中闪光与按血量分档上色（§11.4.2.7、§17）**；**v3.23 按用户「实现开火特效，提高所有口径炮弹的默认射程，炮弹没有命中时飞行到最远射程后也要有一个消失特效」把射程从全局单值 `max_range_px` 改为五口径各自的 `range_px`（1900/1820/1740/1660/1580，全部提高）、寿命改由射程反推（否则 76/120/155 只名义提高）、新增锥形炮口闪光与三环收缩消散（形状/时长/运动方向与命中闪光全不同），并修复了一个让「未命中飞满射程消散」永远无法发生的投影物矩形碰撞缺陷（§11.4.2.8、§17）**；**v3.24 按用户「升级效果模组应该也要和最初设计一样，需要安装在坦克上，并且需要输入弹药和输出弹药，来给弹药升级，在改装UI中，这些模块要显示输入输出箭头来辨别方向，不只是升级效果模块，其他所有有输出或者有输入的模块都要显示箭头，方便规划流水线，后续计划要深化流水线的概念」把升级从「整台聚合的抽象池」改为**逐发弹药携带的升级载荷**（改进器加工时写入、管路搬运、`CannonBank` 装填时接收、开火时交给 `field.spawn()`），给改装/建造 UI 的全部五类带端口模块加上输入/输出箭头，并把「深化流水线」写成后续计划（§11.4.2.9、§17）**；**v3.25 按用户「生存模式难度过高，敌人虽然用的小口径但是射速很快，玩家的默认坦克口径虽然大但是射速低，而且现在的摩擦力很低转向难以控制，难以瞄准，就造成打不中容错率低，瞄准方式改为鼠标瞄准，点击鼠标左键发射炮弹」把玩家侧战斗期瞄准从「建造期 `aim` 锁定 + 靠车身转向」改为**鼠标覆盖**（`CannonBank.aim_override` / `aim_world`，`muzzle_dir()` 双路径，Bot 零改动）、三个战斗页左键开火、准星空心环，并把速度拆成纵向/横向分量 + 新增始终生效的 `k_ang_damp` 改善转向手感；难度侧改 `craft_time_s`（不是 `reload_s`）、`enemy_quota_multiplier`、`enemy_reinforce_delay_s` 与 `aim_error_deg_recruit`（§6.5 更正、§11.4.2.10、§16.1 Q24 更正、§17）**；**v3.26 按用户「查看鼠标移动和瞄准光标有没有错位」核查并修复了鼠标指针同步：确认坐标系与准星均无错位（真实窗口 7 点最大偏差 0.98 设计像素、准星与 OS 光标差 0.000/0.000），但发现并修掉「只在鼠标动了才重算」导致的两种可见错位（切页 / 改窗口尺寸后准星停旧点、最远偏 570×140 px；坦克行驶 400 px 后炮口偏 5.05°），新增 `_battle_pointer()` / `_sync_battle_pointer()` 与永久回归 `tests/pointer_sync_smoke.gd`（§11.4.2.11、§17）**；**v3.27 按用户「目前测试到改进模块和管道模块不会继续传递弹药，导致阻塞通路，能否是某些测试用例来测试某些模块组合的实际效果能否达到需求」建立**模块组合矩阵测试**（新增 `tests/ammo_combo_smoke.gd`：23 条正向组合 + 4 条契约断言，覆盖直管 rot0/90/180、四分之一弧四向、二分之一弧两向、一分二两向、二合一双源、四通双源双汇两向、改进器六种串法、两格模块两向），并修掉三个真实缺陷：`blocked` 永久化让源**永久停发**该口径、模块出口遇到 reject **静默重试**永不上报、退弹与源头缓存满**互相死锁**；另把「拒收」计数接到试驾页 HUD（§7.8、§11.4.2.12、§17）**；M3.5 Android 导出预设已写入工程但**因环境缺导出模板与 Android SDK 未产出 APK**（§13.7）；**移动端触屏操控已完成设计（§11.6）、代码零实现；Q25（暂不支持手柄）与 Q26（只做横屏）仍然有效，但 **Q24「不需要右侧瞄准摇杆」的裁定依据已被 v3.25 的鼠标瞄准推翻，需用户重新确认**（见 §16.1）**）
 
 ---
 
@@ -1079,6 +1079,8 @@ effective_turn = turn_assist_1 + 0.7·turn_assist_2 + ...   // 同上
 | 一分二（Tee） | 轮询交替：第 1 发走 `out0`，第 2 发走 `out1`，交替；若一侧阻塞，**连发两发走另一侧**（不允许因此卡死） |
 | 二合一（Merge） | 两条入路按 `in0` 优先，`in0` 空时才取 `in1`；不对撞、不排队丢失 |
 | 四通（Cross） | `in0`→`out0` 直通优先（`out0` 满则转 `out1`）；`in1`→`out1` 优先 |
+
+> **就地更正（v3.28）**：本表「四通（Cross）：`in0`→`out0` 直通优先（`out0` 满则转 `out1`）；`in1`→`out1` 优先」这一行，**在 v3.28 之前从未真正生效**。`_spawn_round()` 把弹药的 `entry_port` 写死为「目标模块排序后的第一个 in 端口」，而 `_out_order()` 的 `cross` 分支靠 `entry_port == "in1"` 判直通，所以 `preferred` 恒为 0：**从 `in1` 进来的弹药一律被送到 `out0`，`out1` 侧的炮管永久 0 发**（实测 `mp6.txt`：`cross_in1_direct` 与 `cross_in0_direct` 结果完全相同，都是 `cannon2=23 cannon3=0`、`entry_ports=[in0=23]`）。v3.28 已把真实入口一路传下去（`_emit_from()` 传 `nodes[link]["port"]`、`_apply_strand_requests()` 在进入新段时更新），修后 `cross_in1_direct` 变为 `cannon2=0 cannon3=23`、`entry_ports=[in1=23]`。**上面这一行是设计意图，实现已于 v3.28 与之对齐**（§11.4.2.13）。
 
 - 所有分叉决策是**确定性**的（依赖端口序号与轮询计数器，计数器存在网络状态里并参与存档/回放）。
 
@@ -2756,7 +2758,136 @@ func _sync_battle_pointer() -> void:
 - **组合矩阵是纯领域层测试**：`AmmoNetwork` 直接由 `GridBuilder` 搭建，**不经过主场景、`Duel`、`CannonBank`**，开火走 `release_cannon()` 的测试路径而不是真实 `CannonBank.fire()`。它证明的是「网络调度正确」，**不是「游戏里真的能打出去」**。
 - **`combo4.txt` 的 T4 / `combo5.txt` 的 X1 存在探针摆位缺陷**（部件重叠 / 支路没接上），已在 `combo6.txt` 与 `ammo_combo_smoke.gd` 中修正；**这些失败是测试装置的问题，不是产品缺陷**。
 - **只有六种管道被测**（`conveyor_straight` / `arc_quarter` / `arc_half` / `tee` / `merge` / `cross`）；`conveyor_arc_half` 只测了 `rot0` / `rot90` 两个朝向（`rot180` / `rot270` 由对称性推出，未单独跑）。
-- **`_emit_from()` 仍然只走 `node_out[0]`**：模块主动投放不做轮询 / 多出口选路。这不影响本轮的组合（每个源都只有一条出口），但「源同时接一分二 / 四通的两个出口」这种结构下，模块只会往一个出口投。**未测、未改，属已知限制。**
+- **~~`_emit_from()` 仍然只走 `node_out[0]`~~ —— v3.28 已用探针证伪「这是限制」这个提法**：所有源角色（factory / depot / modifier）在 `_port_specs()` 里**只生成一个 `out0`**，所以取 `node_out[0]` 就是取唯一出口，不存在「多出口不选路」的缺陷。真正的分叉只发生在管件（`conveyor_tee` / `conveyor_cross`）上。**但这句旧描述背后藏着一个真缺陷**：`entry_port` 被写死成 `node_in[0]`，导致 `cross` 的「`in1`→`out1` 直通优先」**从未生效**（见 §11.4.2.13）。
+- **v3.28 新增的逐车道断言仍只覆盖非战斗路径**：`_check_lane()` / `_check_two_lanes_alive()` / `_check_both_sources_emit()` 都是领域层测试。它们能区分「一条车道吞掉全部流量」与「两条都活」，但不能证明游戏里真的会开火。
+- **未在 Android 上验证，任何 APK 均不存在。**
+
+#### 11.4.2.13 四通「直通优先」从未生效与逐车道回归（v3.28）
+
+**起因**：上一轮我提议「治理 `_emit_from()` 的多出口选路」，用户批了。**但先做探针后发现这个前提是错的** —— 见 §11.4.2.13 第一节。结论是：一个提错的方向，最终换来了一个真缺陷。
+
+##### 一、先证伪自己的前提（矩阵）：源根本没有第二个出口
+
+`tests/_tmp_mp.gd` 逐角色打印 `node_in` / `node_out`（`mp2.txt`）：
+
+| 模块 | in | out | node_out |
+| --- | --- | --- | --- |
+| `ammo_factory_20` | 0 | **1** | `["1,4:out0"]` |
+| `conveyor_straight` | 1 | 1 | 1 条 |
+| `cannon_20` | 1 | 0 | — |
+| `conveyor_tee` | 1 | **2** | `["3,4:out0", "3,4:out1"]` |
+| `conveyor_cross` | **2** | **2** | `["3,4:out0", "3,4:out1"]` |
+
+**所有源角色都只有一个 `out0`。** 所以 `_emit_from()` 取 `node_out[0]` 是取唯一出口，「不做多出口选路」不是限制。**这条旧「已知限制」已在 §11.4.2.12 第六节就地划掉。**
+
+##### 二、逐炮管计数：既有断言看不见「一条车道吞掉全部流量」
+
+`tests/_tmp_mp.gd` 的逐炮管结果（`mp2.txt`）：
+
+| 用例 | 逐炮管 `delivered` |
+| --- | --- |
+| `tee_two_cannons` | **11 / 11** —— 两侧都在喂 |
+| `tee_direct_no_straight` | **12 / 11** —— 同样两侧 |
+| `cross_two_cannons` | **22 / 0** —— 只有一侧 |
+| `cross_direct_no_straight` | **23 / 0** —— 只有一侧 |
+
+**为什么会这样**：v3.27 的 `cross_rot0_two_sources_two_sinks` 只断言「所有炮管加起来 `delivered >= 8`」（实测 45），**一条车道吞掉全部流量也照样通过**。合计断言看不见分配比例。
+
+##### 三、根因：`entry_port` 被写死成「排序后的第一个 in」
+
+`scripts/ammo_network.gd` 的 `_spawn_round()` 旧实现：
+
+```gdscript
+"entry_port": _port_id_of(String(parts[target]["node_in"][0])) if not (parts[target]["node_in"] as Array).is_empty() else "",
+```
+
+它取的是**目标模块排序后的第一个 in 端口**，而不是「这笔弹药实际从哪个 in 进来」。而 `_out_order()` 的 `cross` 分支正是靠它决定直通方向：
+
+```gdscript
+var preferred := 1 if String(r["entry_port"]) == "in1" else 0
+```
+
+于是 `preferred` **永远等于 0**。**§7.3 写明的「`in1`→`out1` 直通优先」在实现里从未生效过。**
+
+**区分性证据**（`tests/_tmp_mp3.gd`，修前 `mp6.txt`）：
+
+```
+MP3 case=cross_in1_direct delivered=[cannon2=23 cannon3=0] entry_ports=[in0=23]
+MP3 case=cross_in0_direct delivered=[cannon2=23 cannon3=0] entry_ports=[in0=23]
+```
+
+**两条用例结果完全相同** —— 工厂明明摆在**南侧**（`in1`），`entry_port` 却记成 `in0`。而修后同一组用例（`mp7.txt`）：
+
+```
+MP3 case=cross_in1_direct delivered=[cannon2=0 cannon3=23] entry_ports=[in1=23]
+MP3 case=cross_in0_direct delivered=[cannon2=23 cannon3=0] entry_ports=[in0=23]
+```
+
+**方向正确分离了** —— 这才是区分性证据，而不是「两边都有弹」。
+
+##### 四、修法（三处，均在 `scripts/ammo_network.gd`）
+
+1. **`_spawn_round()` 新增 `entry_port` 参数**（默认空串）。空串时退回 `_in_key_of(target)`，只为守「调用方忘了传」时的确定性。
+2. **`_emit_from()` 在投放给 conveyor 时传入真实入口**：
+   ```gdscript
+   var entry_port := String(nodes[link].get("port", ""))
+   _spawn_round(ammo_id, part_index, target, String(outs[0]), upgrades, entry_port)
+   ```
+3. **`_apply_strand_requests()` 正向进入新一段时更新 `entry_port`**：用 `request["link"]` 反查 `nodes[link]["port"]`。修掉第二处错误 —— 「穿越一段管路后再进四通」时，旧实现用的是出生时的值。
+
+**为什么这样修**：入口方向是**投递那一刻的事实**，不是从目标模块的端口表能推导出来的属性。任何「从目标反推来源」的写法都只是在猜，遇到多入口模块必错。
+
+##### 五、新增逐车道永久回归（`tests/ammo_combo_smoke.gd`）
+
+文件从 17932 B → **24278 B**，新增 4 条用例与 3 个辅助函数：
+
+| 用例 | 断言 | 修前 | 修后 |
+| --- | --- | --- | --- |
+| `cross_in1_goes_out1` | 从 `in1` 进的线，`out1` 侧炮管 ≥ 6 且 ≥ `out0` 侧 2 倍 | **0 / 23 失败** | **23 / 0 通过** |
+| `cross_in0_goes_out0` | 对称对照：从 `in0` 进的线，`out0` 侧 ≥ 2 倍 | 23 / 0 通过 | 23 / 0 通过 |
+| `tee_feeds_both_lanes` | 两侧各 ≥ 4，且少的一侧 ≥ 多的一半 | 11 / 11 通过 | 11 / 11 通过 |
+| `merge_in1_not_starved` | 两个源各至少 emit 5 次 | 27 / 25 通过 | 27 / 25 通过 |
+
+**三条断言为什么必须同时存在**：
+- `cross_in1` 单独存在时，实现改成「恒走 out1」也能过 → 必须有 `cross_in0` 对称对照。
+- `cross` 两条存在时，实现改成「按入口严格独占」也能过 → `tee` 的轮询与 `merge` 的不饿死是不同机制，各需一条。
+- **合计断言全部保留**（原有 23 条组合不变），逐车道是**追加**而不是替换 —— 两条断言各管一件事。
+
+##### 六、反向对照（关键证据）
+
+`.me/tmp/main/negctl28.py apply` 把三处修复退回旧行为（52425 B），同一测试立刻报：
+
+```
+AMMO_COMBO_FAIL cross_in1_goes_out1_primary_0
+AMMO_COMBO_FAIL cross_in1_goes_out1_leak_0_23
+  lane   cross_in1_goes_out1             primary=0 secondary=23
+  lane   cross_in0_goes_out0             primary=23 secondary=0
+  lanes  tee_feeds_both_lanes            a=11 b=11
+  both   merge_in1_not_starved           src0=27 src1=25
+AMMO_COMBO_FAIL count=2
+```
+
+**只有 `cross_in1` 那一条失败** —— 这正好说明：另外三条断言覆盖的是**已经正确的行为**（防回归），只有 `cross_in1` 抓的是**本次修掉的缺陷**。两者都要有。恢复后 `AMMO_COMBO_OK`，`ammo_network.gd` 回到 **53087 B**。
+
+##### 七、验证汇总
+
+| 项 | 工件 | 结果 |
+| --- | --- | --- |
+| `--check-only` | `chk28a.txt` / `chk28c.txt` | 均 **80 B**，无 `Parse Error` |
+| 组合矩阵（修后） | `combo28b.txt` / `combo28d.txt` | **`AMMO_COMBO_OK`** |
+| 反向对照 | `combo28_neg.txt` | **`AMMO_COMBO_FAIL count=2`**（`cross_in1` 主道 0 发） |
+| 既有 `ammo_net_smoke` | `net28a.txt` | `AMMO_OK` |
+| 既有 `upgrade_flow_smoke` | `upg28a.txt` | `UPGRADE_OK` |
+| 全量 17 项 smoke | `s27a.txt` 840 B / `d27c1c45` | **17 项全绿，与 v3.27 基线逐字节相同** |
+
+##### 八、诚实声明（本轮没做到的事）
+
+- **没有任何人工验证** —— 没有人用手搭过四通，也没有人真的看过两条车道分流；全部证据是 headless 探针。
+- **逐车道断言仍是纯领域层** —— `AmmoNetwork` 直接由 `GridBuilder` 搭建，不经主场景 / `Duel` / `CannonBank`。
+- **只测了 `cross` 的 `rot0`** —— `rot180` 的入口对应关系由 `_rotate_vec()` 对称性推出，未单独跑。
+- **`cross` 单源接两出口仍然只喂一侧** —— 那**不是缺陷**，是 §7.3 直通优先的设计语义：`out0` 不堵就永远轮不到 `out1`。分流应用一分二。这一点容易让玩家误以为「坏了」，需要在 UI 上说明，但本轮未做 UI。
+- **`merge` 的 in0 优先语义未变** —— 本轮只补了「in1 不会饿死」的断言，没有改调度。
+- **未在 Android 上验证，任何 APK 均不存在。**
 - **未在 Android 上验证，任何 APK 均不存在。**
 
 #### 11.4.3 两个 SETUP 界面
@@ -4007,5 +4138,7 @@ M3 的物理验收基准（`M 61.0 u` / `I 104 064 u·px²` / `T 9000` / `v_max 
 | 2026-10-23 | v3.25 | **鼠标瞄准 + 左键开火 + 生存难度与转向手感**（用户原话：「生存模式难度过高，敌人虽然用的小口径但是射速很快，玩家的默认坦克口径虽然大但是射速低，而且现在的摩擦力很低转向难以控制，难以瞄准，就造成打不中容错率低，瞄准方式改为鼠标瞄准，点击鼠标左键发射炮弹」）。① **先纠正一个会静默失效的认知**：弹药的物理链路是「工厂造弹 → 管路 → 炮管装填 → 开火」，炮管只有拿到弹才能装填，所以**有效射速 = max(`craft_time_s`, `reload_s`)**。玩家起始车被 `ammo_factory_76.craft_time_s = 1.5` 卡住（不是 `cannon_76.reload_s = 1.10`），招募级 Bot 被 `ammo_factory_20.craft_time_s = 0.45` 卡住（不是 `cannon_20.reload_s = 0.35`）。**只调 `reload_s` 对双方实际射速零效果**——smoke 会全绿、数据会「变好看」，而玩家体感一点都不会变。② **鼠标瞄准**：`CannonBank` 新增运行期字段 `aim_override` / `aim_world`（挂 cannon 字典，**不挂 `part`**——`part["aim"]` 是建造期配置，随蓝图序列化并参与 undo），`muzzle_dir()` 改为双路径：有覆盖时用绝对世界角，与 `body.heading` **完全解耦**；无覆盖时退回 `heading + deg_to_rad(aim)`。新增 `aim_at(index, target) -> bool`（`atan2` 算世界角；目标与炮管中心重合时保持原方向；返回「方向是否真的变了」，0/false **不是失败**）/ `aim_all_at(target) -> int` / `clear_aim_override()`；`reload_from_body()` 的 snapshot 新增两字段并在拓扑重建时复制（否则每波开局都要重新晃鼠标）。**Bot 侧零改动**：`bot_ai._drive()` 从不调 `aim_at()`，所以「弹道 = `heading + aim`」的开火判据完全不受影响——这是本轮最安全的边界划分。③ **左键开火**：`main.gd` 的 `_input()` 在**生存页分流之前**拦截战斗页左键（放在之后会被 `_handle_survival_mouse()` 转发给 `_handle_mouse()` 然后静默早退，玩家「点了没反应」），`_is_battle_screen()` 精确限定 DRIVE / MATCH（排除 `is_over` 与 `paused`）/ SURVIVAL 的 `STAGE_BATTLE`；`_fire_battle_player()` 内部**又调一次 `_aim_with_mouse()`**，保证同帧「先瞄再开火」，重复调用幂等。新增 `static _screen_to_world()`（`CombatView.to_screen()` 的精确逆变换，`scale <= 0.0001` 回退原点不除零）、`_aim_player_cannons()`、`_player_bank()`、`_aim_with_mouse()`、`_battle_view()`（返回 `{view, arena, scale}`，**每页读自己的竞技场**）。三个战斗页的 exit 函数都调 `clear_aim_override()`。④ **准星**：新增 `AIM_RETICLE_RADIUS 9.0` / `AIM_RETICLE_WIDTH 1.5` / `AIM_RETICLE_CROSS 5.0`，**空心环 + 十字**——与端口箭头（短线+箭翼）、瞄准线（细长线段）、命中闪光（实心圆外扩）、消散（三圈内收+刻线）在**形状上**全可区分，不靠颜色。只在鼠标位于战场区矩形内时绘制；零随机、零时间依赖。三个 `_draw()` 都**最后**画准星（否则压在特效上会被遮）。`_draw_aim_reticle()` 内部先判 `_is_battle_screen()`，所以升级/商店/结算页不会冒出环。⑤ **物理**：`tank_body.step()` 把速度拆成**纵向 / 横向**两个分量分别施加阻力（纵向 `k_drag`，横向新增 `k_lateral_drag = 0.05`，大 12.5 倍），并新增**始终生效**的线性角阻尼 `k_ang_damp = 1.6`（旧版线性项只在 `|steer| <= 0.001` 的 `k_ang_brake` 分支里，按住转向时 ω 一路撞 `omega_max`）。**`max_speed()` 闭式 `sqrt(T/(M·k_drag))` 仍精确成立**（直线时横向分量为 0，`physics_smoke._check_terminal_speed()` 的前提）；**`omega_max` 仍是 3.0，未提高**。⑥ **难度平衡（全部进 `data/*.json`）**：`ammo_factory_20.craft_time_s 0.45 → 0.85`（招募级 2.2 → 1.2 发/秒）、`ammo_factory_40 0.8 → 0.95`、`ammo_factory_76 1.5 → 1.1`（玩家实际射速 1.5 → 1.1 s/发，`reload_s` 是硬闸）、`enemy_quota_multiplier 3.0 → 2.0`、`enemy_reinforce_delay_s 5.0 → 8.0`、`aim_error_deg_recruit 8.0 → 12.0`。**`reload_s` 五口径全部未动**——这也是 `cannon_smoke._check_data_fields()`（写死 `cannon_76: [1.1, 20.0]`）与 `_check_reload()`（硬编码 1.10 s 时序）**不需要改**的原因。**`craft_time_s` 是模块数据，对局页 Bot 也会受影响**，这是有意的但必须知道。⑦ **HUD 文案**：三处 `_status_message` 与三处 `_draw_text("空格 开火")` 改为「鼠标瞄准 · 左键开火（空格备选）」；`KEY_SPACE` 分支一字未改，**键盘开火仍然可用**。⑧ **截图探针新参数 `--cursor=x,y`**：`--capture` 路径不产生任何 `InputEventMouseMotion`，`_mouse_position` 停在 `Vector2.ZERO`（战场区外），`_draw_aim_reticle()` 会早退——截图上连准星都没有。新增该参数把鼠标位置钉到指定点并在页面建好后调一次 `_aim_with_mouse()`。**不传时 `Vector2.INF`，截图路径与之前完全一致**。⑨ **验证**：`--check-only` `cannon_bank` / `tank_body` / `main` 三次均 **78 B / `6ca5b6ba`**（`c25_all.txt` 42 B / `c527e1c3`、`c25_main3.txt` 78 B）；新增 `tests/aim_smoke.gd`（8698 B，7 组断言：方向正确 / 与 `heading` 解耦 / `clear` 回退 / 多炮一致 / 非法下标不改状态 / 重合目标保持原向 / 坐标往返回退）；`tests/mouse_input_smoke.gd` 新增第 ⑧ 段（真实 `STAGE_BATTLE` 下灌真实 `InputEventMouseButton`，断言炮管切到 `aim_override`、`aim_world` 与点击方向差 ≤ 0.02 rad、最近事件变成开火反馈）；**15 项 smoke 全绿**（`s25b.txt` 787 B / `e4b6afa6`）：`PHYSICS_OK mass=61.0 inertia=104064 v_max=192.1 turn180_s=1.70 spin_stop_s=0.43` / `CANNON_OK shots=3 reload76=1.10 range=1740` / `AMMO_OK` / `UPGRADE_OK` / `AIM_OK cannons=2` / `BUILD_OK` / `RUNTIME_OK` / `DATA_OK files=23 modules=45 ammo=5 upgrades=9 arenas=3 blueprints=14` / `DATA_ERROR_OK errors=30` / `COMBAT_OK` / `MATCH_OK` / `EXPEDITION_OK` / `SURVIVAL_OK` / `MOUSE_OK` / `PREVIEW_OK`。**物理基线已重新记录**：`v_max 192.1` 未变，`turn180_s 1.35 → 1.70`，`spin_stop_s 0.62 → 0.43`（旧值不得再引用）。⑩ **像素证据**：`v25_surv.png` = `v25_surv_b.png` = 196428 B / `720fbad3`（`--steps=420 --cursor=960,540` **两次逐字节相同**）、`v25_surv_s300.png` 191343 B / `33afdd19`（`--steps=300`，**与 420 不同**，证明参数真生效）；`v25_surv_nocursor.png`（195078 B / `c9c14f6b`）与带 cursor 版 `REGION_TOTAL diff_px=3722`、bbox `(928,505)–(994,575)` = 133×71 px，且**其余六个区域 diff_px 全为 0**（左/右 HUD、镜像面板、状态栏、镜像标题条）——差异**恰好只是准星**；`crop25_surv.png` vs `crop25_nocursor.png` 6× 放大对比：带 cursor 版中间有完整亮绿空心环 + 十字，不带版同一位置**空白**。对局页 `v25_match.png` 146903 B / `7a788b7d`、试驾页 `v25_drive.png` 217047 B / `96306344`，`Image_View` 目视确认准星都在战场区中心；升级页 `v25_levelup.png` 218721 B / `9f671a90` 与商店页 `v25_shop.png` 250448 B / `5e295005` 目视确认**没有准星**（左键在此是选卡 / 买商品）；改装页 `v25_modify.png` **270209 B / `2c643eb3` 与 v3.24 逐字节相同**。⑪ **文档**：§6.5 与 §16.1 Q24 行均**就地追加更正**（append-only，历史行一字未改），新增 §11.4.2.10 全节。**Q24 的裁定依据「靠车身转向」已被本轮推翻，需用户重新确认；在重新裁定前不得自行实现右侧瞄准摇杆。**⑫ **本周期自伤（如实记录）**：`main.gd` 的 `--cursor` 参数解析块两次 `File.Edit` 范围算错（缩进错位 + 重复注释），均读回后修正；`tests/mouse_input_smoke.gd` 因未 preload `SurvivalRun` 导致一次 `Parse Error: Identifier "SurvivalRun" not declared`（737 B 失败工件 `mouse25.txt`），补 preload 后 `MOUSE_OK`。**如实声明**：**从未有人真的用鼠标瞄准过、也没有人真的点左键开过炮**——所有验证都是脚本灌合成事件或像素比对；**准星没有专属 smoke 断言**（只有两张截图 + 一次 6× 放大 + 一次有/无 cursor 的区域比对）；**升级页 / 商店页 / 改装页的左键语义未被真实点击验证**，只由代码路径与两张「准星未出现」的截图间接支持；**键盘空格开火未在本轮重新实测**；**鼠标瞄准只在桌面键鼠下有意义，移动端仍无任何瞄准手段（Q24 待裁定）**；**未在 Android 上验证，任何 APK 均不存在**。 | §6.5 §11.4.2.10 §16.1 §17 |
 | 2026-10-23 | v3.26 | **鼠标指针同步：准星与炮口每帧跟随真实光标**（用户原话：「查看鼠标移动和瞄准光标有没有错位」）。① **结论分三层，必须分开陈述**：**坐标系没有错位** —— 真实窗口 7 个采样点，`get_viewport().get_mouse_position()` 与「按 `get_final_transform()` 反算的目标设计点」最大偏差 **0.98 设计像素**（来源是 OS 光标只接受整数窗口像素：308.92 → 308 → 回算 321.04），**投影链路无系统误差**（`WINDOW_MODE mode=2 size=(1842,1057)`、`final scale=(0.959375,0.959259) offset=(0.0,11.0)` —— 1920×1080 等比缩到 1842×1036、上下各约 10.4 px 黑边）；**准星像素与 OS 光标零错位** —— 真正收到 motion 的采样点上 `get_final_transform() * _mouse_position = (308,174)`、`DisplayServer.mouse_get_position() - window.position = (308,174)`，**差 0.000/0.000**；**但「只在鼠标动了才重算」是真缺陷**。② **缺陷 A（切页 / 改窗口尺寸）**：`_mouse_position` 只由 `InputEventMouseMotion` 更新。`STALE_MENU read=(390,400)` → `_enter_survival()` → 光标已在战场中心 `vp=(960,540)`，而 `read=(390.0,400.0)`、**gap=-570.00/-140.00**；`STALE_RETICLE at=(374.2,394.7) vs cursor=(921,529)`、**gap=-546.8/-134.3**。`(390,400)` **落在 `DRIVE_VIEW`（320,168,1216,684）内**，所以准星被画出来了、只是画在 570×140 设计像素之外——**玩家看到的就是「错位」**。改窗口尺寸后同样陈旧（`vp` → (1178.88,640.57)、`read` 仍 390,400）。③ **缺陷 B（坦克驶而鼠标静）**：`aim_world` 是**角度快照**，准星标的是**世界点**。`DRIFT_t0 angle_err_deg=0.00 miss_at_1000px=250.0` → 行驶 400 px 后 `DRIFT_moved400 angle_err_deg=5.05 miss_at_1000px=649.5` —— **准星在说谎**。④ **修法**：新增 `_battle_pointer()`（战斗页从 `get_viewport().get_mouse_position()` 取当前设计坐标；`--capture` 路径退回钉死的 `_mouse_position`，否则截图会随桌面真实鼠标漂移、历史基线失效）+ `_sync_battle_pointer()`（`_process()` 末尾每帧调，`_is_battle_screen()` + `_capture_target` 双闸），`_draw_aim_reticle()` 改为走 `_battle_pointer()`。**每帧而非切页刷新一次**：缺陷 B 说明不切页、不动鼠标也会偏。**放 `_process()` 而非 `_input()`**：`_input()` 只在有事件时被调，而「没有事件」正是触发条件。⑤ **验证**：`c26b.txt` `--check-only` 干净（80 B）；`stale2.txt` 修后 `STALE_ENTRY read=(960.0,540.0) vp=(960.0,540.0) gap=0.00/0.00`、`STALE_RETICLE at=(921,529) cursor=(921,529) gap=0.0/0.0`、`STALE_RESIZE gap=0.00/0.00`；`drift3.txt` 修后 `angle_err_deg=0.000 cross_at_cursor_radius=0.00`；新增永久回归 `tests/pointer_sync_smoke.gd`（`ptr_sync2.txt` = `POINTER_OK`，守四条：读实时视口不读缓存 / `--capture` 路径读钉死值且同步无操作 / 每帧同步幂等 / 非战斗页不被改写）；**16 项 smoke 全绿**（`s26c.txt` 805 B / `c003ff0d`，原 15 项数值一字未变）；`v26_surv.png` **196428 B / `720fbad3` 与 v3.25 基线逐字节相同**（截图路径未被影响）。⑥ **文档**：新增 §11.4.2.11 全节（**98 行，含标题**）。**如实声明**：**仍然没有人真的用手在游戏里移动过鼠标**（真实光标证据来自 `Input.warp_mouse()` + `DisplayServer.mouse_get_position()`，不是人手操作）；`tests/pointer_sync_smoke.gd` 在 headless 下 `get_mouse_position()` 恒为 (0,0)，**只能守「指针来源」契约，不能证明真实光标下逐像素对齐**（边界已写进测试文件顶部注释）；`_sync_battle_pointer()` 每帧调 `_aim_all_at()`、**未做性能测量**；**未在 Android 上验证，任何 APK 均不存在**。 | §11.4.2.11 §17 |
 | 2026-10-23 | v3.27 | **弹药模块组合矩阵 + 三个阻塞缺陷修复**（用户原话：「目前测试到改进模块和管道模块不会继续传递弹药，导致阻塞通路，能否是某些测试用例来测试某些模块组合的实际效果能否达到需求」）。① **先建矩阵再谈修复**：四批探针（`combo1.txt` 18932 B / `b14f714e` 5 个 rot=0 水平链全通；`combo2.txt` 4977 B / `22b2e3fe` 12 个含弧管与竖直链，3 条失败是我自己的摆位错；`combo3.txt` 7352 B / `b1290070` → `combo3c.txt` 7553 B / `6016e49b` 抓到三个真实缺陷；`combo6.txt` 3174 B / `73156a6b` 修正旋转用例后重跑）。**两个推断被证伪并写进文档**：`conveyor_arc_half` 的 `_port_cell()` 没有取错格（footprint 2 旋转后仍是一条直线，W/E 两端就是两格首尾）；`conveyor_cross` 的 `_out_order()` 没有索引错位（`node_out = [out0, out1]`、`in0_order = [out0, out1]`、`in1_order = [out1, out0]`）。另**`cross` 双汇只有一侧被喂是设计行为**（§7.3 直通优先），不是缺陷。② **缺陷 1 `blocked` 永久化**：`_apply_module_requests()` 的 origin 分支把 `blocked[ammo_id] = true` 写进源 state，**全代码没有清除点**（只有 `rebuild()` 重置）——实测 factory20 → 直管 → cannon76 在 240 tick 内只有 `emitted=1 / rejected=1 / returned=1`，此后彻底静止。**这就是「弹药走过一次接错的管路后工厂再也不出弹」的根因。** 改为**到期退避**：新增 `retry_ticks()` / `_in_backoff()` / `_start_backoff()`，时长复用 `conveyor_strand_grace_s`（1.0 s = 20 tick），不引入新的魔法数字；修后同用例 `emitted=8 / rejected=8 / returned=7`。③ **缺陷 2 模块出口对 reject 静默**：`_emit_from()` 原本 `if _probe(...) != "ok": return false`，把「口径不符」与「暂时装不下」一视同仁，于是每 tick 重试、永不放弃、**一条 `rejected` 事件都不产生**（`combo3.txt` E1：240 tick 只有 `emitted=3 / queued=2`，`modifier out=2` 与 `congestion` 一直不动）。改为 reject 单独处理（`_start_backoff()` + `_push_event("rejected", ...)`），`full` 保持原样；修后同用例 `rejected=11`。新增 `rejected_total` 计数器与 `rejected_count()`（不随 `drain_events()` 清零），并把试驾页 HUD 供弹行从「M4 管路 · 在途 / 拥塞 / 断链」改为「M4 在途 / 拥塞 / 断链 / **拒收**」。④ **缺陷 3 退弹与源头缓存满互相死锁**：退弹回到 `trail.size() <= 1` 时走 `kind = "origin"` 重新 `_accept` 源头，失败则 `continue` 等下一 tick——但源头腾不出缓存恰恰是因为第一段管路被这发退弹占着。实测 `combo5.txt` X4（一分二，一支接 20mm、一支接 76mm）360 tick 后仍是 `p2@0.00R p1@1.00` / `buf=3`、好的一支炮管 **0 发**。修法两层：**退弹无条件回收到源头**（新增 `_absorb_source()`，不看容量；退弹本就是从这里出发的那一发，往返一次不改变系统弹药总量，超出量 ≤ 在途弹药数）＋ **退弹与相邻正向弹交换段位**（新增 `_single_out_to()` / `_apply_swaps()` / `_swap_before()`，在 `tick_once()` 步骤 2 中于 `_apply_strand_requests()` 之前执行，局部、不瞬移、不破坏每段容量 1 发）；修后 `good_delivered = 16`。⑤ **新建第 18 项永久回归 `tests/ammo_combo_smoke.gd`**：**23 条正向组合 + 4 条契约断言**，输出 `AMMO_COMBO_OK` —— 直管 rot0/90/180、6 段长链、四分之一弧**四个朝向**、二分之一弧两向、一分二两向（断言两侧都收到弹）、二合一双源、四通双源双汇两向、改进器六种串法（夹直管间 / 弧管后 / 直贴炮管 / 两个串联 / 改进器→仓库→炮管 / 仓库→改进器→炮管）、两格模块横竖两向；契约四条为 `reject_reports_event` / `reject_source_recovers` / `return_does_not_starve` / `modifier_orphan_out`。**方法学**：每条组合先断言「每个 out 端口都连上了」再断言流量（分清「连错了」与「卡住了」），**摆位失败一律让用例失败、绝不静默跳过**，否则会得到假装通过的矩阵。⑥ **反向对照（关键证据）**：`.me/tmp/main/negctl27.py apply` 把三处修复退回旧行为，同一测试立刻报 **`AMMO_COMBO_FAIL count=3`**（`reject_reports_event rejected=0`、`reject_source_recovers emitted=1`、`return_does_not_starve good_delivered=1`，`combo27_neg.txt` 2100 B / `36673d5c`）；恢复后回到 **51722 B**。一个新测试第一次就全绿有两种可能——实现真的对、或者测试根本没测；反向对照是排除后者的唯一手段。⑦ **验证**：`--check-only` `ammo_network.gd` / `main.gd` 均 **80 B / `1c3fbc31`**（`chk27c.txt` / `chk27main.txt` / `chk27net2.txt`）；`tests/ammo_combo_smoke.gd` **`AMMO_COMBO_OK`**（`combo27a.txt` 1573 B / `433bbddc`，23 flow + 4 契约）；**全量 17 项 smoke `s27a.txt` 858 B / `75a5e1a1` 全绿**（原 16 项数值一字未变）；`v27_surv.png` **196428 B / `720fbad3` 与 v3.25 / v3.26 基线逐字节相同**；`v27_drive.png` 217967 B / `33826a80` 目视确认 HUD 新行「M4 在途1 拥塞1 断链0 拒收0」且布局未破；`cap_s27.log` 655 B / `f99a1b72` 与 `cap_d27.log` 253 B / `834e709a` 均含 `WINDOW_MODE mode=2 size=(1842, 1057)` 与 `CAPTURE_OK`、**无 `SCRIPT ERROR`**。⑧ **自伤（已修）**：给 `route_status()` 加 `blocked` 字段时**漏掉 `return result`**，`upgrade_flow_smoke` 立刻报 `Parse Error: Not all code paths return a value`（`upg27a.txt` 1922 B），补回后干净。**`_modifier_has_room()` 的容量语义本轮仍未改动**（`total < upgrade_slots + 1` 与 §6.4「输入缓存 1 发」的差异只记录）。**如实声明**：**没有任何人工验证**——没有人用手搭过这些管道、也没有人真的看过弹药流动，全部证据是 headless 探针 + 脚本驱动截图；**组合矩阵是纯领域层测试**（`AmmoNetwork` 直接由 `GridBuilder` 搭建，**不经过主场景 / `Duel` / `CannonBank`**，开火走 `release_cannon()` 的测试路径而非真实 `CannonBank.fire()`），只证明「网络调度正确」而**不是「游戏里真的能打出去」**；`combo4.txt` T4 与 `combo5.txt` X1 的失败是**探针摆位缺陷**（已修正），不是产品缺陷；`conveyor_arc_half` 只测 `rot0` / `rot90`（`rot180` / `rot270` 由对称性推出、未单独跑）；**`_emit_from()` 仍只走 `node_out[0]`**，源同时接一分二 / 四通两个出口时只会往一个方向投（未测、未改、已知限制）；**未在 Android 上验证，任何 APK 均不存在**。 | §7.8 §11.4.2.12 §17 |
+
+| 2026-10-23 | v3.28 | **四通「直通优先」从未生效 + 逐车道回归**（用户原话：「按你说的做」——批准上一轮提议的「治理 `_emit_from()` 多出口选路」）。① **先把前提证伪**：用 `tests/_tmp_mp.gd` 逐角色打印 `node_in` / `node_out`（`mp2.txt`），证明**所有源角色（factory / depot / modifier）在 `_port_specs()` 里只生成一个 `out0`**。所以 `_emit_from()` 取 `node_out[0]` 是取**唯一出口**，「不做多出口选路」**从来不是限制** —— 上一轮汇报把它列为「已知限制」是错的，已在 §11.4.2.12 第六节就地划掉。真正的分叉只发生在管件（`conveyor_tee` / `conveyor_cross`）上。② **但逐炮管计数暴露了另一个东西**（同一支探针，`mp2.txt`）：`tee_two_cannons` 是 **11 / 11**（两侧都喂），`cross_two_cannons` 却是 **22 / 0**、`cross_direct_no_straight` **23 / 0**。**v3.27 的 `cross_rot0_two_sources_two_sinks` 只断言「所有炮管加起来 `delivered >= 8`」（实测 45）—— 一条车道吞掉全部流量也照样通过。合计断言看不见分配比例。** ③ **根因（真缺陷）**：`_spawn_round()` 的 `"entry_port": _port_id_of(String(parts[target]["node_in"][0]))` 取的是**目标模块排序后的第一个 in 端口**，而不是「这笔弹药实际从哪个 in 进来」。而 `_out_order()` 的 `cross` 分支正是靠它决定直通方向（`var preferred := 1 if String(r["entry_port"]) == "in1" else 0`），于是 `preferred` **恒为 0**：**§7.3 写明的「`in1`→`out1` 直通优先」在实现里从未生效过**。**区分性证据**（`tests/_tmp_mp3.gd`，修前 `mp6.txt`）：`cross_in1_direct` 与 `cross_in0_direct` **结果完全相同**，都是 `cannon2=23 cannon3=0`、`entry_ports=[in0=23]` —— 工厂明明摆在**南侧**（`in1`），`entry_port` 却记成 `in0`。④ **修法三处**：`_spawn_round()` 新增 `entry_port` 参数（默认空串时退回 `_in_key_of(target)`，守「调用方忘了传」的确定性）；`_emit_from()` 投放给 conveyor 时传 `String(nodes[link].get("port", ""))`（**真实入口**）；`_apply_strand_requests()` 正向进入新一段时用 `request["link"]` 反查 `nodes[link]["port"]` 更新（修掉「穿一段管路再进四通」仍用出生值的第二处错误）。**为什么这样修**：入口方向是**投递那一刻的事实**，不是能从目标模块端口表推导的属性；任何「从目标反推来源」的写法都只是在猜，遇到多入口模块必错。⑤ **新增逐车道永久回归**（`tests/ammo_combo_smoke.gd` 17932 → **24278 B**）：`cross_in1_goes_out1`（从 `in1` 进的线，`out1` 侧炮管 ≥ 6 且 ≥ `out0` 侧 2 倍）、`cross_in0_goes_out0`（对称对照）、`tee_feeds_both_lanes`（两侧各 ≥ 4 且少的一侧 ≥ 多的一半）、`merge_in1_not_starved`（两个源各至少 emit 5 次）；另新增三个辅助函数 `_check_lane()` / `_check_two_lanes_alive()` / `_check_both_sources_emit()`。**三条为什么必须同时存在**：`cross_in1` 单独存在时「恒走 out1」也能过，必须有 `cross_in0` 对称对照；`cross` 两条存在时「按入口严格独占」也能过，`tee` 的轮询与 `merge` 的不饿死是不同机制各需一条。**原有 23 条组合与 4 条契约全部保留**，逐车道是**追加**不是替换。⑥ **反向对照（关键证据）**：`.me/tmp/main/negctl28.py apply` 把三处修复退回旧行为（53087 → 52425 B），同一测试立刻报 **`AMMO_COMBO_FAIL count=2`**（`cross_in1_goes_out1_primary_0` / `cross_in1_goes_out1_leak_0_23`，`combo28_neg.txt`）；**只有 `cross_in1` 那一条失败**，正好说明另外三条覆盖的是**已经正确的行为**（防回归），只有 `cross_in1` 抓的是本次修掉的缺陷 —— 两者都要有。恢复后 `AMMO_COMBO_OK`（`combo28d.txt`），文件回到 53087 B。⑦ **验证**：`--check-only` `ammo_network.gd` / `ammo_combo_smoke.gd` 均 **80 B**（`chk28a.txt` / `chk28c.txt`），无 `Parse Error`；`AMMO_COMBO_OK`（`combo28b.txt` / `combo28d.txt`）；既有 `ammo_net_smoke` = `AMMO_OK`（`net28a.txt`）、`upgrade_flow_smoke` = `UPGRADE_OK`（`upg28a.txt`）；**全量 17 项 smoke `s27a.txt` 840 B / `d27c1c45` 与 v3.27 基线逐字节相同**。⑧ **过程自伤（如实记录）**：反向对照脚本 `negctl28.py` 首版把 restore 的算子写反（`OLD_APPLY` 是空串，用空串当 needle 匹配到 45022 处），第二次 `File.Edit` 又混入制表符破坏 Python 缩进 —— 两次都是**工具脚本缺陷**，已重写整个脚本修好，**不是产品缺陷**。另有一次 `tests/_tmp_mp.gd` 误用 `cannon_states()["cells"]`（该接口不返回 `cells`）触发 `SCRIPT ERROR`，也是**探针缺陷**。**如实声明**：**没有任何人工验证** —— 没有人用手搭过四通、也没人真的看过两条车道分流；**逐车道断言仍是纯领域层测试**（不经主场景 / `Duel` / `CannonBank`）；**只测了 `cross` 的 `rot0`**（`rot180` 由对称性推出、未单独跑）；**`cross` 单源接两出口仍然只喂一侧** —— 那**不是缺陷**，是 §7.3 直通优先的设计语义，分流应用一分二，但本轮**未做 UI 说明**；**`merge` 的 `in0` 优先语义未变**（只补了「`in1` 不会饿死」的断言）；**未在 Android 上验证，任何 APK 均不存在**。 | §7.3 §11.4.2.13 §17 |
 
 > **就地更正（v3.27 文档校对，不改历史行）**：上一条 v3.27 行里写的「全量 17 项 smoke `s27a.txt` 858 B / `75a5e1a1`」是 `run_smoke27.ps1` **首跑**的产出（含空行）。同一脚本后来重跑产出的是 **840 B / `d27c1c45`**（去掉了空行），磁盘上当前的文件名是 `s27b.txt`。两者是**同一组 17 项全绿结果**，差异只来自空行处理。历史行按 append-only 保持原样，**当前状态以 840 B / `d27c1c45` 为准**（§11.4.2.12「四、验证」的表已同步改为 840 B / `d27c1c45`）。**不得把两个数字混用。**

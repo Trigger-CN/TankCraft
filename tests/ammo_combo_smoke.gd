@@ -12,6 +12,8 @@ extends SceneTree
 ##      这比看炮弹到没到更早暴露断点 —— 玩家说「管道不传」时，先要知道是「连错了」还是「卡住了」。
 ##   2. **流量**：N tick 内炮管 `delivered >= k`，且 `strand_lost == 0`。
 ##   3. **契约**：拒收必须上报、退弹必须回收到源头、坏支路不得饿死好支路。
+##   4. **逐车道**（v3.28 新增）：多汇结构不能只断言「合计有弹」——
+##      一条车道吞掉全部流量照样能过合计断言。必须逐炮管 / 逐源分开数。
 ##
 ## ## 覆盖边界（必须如实）
 ##
@@ -19,6 +21,9 @@ extends SceneTree
 ##   `Duel`、不经过 `CannonBank`。它证明的是「网络调度正确」，不是「游戏里真的能打出去」。
 ## - 开火用 `release_cannon()`（无 `CannonBank` 的测试路径），不是真实的 `CannonBank.fire()`。
 ## - 没有任何人工操作；所有布局都是脚本摆的。
+## - **源模块只有一个出口**（factory / depot / modifier 在 `_port_specs()` 里只生成 `out0`），
+##   所以 `_emit_from()` 取 `node_out[0]` 是取唯一出口，不是「多出口不选路」的缺陷。
+##   真正的分叉只发生在管件（`conveyor_tee` / `conveyor_cross`）上。
 ##
 ## 输出 `AMMO_COMBO_OK` / `AMMO_COMBO_FAIL <tag>`。
 
@@ -205,6 +210,42 @@ func _init() -> void:
 		{"id": "cannon_76", "cell": Vector2i(5, 4)},
 		{"id": "cannon_20", "cell": Vector2i(3, 3), "rot": 270},
 	], 20 * 18)
+	## ── H. 逐车道（v3.28 新增）：合计断言看不见「一条车道吞掉全部流量」 ─────────
+	## 四通：从 in1（南侧）进来的线，必须优先走 out1（北侧）—— design §7.3 直通优先。
+	## 旧实现把 `entry_port` 硬写成 `node_in[0]`（永远是 in0），所以这条规则从未生效；
+	## 修前实测两条用例结果完全相同：`cross_in1=23/0` 与 `cross_in0=23/0`。
+	_check_lane("cross_in1_goes_out1", [
+		{"id": "ammo_factory_20", "cell": Vector2i(3, 5), "rot": 270},
+		{"id": "conveyor_cross", "cell": Vector2i(3, 4), "rot": 0},
+		{"id": "cannon_20", "cell": Vector2i(4, 4)},
+		{"id": "cannon_20", "cell": Vector2i(3, 3), "rot": 270},
+	], 20 * 20, 3, 2)
+	## 对称对照：从 in0（西侧）进来的线，必须优先走 out0（东侧）。
+	## 两条必须同时存在 —— 只留一条的话，把 `_out_order()` 写成「恒返回 out1」也能过。
+	_check_lane("cross_in0_goes_out0", [
+		{"id": "ammo_factory_20", "cell": Vector2i(2, 4)},
+		{"id": "conveyor_cross", "cell": Vector2i(3, 4), "rot": 0},
+		{"id": "cannon_20", "cell": Vector2i(4, 4)},
+		{"id": "cannon_20", "cell": Vector2i(3, 3), "rot": 270},
+	], 20 * 20, 2, 3)
+	## 一分二：两侧都必须拿到弹（轮询交替）。若写成「永远先走 out0」，
+	## out0 下游一直通气就永远不会轮到 out1，out1 侧炮管会 0 发。
+	_check_two_lanes_alive("tee_feeds_both_lanes", [
+		{"id": "ammo_factory_20", "cell": Vector2i(1, 4)},
+		{"id": "conveyor_straight", "cell": Vector2i(2, 4)},
+		{"id": "conveyor_tee", "cell": Vector2i(3, 4)},
+		{"id": "cannon_20", "cell": Vector2i(4, 4)},
+		{"id": "cannon_20", "cell": Vector2i(3, 3), "rot": 270},
+	], 20 * 20, 3, 4)
+	## 二合一：in0 一直有货时，in1 的源不能被永久饿死。
+	## 既有 `ammo_net_smoke._check_merge_priority()` 只验证「in0 优先」，
+	## 没有验证「in1 还能不能出弹」—— 两者是不同命题。
+	_check_both_sources_emit("merge_in1_not_starved", [
+		{"id": "ammo_factory_20", "cell": Vector2i(2, 4)},
+		{"id": "ammo_factory_20", "cell": Vector2i(3, 5), "rot": 270},
+		{"id": "conveyor_merge", "cell": Vector2i(3, 4), "rot": 0},
+		{"id": "cannon_20", "cell": Vector2i(4, 4)},
+	], 20 * 24)
 	## ── G. 结构：断链必须被 route_status 报出来 ──────────────────────────────
 	_check_unreachable_reported("modifier_orphan_out")
 	if failures > 0:
@@ -387,3 +428,84 @@ func _check_unreachable_reported(label: String) -> void:
 			modifier_unreachable = true
 	_expect(modifier_unreachable, "%s_not_reported" % label)
 	print("  route  %-31s modifier_unreachable=%s" % [label, str(modifier_unreachable)])
+
+## 逐车道断言：`primary` 号炮管必须显著多于 `secondary` 号炮管。
+##
+## 为什么不能只断言合计：一条车道吞掉全部流量时合计依然很高。
+## 修前 `cross_in1` 与 `cross_in0` 两条用例合计都是 23、结果却完全一样，
+## 正是因为旧实现根本没在区分入口方向。
+func _check_lane(label: String, entries: Array, ticks: int, primary: int, secondary: int) -> void:
+	var builder := _make_builder(entries)
+	if builder == null:
+		_expect(false, "%s_builder" % label)
+		return
+	var network := _network_for(builder)
+	for step in range(ticks):
+		network.tick_once()
+		network.drain_events()
+		for part in network.parts:
+			if String(part["role"]) == "cannon":
+				network.release_cannon(int(part["index"]))
+	var counts: Dictionary = {}
+	for state in network.cannon_states():
+		counts[int(state["part"])] = int(state["delivered"])
+	var p := int(counts.get(primary, 0))
+	var s := int(counts.get(secondary, 0))
+	## 直通优先不是「严格独占」：`out0` 撑满时允许转 `out1`，所以只要主道明显多于副道。
+	_expect(p >= 6, "%s_primary_%d" % [label, p])
+	_expect(p >= s * 2, "%s_leak_%d_%d" % [label, p, s])
+	print("  lane   %-31s primary=%d secondary=%d" % [label, p, s])
+
+## 两源汇入同一汇：**两个源都必须真的 emit 过**。
+##
+## 既有 `ammo_net_smoke._check_merge_priority()` 只验证「in0 优先」，
+## 那是「先走哪个」；这里是「另一个到底还会不会动」——不同命题。
+func _check_both_sources_emit(label: String, entries: Array, ticks: int) -> void:
+	var builder := _make_builder(entries)
+	if builder == null:
+		_expect(false, "%s_builder" % label)
+		return
+	var network := _network_for(builder)
+	var emitted: Dictionary = {}
+	for step in range(ticks):
+		network.tick_once()
+		for event in network.drain_events():
+			if String(event["kind"]) == "emitted":
+				var key := int(event["part"])
+				emitted[key] = int(emitted.get(key, 0)) + 1
+		for part in network.parts:
+			if String(part["role"]) == "cannon":
+				network.release_cannon(int(part["index"]))
+	## 两个工厂的 part 编号是 0 与 1（按 entries 顺序）。
+	var a := int(emitted.get(0, 0))
+	var b := int(emitted.get(1, 0))
+	_expect(a >= 5, "%s_src0_%d" % [label, a])
+	_expect(b >= 5, "%s_src1_%d" % [label, b])
+	print("  both   %-31s src0=%d src1=%d" % [label, a, b])
+
+## 两条车道都必须活：**各自都要拿到弹**，且不能一边倒。
+##
+## 用于 `conveyor_tee` / `conveyor_cross` 这类对称分叉。
+## 直通优先的「主/副」关系不适用于 tee（它是轮询），所以单独一个判据。
+func _check_two_lanes_alive(label: String, entries: Array, ticks: int, lane_a: int, lane_b: int) -> void:
+	var builder := _make_builder(entries)
+	if builder == null:
+		_expect(false, "%s_builder" % label)
+		return
+	var network := _network_for(builder)
+	for step in range(ticks):
+		network.tick_once()
+		network.drain_events()
+		for part in network.parts:
+			if String(part["role"]) == "cannon":
+				network.release_cannon(int(part["index"]))
+	var counts: Dictionary = {}
+	for state in network.cannon_states():
+		counts[int(state["part"])] = int(state["delivered"])
+	var a := int(counts.get(lane_a, 0))
+	var b := int(counts.get(lane_b, 0))
+	## 两侧都必须真的收到弹；其中少的一侧不得低于多的一侧的一半（轮询应当接近均匀）。
+	_expect(a >= 4, "%s_lane_a_%d" % [label, a])
+	_expect(b >= 4, "%s_lane_b_%d" % [label, b])
+	_expect(mini(a, b) >= maxi(a, b) / 2, "%s_skew_%d_%d" % [label, a, b])
+	print("  lanes  %-31s a=%d b=%d" % [label, a, b])

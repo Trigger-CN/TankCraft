@@ -899,6 +899,13 @@ func _apply_strand_requests(requests: Array) -> void:
 			r["part"] = target
 			r["progress"] = 0.0
 			trail.append(target)
+			## v3.28：正向进入新一段时，更新「从哪个 in 进来」。
+			## `_out_order()` 的 `cross` 分支靠它决定直通方向；旧实现只在出生时赋值且值是错的，
+			## 导致「穿一段管路再进四通」时永远按 in0 直通处理。
+			var entry_link := String(request.get("link", ""))
+			if not entry_link.is_empty() and nodes.has(entry_link):
+				r["entry_port"] = String(nodes[entry_link].get("port", ""))
+
 		_owner[target] = uid
 		var tee := int(request.get("tee", -1))
 		if tee >= 0:
@@ -975,7 +982,6 @@ func _module_emit(index: int) -> void:
 				output.pop_front()
 
 ## `upgrades` 是这笔弹药已经携带的升级载荷；从工厂/仓库发起时为空数组。
-## `upgrades` 是这笔弹药已经携带的升级载荷；从工厂/仓库发起时为空数组。
 func _emit_from(part_index: int, ammo_id: String, upgrades: Array = []) -> bool:
 	var part: Dictionary = parts[part_index]
 	var outs: Array = part["node_out"]
@@ -999,7 +1005,10 @@ func _emit_from(part_index: int, ammo_id: String, upgrades: Array = []) -> bool:
 	if probe != "ok":
 		return false
 	if String(parts[target]["role"]) == ROLE_CONVEYOR:
-		_spawn_round(ammo_id, part_index, target, String(outs[0]), upgrades)
+		## v3.28：把「这笔弹药实际从哪个 in 端口进入目标」一并传下去。
+		## `link` 就是这条 out→in 的连线键，`nodes[link]["port"]` 即目标那个 in 端口的 id。
+		var entry_port := String(nodes[link].get("port", ""))
+		_spawn_round(ammo_id, part_index, target, String(outs[0]), upgrades, entry_port)
 		return true
 	if not _accept(target, ammo_id, upgrades):
 		return false
@@ -1204,7 +1213,16 @@ static func _ammo_of(entry: Variant) -> String:
 
 # ─── 内部：在途弹药 ───────────────────────────────────────────────────────────
 
-func _spawn_round(ammo_id: String, origin_part: int, target: int, origin_port: String, upgrades: Array = []) -> int:
+## `entry_port` 是**这笔弹药实际进入 `target` 的那个 in 端口 id**（如 `"in1"`）。
+##
+## v3.28：旧实现写的是 `parts[target]["node_in"][0]`，即「目标模块排序后的第一个 in 端口」，
+## 与「实际从哪个 in 进来」毫无关系。后果不是理论问题：`_out_order()` 的 `cross` 分支
+## 用 `entry_port == "in1"` 决定「直通优先」，于是**这条规则从来没有生效过** ——
+## 从南侧（`in1`）喂进四通的弹药一律被送到 `out0`，`out1` 侧的炮管永远 0 发
+## （实测 `mp6.txt`：`cross_in1_direct` 与 `cross_in0_direct` 结果完全相同，
+## 都是 `cannon2=23 cannon3=0`、`entry_ports=[in0=23]`）。
+## 空串时退回旧行为，只为守「调用方忘了传」时的确定性。
+func _spawn_round(ammo_id: String, origin_part: int, target: int, origin_port: String, upgrades: Array = [], entry_port: String = "") -> int:
 	if _owner.has(target):
 		return 0
 	var uid := _next_uid
@@ -1216,7 +1234,7 @@ func _spawn_round(ammo_id: String, origin_part: int, target: int, origin_port: S
 		"part": target,
 		"progress": 0.0,
 		"forward": true,
-		"entry_port": _port_id_of(String(parts[target]["node_in"][0])) if not (parts[target]["node_in"] as Array).is_empty() else "",
+		"entry_port": entry_port if not entry_port.is_empty() else _in_key_of(target),
 		"trail": [target],
 		"origin_part": origin_part,
 		"origin_port": origin_port,
