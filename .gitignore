@@ -11,3 +11,6 @@ __pycache__/
 
 # 构建产物：Android 导出包。工程当前不产出 APK，此规则只防将来误提交。
 *.apk
+
+# 构建产物：Windows 导出目录（build_release.bat 的输出，含 exe / pck / 日志）。
+build/
