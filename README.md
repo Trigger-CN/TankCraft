@@ -4,7 +4,7 @@
 
 玩家在网格上从零搭一台坦克：先铺**平台**，再挂**行进机构**，最后堆**功能模块**。炮弹不是凭空出现的——它要被**制造、被输送、被装填**，所以「内部物流布局」和「外形武器」同样重要。打掉对手一段甲板，可能让他的整条弹药管路失效。
 
-> **当前状态：可运行的实现原型，尚未发布。** 核心玩法（建造 / 物理 / 弹药网络 / 战斗结算 / AI / 波次生存）均已实现并有 17 项自动化 smoke 测试覆盖；**从未做过人工试玩验证**，也**没有产出过任何 APK**。
+> **当前状态：可运行的实现原型，尚未发布。** 核心玩法（建造 / 物理 / 弹药网络 / 战斗结算 / AI / 波次生存）均已实现并有 18 项自动化 smoke 测试覆盖；**从未做过人工试玩验证**，也**没有产出过任何 APK**。
 
 ---
 
@@ -126,7 +126,7 @@ godot --path . -- --capture=out.png --screen=survival --steps=420 --cursor=960,5
 
 ## 测试
 
-17 项 smoke，全部 headless、无外部依赖：
+18 项 smoke，全部 headless、无外部依赖：
 
 ```bash
 godot --headless --path . --script res://tests/ammo_combo_smoke.gd
@@ -151,6 +151,9 @@ godot --headless --path . --script res://tests/ammo_combo_smoke.gd
 | `survival_smoke.gd` | `SURVIVAL_OK` |
 | `mouse_input_smoke.gd` | `MOUSE_OK` |
 | `editor_bounds_smoke.gd` | `PREVIEW_OK` |
+| `perf_smoke.gd` | `PERF_OK` |
+
+> `perf_smoke` 只断言 **p99 / max**，**刻意不断言平均**——平均会掩盖长尾卡顿。阈值由反向对照校准（关掉加速后 `PERF_FAIL count=3`），详见 `docs/design.md` §11.4.2.14。
 
 另有语法检查（不会执行脚本）：
 
@@ -192,7 +195,7 @@ TankCraft/
 │   ├── arenas/              # 3 张竞技场
 │   ├── blueprints/          # 14 个：12 张 Bot 蓝图 + Boss + 1 张无效示例
 │   └── globals.json
-├── tests/                   # 17 个 smoke
+├── tests/                   # 18 个 smoke
 └── docs/
     ├── design.md            # 设计文档（机制、数值、架构、ADR）
     └── roadmap.md           # 里程碑与实时状态
@@ -236,6 +239,7 @@ TankCraft/
 - **`main.gd` 是上帝类**（3924 行 / 194 KB），按页面拆分被明确搁置。
 - **四通单源接两出口只喂一侧**——这是设计语义（直通优先），不是缺陷，但**没有 UI 说明**。
 - **改进器容量是设计值**：mk1 最多同时容纳 2 发（1 加工 + 1 排队），其余在上游管道排队，不是阻塞。
+- **生存模式高波次仍偶发超预算**：wave12 有约 **36/900 步（4%）**单步超过 16.67 ms（p99 19.0 / max 21.7 ms）。碰撞层已从 O(n²) 改为空间分桶（`docs/design.md` §11.4.2.14），但补兵时 `spawn_enemy_us` 仍有 2.6–10.7 ms 的单帧尖峰；而且**只测了逻辑层，绘制层未测**。
 - `expedition_run.gd` / `runtime_builder.gd` 仍存在但**无任何玩法调用方**。
 - 若干旧缺口：`boss_armor` 未实现、`safe_radius` 从未被读取、商店稀有度权重方向反、竞技场障碍 `hp` 无人扣减（障碍不可摧毁）。
 

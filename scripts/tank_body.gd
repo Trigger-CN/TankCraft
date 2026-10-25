@@ -66,6 +66,33 @@ var _source: GridBuilder
 ## 为空时退回本地 damage_part——physics_smoke 等纯物理用例不设路由，行为与 M5 一致。
 var damage_router: Callable = Callable()
 
+## v3.30 性能：世界坐标格矩形缓存。
+##
+## **为什么需要**：生存模式 wave12 实测 `_resolve_tank_collisions` 单帧 122.7 ms（占
+## `Duel.step` 的 85%），而那一帧 15 对坦克的 AABB **一对都没重叠**。根因不是「碰撞判定
+## 本身对」，而是每次判定都从零重建「每格四角」——258 个部件、每帧几十次，全是纯分配与旋转。
+##
+## 缓存键是 `(position, heading, cells.size(), parts.size())`：只要这一帧没动过、结构也没变，
+## 重复调用就直接复用；一旦移动或 `_rebuild_cells()` 就失效。**判定结果与不缓存时完全一致**，
+## 因此不改变任何玩法结果，也不破坏确定性（`step_battle(dt)` 连拍仍逐字节相同）。
+##
+## **返回的数组是共享只读的**：调用方只允许遍历，不得修改、不得保存后跨帧使用。
+var _rect_cache: Array = []
+var _rect_cache_valid: bool = false
+var _rect_cache_position: Vector2 = Vector2.ZERO
+var _rect_cache_heading: float = 0.0
+var _rect_cache_cells: int = -1
+var _rect_cache_parts: int = -1
+
+## v3.30：整车 AABB 缓存。`world_bounds()` 每帧被对撞循环调 30 次（15 对 × 2），
+## 即使格矩形已缓存，它仍要遍历 258 格 × 4 角。同样的失效条件。
+var _bounds_cache: Rect2 = Rect2()
+var _bounds_cache_valid: bool = false
+var _bounds_cache_position: Vector2 = Vector2.ZERO
+var _bounds_cache_heading: float = 0.0
+var _bounds_cache_cells: int = -1
+var _bounds_cache_parts: int = -1
+
 func setup(module_defs: ModuleDefs, source: GridBuilder) -> bool:
 	definitions = module_defs
 	if definitions == null or source == null:
@@ -168,6 +195,8 @@ func _add_part(kind: String, module_id: String, rot: int, aim: int, occupied: Ar
 	})
 
 func _rebuild_cells() -> void:
+	_rect_cache_valid = false
+	_bounds_cache_valid = false
 	cells.clear()
 	for index in range(parts.size()):
 		var part: Dictionary = parts[index]
@@ -197,6 +226,9 @@ func recompute() -> void:
 		_clear_mass()
 		return
 	centroid_local = weighted / mass_total
+	## 质心变了，格世界的四角也跟着变；两份缓存必须失效。
+	_rect_cache_valid = false
+	_bounds_cache_valid = false
 	centroid_cell = centroid_local / _cell_size
 	## design §5.1：逐格 |q-C|² 加每格自身项，禁矩形近似。
 	var self_term := _cell_size * _cell_size / 6.0
@@ -212,6 +244,8 @@ func _clear_mass() -> void:
 	centroid_local = Vector2.ZERO
 	centroid_cell = Vector2.ZERO
 	inertia = 0.0
+	_rect_cache_valid = false
+	_bounds_cache_valid = false
 
 func _update_effective_turn() -> void:
 	var values: Array[float] = []
@@ -323,36 +357,74 @@ func k_drag() -> float:
 func cell_size() -> float:
 	return _cell_size
 
-## 当前朝向下的世界轴对齐包围盒（已含旋转），用于边界与障碍碰撞。
-## **注意**：这是整车外接 AABB，只用作粗筛（broad phase）与旧调用兼容，
-## 不再是碰撞依据——真实碰撞体是逐个配件的格子，见 `cell_world_rects()`。
+## v3.30：改为从 `cell_world_rects()` 的缓存四角求极值，并**把结果也缓存**。
+## 两者在数学上完全等价（都是「所有格角点的 min/max」），但共享同一份缓存，
+## 不再重复算旋转，也不重复遍历。
+##
+## **为什么要缓存**：wave12 的对撞循环每帧调 `world_bounds()` 30 次（15 对 × 2）；
+## 即使格矩形已缓存，每次仍要遍历 258 个格 × 4 角 = 1032 个点。实测这一项就让
+## `collisions` 卡在 11.6 ms 不降。
+##
+## 失效条件与 `cell_world_rects()` 完全一致（位置/朝向/格数/部件数/质心）。
 func world_bounds() -> Rect2:
+	if _bounds_cache_valid \
+			and _rect_cache_valid \
+			and _bounds_cache_cells == cells.size() \
+			and _bounds_cache_parts == parts.size() \
+			and _bounds_cache_position == position \
+			and _bounds_cache_heading == heading:
+		return _bounds_cache
 	if cells.is_empty():
+		_bounds_cache = Rect2(position, Vector2.ZERO)
+		_bounds_cache_valid = true
+		_bounds_cache_position = position
+		_bounds_cache_heading = heading
+		_bounds_cache_cells = 0
+		_bounds_cache_parts = parts.size()
+		return _bounds_cache
+	var rects := cell_world_rects()
+	if rects.is_empty():
 		return Rect2(position, Vector2.ZERO)
-	var half := _cell_size * 0.5
-	var corners: Array[Vector2] = [
-		Vector2(-half, -half), Vector2(half, -half),
-		Vector2(-half, half), Vector2(half, half),
-	]
 	var min_p := Vector2(INF, INF)
 	var max_p := Vector2(-INF, -INF)
-	for unit in cells:
-		var centre := position + (Vector2(unit["local"]) - centroid_local).rotated(heading)
+	for entry in rects:
+		var corners: Array = entry["corners"]
 		for raw_corner in corners:
-			var point: Vector2 = centre + raw_corner.rotated(heading)
+			var point: Vector2 = raw_corner
 			min_p.x = minf(min_p.x, point.x)
 			min_p.y = minf(min_p.y, point.y)
 			max_p.x = maxf(max_p.x, point.x)
 			max_p.y = maxf(max_p.y, point.y)
-	return Rect2(min_p, max_p - min_p)
+	_bounds_cache = Rect2(min_p, max_p - min_p)
+	_bounds_cache_valid = true
+	_bounds_cache_position = position
+	_bounds_cache_heading = heading
+	_bounds_cache_cells = cells.size()
+	_bounds_cache_parts = parts.size()
+	return _bounds_cache
 
 ## 逐格的世界坐标**旋转矩形**（OBB）四角。每个存活格一项：
 ## `{cell, part_index, corners:[四个 Vector2]}`，四角顺序为 左上/右上/右下/左下（已旋转）。
 ## 这是碰撞箱的唯一真相来源：坦克的体积就是这些格子的并集，格与格之间的凹口不是碰撞体。
 ## 与 `world_bounds()` 的区别：外接框会把两块分离的格之间的空白也算进去，而这里不会。
+##
+## v3.30：**带缓存**（见文件头 `_rect_cache` 的说明）。返回的数组是共享只读的，
+## 调用方只可遍历。判定结果与不缓存时逐位相同。
 func cell_world_rects() -> Array:
+	if _rect_cache_valid \
+			and _rect_cache_cells == cells.size() \
+			and _rect_cache_parts == parts.size() \
+			and _rect_cache_position == position \
+			and _rect_cache_heading == heading:
+		return _rect_cache
 	var out: Array = []
 	if cells.is_empty():
+		_rect_cache = out
+		_rect_cache_valid = true
+		_rect_cache_position = position
+		_rect_cache_heading = heading
+		_rect_cache_cells = 0
+		_rect_cache_parts = parts.size()
 		return out
 	var half := _cell_size * 0.5
 	for unit in cells:
@@ -366,6 +438,12 @@ func cell_world_rects() -> Array:
 			"centre": centre,
 			"corners": corners,
 		})
+	_rect_cache = out
+	_rect_cache_valid = true
+	_rect_cache_position = position
+	_rect_cache_heading = heading
+	_rect_cache_cells = cells.size()
+	_rect_cache_parts = parts.size()
 	return out
 
 ## 逐格与轴对齐矩形的相交测试（分离轴定理，只需测两个矩形各自的边法线）。
@@ -466,13 +544,57 @@ func cell_overlap_circle(centre: Vector2, radius: float) -> Dictionary:
 ## 逐格的世界凸多边形是否与另一台坦克的逐格凸多边形相交（SAT，两套格的轴）。
 ## 返回 `{hit, depth, normal}`，`normal` 指向 other。
 ## 为什么不用外接框：两台车车角相对、中间隔两格虚空时，外接框判定为碰撞，逐格判定为不碰。
+##
+## **v3.30 宽相剔除（性能修复，不改变结果）**：先比整车 AABB。
+## 数学依据：整车 AABB 是「所有格角点的 min/max」，因此**每一格的凸包必然完全落在
+## 自己的整车 AABB 内**。若两个 AABB 不相交，则任何一格对都不可能相交。
+## 为什么必须加：生存 wave12 实测单帧 122.7 ms，其中 15 对车里 **AABB 真正重叠的是 0 对**——
+## 全花在「一定不相交」的逐格两两 SAT 上（O(n²)）。
+##
+## **为什么用自写的 `_aabb_apart()` 而不是 `Rect2.intersects()`**：实测发现一个 1.5e-5 px
+## 的边界反例 —— float32 在坐标戳 1088 量级时，AABB 取极值舍入到 1088.0，而 SAT 的半径
+## 算得 1087.999985，于是「AABB 说不碰、SAT 说碰」。虽然 1.5e-5 px 在物理上无意义，
+## 但「纯加速」就该一位不变，所以剔除必须**保守**：留 `AABB_EPSILON` 的余量，
+## 边界附近一律放行给精确算法。`Rect2.intersects()` 默认 `include_borders=false`，
+## 本身也会把「刚刚贴上」当成不碰，不适合做剔除。
+const AABB_EPSILON := 0.01
+
+## 两个 AABB 是否确定「分开得很远」：只有完全确定不相交才返回 true。
+## 保留 `AABB_EPSILON` 余量，宁可多算不可漏算。
+static func _aabb_apart(a: Rect2, b: Rect2) -> bool:
+	if a.position.x - AABB_EPSILON > b.end.x:
+		return true
+	if b.position.x - AABB_EPSILON > a.end.x:
+		return true
+	if a.position.y - AABB_EPSILON > b.end.y:
+		return true
+	if b.position.y - AABB_EPSILON > a.end.y:
+		return true
+	return false
+
 func cells_overlap_tank(other) -> Dictionary:
 	if destroyed or other == null or bool(other.destroyed):
+		return {"hit": false, "depth": 0.0, "normal": Vector2.ZERO}
+	if _aabb_apart(world_bounds(), other.world_bounds()):
 		return {"hit": false, "depth": 0.0, "normal": Vector2.ZERO}
 	var mine := cell_world_rects()
 	var theirs: Array = other.cell_world_rects()
 	if mine.is_empty() or theirs.is_empty():
 		return {"hit": false, "depth": 0.0, "normal": Vector2.ZERO}
+	## **v3.30 空间分桶**：把对方的格按 `_cell_bucket_key()` 装进字典，然后只查
+	## 自己每格周围 3×3 个桶。桶边长取 `cell_size`（=格宽），而格 AABB 最大对角线
+	## 为 `cell_size·√2`，所以真实相交的对方格中心必然落在自己的 ±1 桶内。
+	## **为什么要这一步**：逐格 AABB 预筛把每条格对降到几纳秒，但格对总量是 n×m
+	## （wave12 两组大车各 258 格 → 66k 对 × 15 车对 = 百万级），预筛本身就成了瓶颈。
+	## 分桶后每格只查常数个候选，是真正的 O(n+m)。
+	var buckets: Dictionary = {}
+	for raw_b in theirs:
+		var b_entry: Dictionary = raw_b
+		var key := _cell_bucket_key(Vector2(b_entry["centre"]))
+		if buckets.has(key):
+			(buckets[key] as Array).append(b_entry)
+		else:
+			buckets[key] = [b_entry]
 	var best := {"hit": false, "depth": INF, "normal": Vector2.ZERO}
 	for raw_a in mine:
 		var a: Dictionary = raw_a
@@ -480,31 +602,69 @@ func cells_overlap_tank(other) -> Dictionary:
 		var a_corners: Array[Vector2] = a["corners"]
 		var au: Vector2 = ((a_corners[1] - a_corners[0]) as Vector2).normalized()
 		var av := Vector2(-au.y, au.x)
-		for raw_b in theirs:
-			var b: Dictionary = raw_b
-			var b_centre: Vector2 = b["centre"]
-			var b_corners: Array[Vector2] = b["corners"]
-			var bu: Vector2 = ((b_corners[1] - b_corners[0]) as Vector2).normalized()
-			var bv := Vector2(-bu.y, bu.x)
-			var separated := false
-			var overlap := INF
-			var axis_best := Vector2.ZERO
-			for axis in [au, av, bu, bv]:
-				var self_radius := half_extent_of(a_corners) * (absf(axis.dot(au)) + absf(axis.dot(av)))
-				var other_radius := half_extent_of(b_corners) * (absf(axis.dot(bu)) + absf(axis.dot(bv)))
-				var distance := absf((b_centre - a_centre).dot(axis))
-				var gap := self_radius + other_radius - distance
-				if gap <= 0.0:
-					separated = true
-					break
-				if gap < overlap:
-					overlap = gap
-					axis_best = axis if (b_centre - a_centre).dot(axis) >= 0.0 else -axis
-			if separated:
-				continue
-			if overlap < float(best["depth"]):
-				best = {"hit": true, "depth": overlap, "normal": axis_best}
+		var cell_key := _cell_bucket_key(a_centre)
+		for dx in range(-CELL_BUCKET_RADIUS, CELL_BUCKET_RADIUS + 1):
+			for dy in range(-CELL_BUCKET_RADIUS, CELL_BUCKET_RADIUS + 1):
+				var probe: Vector2i = cell_key + Vector2i(dx, dy)
+				if not buckets.has(probe):
+					continue
+				for raw_b in buckets[probe]:
+					var b: Dictionary = raw_b
+					var b_centre: Vector2 = b["centre"]
+					var b_corners: Array[Vector2] = b["corners"]
+					## 桶内仍保留一道保守 AABB 预筛（`_aabb_apart` 带 eps）：9 个桶里的候选
+					## 大多仍相距一格以上，这一步几乎免费但能挡掉绝大多数。
+					if _aabb_apart(_cell_aabb(a_corners), _cell_aabb(b_corners)):
+						continue
+					var bu: Vector2 = ((b_corners[1] - b_corners[0]) as Vector2).normalized()
+					var bv := Vector2(-bu.y, bu.x)
+					var separated := false
+					var overlap := INF
+					var axis_best := Vector2.ZERO
+					for axis in [au, av, bu, bv]:
+						var self_radius := half_extent_of(a_corners) * (absf(axis.dot(au)) + absf(axis.dot(av)))
+						var other_radius := half_extent_of(b_corners) * (absf(axis.dot(bu)) + absf(axis.dot(bv)))
+						var distance := absf((b_centre - a_centre).dot(axis))
+						var gap := self_radius + other_radius - distance
+						if gap <= 0.0:
+							separated = true
+							break
+						if gap < overlap:
+							overlap = gap
+							axis_best = axis if (b_centre - a_centre).dot(axis) >= 0.0 else -axis
+					if separated:
+						continue
+					if overlap < float(best["depth"]):
+						best = {"hit": true, "depth": overlap, "normal": axis_best}
 	return best
+
+## 把世界坐标映射到 `_cell_size` 大小的桶下标（向下取整，跨负数也单调）。
+## **桶边长必须等于格宽**，并在查询时扫 ±`CELL_BUCKET_RADIUS` 个桶：
+## 两个格的 AABB 相交时中心距最大为 `cell_size·√2`（角对角），除以桶宽得 1.414，
+## 再加上向下取整可能跨格一次，所以半径必须取 **2**。取 1 会漏掉真实碰撞。
+const CELL_BUCKET_RADIUS := 2
+
+func _cell_bucket_key(at: Vector2) -> Vector2i:
+	return Vector2i(int(floorf(at.x / _cell_size)), int(floorf(at.y / _cell_size)))
+
+## 格四角的轴对齐包围盒（**取真实四角的极值**，不是「中心 ± 半格」）。
+## 只用于 `cells_overlap_tank()` 的逐格预筛；不参与任何精确判定。
+##
+## **为什么不能用「中心 ± 半格」**：格子随车体旋转，旋转后的 16×16 方块其 AABB 边长
+## 最大可到 16√2 ≈ 22.6。用「中心 ± 8」会**低估**，于是把真实相交的格对判成分开。
+## 这个错误被 `_tmp_verify.gd` 在 wave8 / wave12 各抓到 12 起（fast=false slow=true）。
+func _cell_aabb(corners: Array) -> Rect2:
+	if corners.size() < 1:
+		return Rect2()
+	var min_p: Vector2 = corners[0]
+	var max_p: Vector2 = corners[0]
+	for raw_corner in corners:
+		var point: Vector2 = raw_corner
+		min_p.x = minf(min_p.x, point.x)
+		min_p.y = minf(min_p.y, point.y)
+		max_p.x = maxf(max_p.x, point.x)
+		max_p.y = maxf(max_p.y, point.y)
+	return Rect2(min_p, max_p - min_p)
 
 ## 取四角构成的正方形的半边长（格子的边长恒为 cell_size，但保留通用写法）。
 func half_extent_of(corners: Array) -> float:
@@ -556,16 +716,45 @@ func apply_boundary(arena_rect: Rect2) -> float:
 	return impact_damage_total - before
 
 ## 障碍物（矩形/圆）硬碰撞。obstacles 每项 {shape:"rect", rect:Rect2} 或 {shape:"circle", center, radius}。
+##
+## v3.30 宽相剔除：障碍的 AABB 与整车 AABB 不相交就直接跳过。
+## 数学依据与 `cells_overlap_tank()` 同：整车 AABB 是每格 AABB 的并集，
+## 所以 AABB 不相交 ⇒ 没有任何一格能碰上该障碍。判定结果完全相同，只是不再白算。
+## 生存 wave12 实测 `apply_obstacles` 15.9 ms/帧，其中绝大部分花在「车在场地另一端」的
+## 远障碍上。
+##
+## 剔除用 `_aabb_apart()`（带 `AABB_EPSILON` 余量的保守判定），不用 `Rect2.intersects()`：
+## 后者在边界上把自己当成「不碰」，且 float32 舍入已实测能在 1.5e-5 px 量级上
+## 让「AABB 不碰」与「逐格 SAT 碰」同时成立。纯加速不允许这种事发生。
 func apply_obstacles(obstacles: Array) -> float:
 	if destroyed or cells.is_empty():
 		return 0.0
 	var before := impact_damage_total
+	var bounds := world_bounds()
 	for obstacle in obstacles:
 		var shape := String(obstacle.get("shape", ""))
 		if shape == "rect":
-			_resolve_obstacle_rect(Rect2(obstacle["rect"]))
+			var rect := Rect2(obstacle["rect"])
+			if _aabb_apart(bounds, rect):
+				continue
+			var was_position := position
+			_resolve_obstacle_rect(rect)
+			## 被推开后 AABB 变了，后续障碍的剔除必须用新包围盒——否则会少判一个真实碰撞，
+			## 那就不是纯加速而是改变玩法结果了。
+			if position != was_position:
+				bounds = world_bounds()
 		elif shape == "circle":
-			_resolve_obstacle_circle(Vector2(obstacle["center"]), float(obstacle.get("radius", 0.0)))
+			var centre := Vector2(obstacle["center"])
+			var radius := float(obstacle.get("radius", 0.0))
+			if radius <= 0.0:
+				continue
+			var circle_box := Rect2(centre - Vector2(radius, radius), Vector2(radius, radius) * 2.0)
+			if _aabb_apart(bounds, circle_box):
+				continue
+			var was_circle_position := position
+			_resolve_obstacle_circle(centre, radius)
+			if position != was_circle_position:
+				bounds = world_bounds()
 	return impact_damage_total - before
 
 ## 矩形障碍：逐格求交，迭代推出。
