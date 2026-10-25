@@ -4,7 +4,7 @@
 
 玩家在网格上从零搭一台坦克：先铺**平台**，再挂**行进机构**，最后堆**功能模块**。炮弹不是凭空出现的——它要被**制造、被输送、被装填**，所以「内部物流布局」和「外形武器」同样重要。打掉对手一段甲板，可能让他的整条弹药管路失效。
 
-> **当前状态：可运行的实现原型，尚未发布。** 核心玩法（建造 / 物理 / 弹药网络 / 战斗结算 / AI / 波次生存）均已实现并有 18 项自动化 smoke 测试覆盖；**从未做过人工试玩验证**，也**没有产出过任何 APK**。
+> **当前状态：可运行的实现原型，尚未发布。** 核心玩法（建造 / 物理 / 弹药网络 / 战斗结算 / AI / 波次生存）均已实现并有 18 项自动化 smoke 测试覆盖；**Windows release exe 已能一键构建并已 headless 实跑通过**（见「构建 release exe」）。**从未做过人工试玩验证**，也**没有产出过任何 APK**。
 
 ---
 
@@ -136,14 +136,18 @@ build_release.bat
 | `--debug` | 构建 debug 版（含控制台包装） |
 | `--out <路径>` | 指定输出路径（支持含空格的路径） |
 | `--godot <路径>` | 指定 Godot，建议指向 `*_console.exe` |
-| `--install-templates` | 下载并安装匹配版本的导出模板（约 1.2 GB） |
+| `--install-templates` | 下载并安装匹配版本的导出模板（**只取 Windows 条目，约 69 MB**，不下载 1.28 GB 整包） |
 | `--help` | 显示帮助 |
 
 退出码：`0` 成功 / `1` 用法错误 / `2` 找不到 Godot / `3` 缺导出模板 / `4` 导出失败 / `5` 产物缺失 / `6` 模板安装失败。
 
 > **前置条件**：必须先装 Godot **导出模板**，且版本与引擎严格一致。脚本默认**不会**自动安装（模板装在 `%APPDATA%`，属工程目录之外），缺失时以退出码 `3` 结束并打印精确路径与三种解决办法。
 >
-> **当前状态：本机尚未安装导出模板，因此还没有任何 exe 被真正生成过。** 脚本与导出预设已完成并通过 6 条诊断路径实测，但「真实导出成功」这一步**未经验证**。
+> **当前状态：已实测可产出。** `build\windows\TankCraft.exe` **109,825,632 B（104.74 MB）**，SHA256 `0528eb874a7f8a0a5ec5942530179d9a03b0b9ff78217be6eae749c4af338de7`；`--debug` 版 **103,733,856 B**。同一命令连跑两次**逐字节一致**。PE 为 `PE32+` / `x86_64` / `SUBSYSTEM=2 (WINDOWS_GUI)`，尾部带 `GDPC`（pck 524,372 B **内嵌**）⇒ 单文件。
+>
+> `--install-templates` 会把模板装到 `%APPDATA%\Godot\export_templates\<版本>\`（**工程目录之外**），因此脚本默认**不**自动安装，必须显式传该开关。它走 ZIP central directory + HTTP Range，**只取 4 个 Windows 条目（压缩后 69 MB）**，不会下载 1.28 GB 整包。
+>
+> **未在真实桌面（带窗口）运行过。** 全部验证都是 `--headless`；`build/` 已被 `.gitignore` 忽略，**exe 不在仓库里**。
 
 
 ---
@@ -264,8 +268,8 @@ TankCraft/
 - **四通单源接两出口只喂一侧**——这是设计语义（直通优先），不是缺陷，但**没有 UI 说明**。
 - **改进器容量是设计值**：mk1 最多同时容纳 2 发（1 加工 + 1 排队），其余在上游管道排队，不是阻塞。
 - **生存模式高波次仍偶发超预算**：wave12 有约 **36/900 步（4%）**单步超过 16.67 ms（p99 19.0 / max 21.7 ms）。碰撞层已从 O(n²) 改为空间分桶（`docs/design.md` §11.4.2.14），但补兵时 `spawn_enemy_us` 仍有 2.6–10.7 ms 的单帧尖峰；而且**只测了逻辑层，绘制层未测**。
-- **Windows release exe 从未被真正生成过。** `build_release.bat` 与 `Windows Desktop` 导出预设已完成（`docs/design.md` §13.8），脚本的 6 条诊断路径均有实测；但本机 `%APPDATA%\Godot\export_templates\` 是空的（0 个文件），而模板约 1.2 GB 且装在工作区之外，需要用户授权才能装。因此**不能说「这个仓库现在能出 exe」**，只能说「脚本与预设已就绪，装上模板即可一键构建」。`--install-templates` 已实现但从未执行过。
-- **没有人运行过游戏的可执行文件**（桌面 exe 不存在；Android 也没有 APK）。
+- **release exe 已能构建，但从未在真实桌面（带窗口）运行过。** `build\windows\TankCraft.exe` **109,825,632 B（104.74 MB）** / SHA256 `0528eb87…338de7`，`--debug` 版 103,733,856 B，连跑两次逐字节一致，PE 为 `PE32+` / `x86_64` / `SUBSYSTEM=2` 且尾部带 `GDPC`（单文件内嵌 pck）。实跑证据：`TankCraft.exe --headless --quit-after 600 -- --screen=survival --steps=200` → 5.5 s 正常退出、stderr 仅 `SURVIVAL_ENTERED wave=1 enemies=2 houses=4 debris=6`、**无 `SCRIPT ERROR`**。但**全部验证都是 `--headless`**（`WINDOW_MODE mode=1 size=(0, 0)` 就是 headless display server 的表现），**没有人双击运行过它、没有人看过它的画面**。另外 `build/` 被 `.gitignore` 忽略，**exe 不在仓库里**；`--install-templates` 的 **`-All` 整包分支从未跑通**（只验证了默认的「只取 Windows 条目」分支）。
+- **没有任何人工交互验证**：桌面 exe 只在 `--headless` 下被跑过（且只跑到主菜单/生存模式初始化），Android 也没有 APK。
 - `expedition_run.gd` / `runtime_builder.gd` 仍存在但**无任何玩法调用方**。
 - 若干旧缺口：`boss_armor` 未实现、`safe_radius` 从未被读取、商店稀有度权重方向反、竞技场障碍 `hp` 无人扣减（障碍不可摧毁）。
 
