@@ -7,3 +7,9 @@
 *.png binary
 *.apk binary
 *.uid text eol=lf
+
+# 批处理脚本：**必须保持 CRLF**。cmd.exe 对 LF-only 的 .bat 解析会错乱
+# （实测一个 4 行 wrapper 被解成 'd' is not recognized）。这一条必须放在
+# `* text=auto eol=lf` 之后，否则会被它覆盖。
+*.bat text eol=crlf
+*.cmd text eol=crlf
