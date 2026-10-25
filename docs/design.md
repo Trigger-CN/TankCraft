@@ -3830,6 +3830,7 @@ build_release.bat --help
 3. **导出前必须先删除旧 exe。** 否则导出失败时残留的上一版文件会让「文件存在且非空」这个判据成立，把失败误报成成功。这是构建脚本里最容易骗过自己的一处。
 4. **默认不自动安装模板。** 导出模板装在 `%APPDATA%\Godot\export_templates\<版本>\`，在工程目录之外。脚本默认只报告缺失路径并给出三条解决途径，改动机器状态必须由人显式传 `--install-templates`。
 5. **所有分支必须走同一个出口。** `:finish` 统一做 `popd` + 恢复原代码页 + `endlocal & exit /b %EXITCODE%`。早期版本在分支里直接 `exit /b`，会漏掉恢复代码页与 `popd`，在中文控制台下表现为后续输出乱码。
+6. **`.gitattributes` 必须把 `*.bat` 钉成 `eol=crlf`。** 本工程为保持字节稳定写了 `* text=auto eol=lf`，它会**连带把 `.bat` 也变成 LF**；而 cmd 对 LF-only 批处理解析会错乱——实测一个 4 行 wrapper 被解成 `'d' is not recognized`。首次提交时 git 就打了警告 `CRLF will be replaced by LF the next time Git touches it`，我一开始当成噪音，实际上那意味着**仓库里那份脚本在别人机器上一拷出来就是坏的**。已在 `.gitattributes` 追加 `*.bat text eol=crlf`（必须放在 `* text=auto eol=lf` **之后**，否则被覆盖）。**验证方式不能靠语义推断**：索引里的 blob 仍是 LF（`eol=crlf` 的正常行为：入库规范化成 LF、检出时转回 CRLF），必须用 `git checkout-index --force --prefix=<tmp>/ build_release.bat` 模拟一次检出，实测得到 **12049 B / 307 CRLF / LONE_LF=0**、与工作区逐字节相同才算数。
 
 #### 13.8.4 导出预设（`export_presets.cfg` 的 `[preset.1]`）
 
@@ -3855,6 +3856,7 @@ build_release.bat --help
 | 脚本 `--out` 含空格 | **通过** | 退出码 `3`；**修前此路径为 `255`** |
 | 脚本 任意工作目录 | **通过** | 从 `C:\` 启动输出与工程内一致 |
 | 脚本 `--godot` 不存在 | **通过** | 退出码 `2`，报「指定的 Godot 不存在」 |
+| `.gitattributes` CRLF | **通过（修正后）** | `git check-attr` → `eol: crlf`；`git checkout-index` 模拟检出得 **12049 B / 307 CRLF / LONE_LF=0**、与工作区逐字节相同 |
 
 **真实导出 exe 尚未验证。** 本机没有任何导出模板，而模板包约 1.22 GB（`Content-Length=1281349702`），必须装到 `%APPDATA%`（工程目录之外）。按工程边界约定，这需要用户明确授权；`--install-templates` 已实现但**从未被执行过**，其下载 / 解压 / 复制三步**没有任何实测证据**。
 
