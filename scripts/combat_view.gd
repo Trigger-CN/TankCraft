@@ -66,6 +66,24 @@ const FX_STYLE_MATCH := {
 	"alpha_scale": 0.8,
 }
 
+## 试驾页这一套：与 `FX_STYLE_MATCH` 同形（向外收缩 + 无填充），另加两个开关：
+##   `special`        画出 `debris` / `shield_hit` / `detach` / `core` 四种专用形状
+##                    （默认 `false`，这四种在另两页依旧画成通用圆环）
+##   `centre_dot` / `centre_alpha`  通用圆环中心补一个亮点（试驾页从 M5 起就有的观感）
+## 两个开关缺省关闭，所以另两页的像素不受影响。
+const FX_STYLE_DRIVE := {
+	"radius_base": 1.0,
+	"radius_grow": -0.8,
+	"min_radius": 0.0,
+	"arc_points": 24,
+	"arc_width": 2.0,
+	"fill_scale": 0.0,
+	"alpha_scale": 0.8,
+	"special": true,
+	"centre_dot": 0.18,
+	"centre_alpha": 0.5,
+}
+
 ## 世界坐标 → 屏幕坐标。
 ##
 ## 三页原本各有一份逐字相同的副本（`_drive_to_screen` / `_match_to_screen` /
@@ -106,12 +124,28 @@ static func scale_obstacles(raw_obstacles: Array, cell_px: float) -> Array:
 	return result
 
 
-## 竞技场底板 + 边界 + 固定障碍。
+## 竞技场底板 + 网格线 + 边界 + 固定障碍。
 ##
 ## `obstacles` 统一为**已是世界像素**的条目（见 `scale_obstacles()`）：
 ##   `{shape: "rect", rect: Rect2}` 或 `{shape: "circle", center: Vector2, radius: float}`
-static func draw_arena(canvas: CanvasItem, view: Rect2, arena: Rect2, scale_factor: float, obstacles: Array, border_colour: Color) -> void:
+##
+## `grid_step_px` 是网格**线间距**（屏幕像素），0 表示不画网格——对局页与生存页传缺省值，
+## 因此它们的像素不受网格分支影响；试驾页传「4 格宽」的间距，每第 4 根线加亮。
+static func draw_arena(canvas: CanvasItem, view: Rect2, arena: Rect2, scale_factor: float, obstacles: Array, border_colour: Color, grid_step_px: float = 0.0) -> void:
 	canvas.draw_rect(view, Color(Palette.BG_BASE, 0.94), true)
+	if grid_step_px > 0.0:
+		var x := view.position.x
+		var column := 0
+		while x <= view.end.x:
+			canvas.draw_line(Vector2(x, view.position.y), Vector2(x, view.end.y), Color(Palette.GRID_LINE, 0.55 if column % 4 == 0 else 0.26), 1.0)
+			x += grid_step_px
+			column += 1
+		var y := view.position.y
+		var row := 0
+		while y <= view.end.y:
+			canvas.draw_line(Vector2(view.position.x, y), Vector2(view.end.x, y), Color(Palette.GRID_LINE, 0.55 if row % 4 == 0 else 0.26), 1.0)
+			y += grid_step_px
+			row += 1
 	canvas.draw_rect(Rect2(view.position, arena.size * scale_factor), border_colour, false, 2.0)
 	for raw_obstacle in obstacles:
 		var obstacle: Dictionary = raw_obstacle
@@ -172,13 +206,15 @@ static func draw_shots(canvas: CanvasItem, view: Rect2, arena: Rect2, scale_fact
 
 ## 瞬时动效圆环。
 ##
-## `style` 用来消掉两个战斗模式的**观感差**，而不是让每个模式各写一份绘制：
+## `style` 用来消掉各模式的**观感差**，而不是让每个模式各写一份绘制：
 ##   `radius_base` / `radius_grow`  半径系数 = base + grow × t（t 是剩余寿命比例）
 ##   `min_radius`                   屏幕上的最小半径（像素）
 ##   `arc_points` / `arc_width`     描边段数与线宽
 ##   `fill_scale`                   圆内填充的 alpha 倍率；0 表示不画填充
 ##   `alpha_scale`                  描边 alpha 倍率
-## 缺省用 `FX_STYLE_SURVIVAL`，对局页传 `FX_STYLE_MATCH`。
+##   `special`                      是否画 `debris` / `shield_hit` / `detach` / `core` 专用形状
+##   `centre_dot` / `centre_alpha`  通用圆环中心的亮点半径系数与 alpha（0 = 不画）
+## 缺省用 `FX_STYLE_SURVIVAL`，对局页传 `FX_STYLE_MATCH`，试驾页传 `FX_STYLE_DRIVE`。
 static func draw_fx(canvas: CanvasItem, view: Rect2, arena: Rect2, scale_factor: float, entries: Array, style: Dictionary = FX_STYLE_SURVIVAL) -> void:
 	var radius_base := float(style.get("radius_base", 0.6))
 	var radius_grow := float(style.get("radius_grow", 0.4))
@@ -187,6 +223,9 @@ static func draw_fx(canvas: CanvasItem, view: Rect2, arena: Rect2, scale_factor:
 	var arc_width := float(style.get("arc_width", 1.5))
 	var fill_scale := float(style.get("fill_scale", 0.5))
 	var alpha_scale := float(style.get("alpha_scale", 0.75))
+	var special := bool(style.get("special", false))
+	var centre_dot := float(style.get("centre_dot", 0.0))
+	var centre_alpha := float(style.get("centre_alpha", 0.0))
 	for raw_entry in entries:
 		var entry: Dictionary = raw_entry
 		var kind := String(entry.get("kind", ""))
@@ -200,12 +239,42 @@ static func draw_fx(canvas: CanvasItem, view: Rect2, arena: Rect2, scale_factor:
 		var t := clampf(float(entry["left"]) / life, 0.0, 1.0)
 		var colour: Color = entry["colour"]
 		var at := to_screen(view, arena, Vector2(entry["pos"]), scale_factor)
-		var radius := maxf(float(entry["radius"]) * scale_factor * (radius_base + radius_grow * t), min_radius)
+		## 全尺寸半径（未乘收缩系数）：中心亮点与专用形状用它，通用圆环再乘 `base + grow·t`。
+		var full_radius := float(entry["radius"]) * scale_factor
+		if special and _draw_impact_shape(canvas, at, full_radius, colour, kind, t):
+			continue
+		var radius := maxf(full_radius * (radius_base + radius_grow * t), min_radius)
 		var alpha := alpha_scale * t
 		if fill_scale > 0.0:
 			canvas.draw_circle(at, radius, Color(colour, alpha * fill_scale))
 		canvas.draw_arc(at, radius, 0.0, TAU, arc_points, Color(colour, alpha), arc_width)
+		if centre_dot > 0.0:
+			canvas.draw_circle(at, maxf(full_radius * centre_dot * t, 1.0), Color(colour, centre_alpha * t))
 
+
+## `special` 打开时才走的四种专用形状（v3.33 从试驾页 `_draw_drive_fx()` 搬进来）。
+##
+## **为什么不是默认行为**：对局页也会推 `detach` 动效，若把它改成专用形状，对局页的像素
+## 就会变——而抽取的目的是「消除分叉」而不是「重做另两页」。所以这四种形状必须由风格开关
+## 显式启用，缺省时它们与抽取前一样走通用圆环分支。
+## 返回是否已画出，`false` 表示调用方继续走通用分支。
+static func _draw_impact_shape(canvas: CanvasItem, at: Vector2, radius: float, colour: Color, kind: String, t: float) -> bool:
+	var grow := 1.0 - t
+	match kind:
+		"debris":
+			## 残骸碎片：实心小点，随寿命缩小。
+			canvas.draw_circle(at, maxf(radius * t, 1.0), Color(colour, 0.7 * t))
+			return true
+		"shield_hit":
+			## 护盾受击：固定半径的短促圆环，不收缩——护盾不会「散掉」，只会闪一下。
+			canvas.draw_arc(at, maxf(radius, 2.0), 0.0, TAU, 12, Color(colour, t), 2.0)
+			return true
+		"detach", "core":
+			## 整块脱落 / 驾驶舱被毁：双同心圆向外扩散，比通用圆环更「重」。
+			canvas.draw_arc(at, radius * (0.35 + 0.65 * grow), 0.0, TAU, 32, Color(colour, 0.85 * t), 3.0)
+			canvas.draw_arc(at, radius * (0.15 + 0.4 * grow), 0.0, TAU, 24, Color(colour, 0.55 * t), 2.0)
+			return true
+	return false
 
 ## 最近一次命中点的高亮圈：即便命中发生在缩放后只有几像素的敌车上也能看见。
 ##
@@ -364,3 +433,44 @@ static func hull_damage_colour(part: Dictionary, base: Color) -> Color:
 static func hull_damage_alpha(part: Dictionary) -> float:
 	var ratio := clampf(float(part["hp"]) / maxf(float(part["hp_max"]), 0.001), 0.0, 1.0)
 	return 0.14 + 0.20 * ratio
+
+
+## ===== 车体上两个「纯视觉」附加层（v3.33 从试驾页私有改共享） =====
+##
+## 两者原本只存在于试驾页（`_drive_part_offset()` / `_draw_drive_track_marks()`）。
+## 它们的观感很好（加速时车体有惯性感、履带在转），但另两页完全没有——
+## 这不是模式差异，而是「谁先写完谁就有」的历史遗留。
+##
+## 现在改成**共享的可选项**：任何战斗页把这两个函数当作 `_draw_hull_shared()` 的
+## `offset_fn` / `cell_hook` 传进去就能用，不传就是原来的行为。
+## 默认不启用而不是默认启用，因为启用会改变另两页的像素——
+## 而本次改动的目标是「消除分叉」，不是「重做另两页的观感」。
+
+## 履带纹的步长与相位周期（局部像素）：相位取自行进距离，所以轮子「走多少转多少」。
+const TRACK_MARK_X_STEP := 6.0
+const TRACK_MARK_Y_STEP := 5.0
+const TRACK_MARK_LEN := 3.0
+const TRACK_PHASE_PERIOD := 6.0
+
+## 加速时行进机构整体向后拖一点（局部格）。`throttle` 是 -1..1 的油门量。
+## 返回 `Vector2.ZERO` 时 `_draw_hull_shared()` 的行为与不传 offset_fn 完全一致。
+static func track_offset(part: Dictionary, throttle: float, enabled: bool) -> Vector2:
+	if not enabled or is_zero_approx(throttle):
+		return Vector2.ZERO
+	if String(part.get("kind", "")) != "mobility":
+		## 字面量 "mobility" 与 `TankBody.KIND_MOBILITY` 同值。这里不引用 `TankBody`：
+		## 组件目前只依赖 `palette` / `fx_layer`，引入车身脚本会多一条无谓的耦合边。
+		return Vector2.ZERO
+	return Vector2(-0.5 * signf(throttle), 0.0)
+
+## 只在行进机构格上叠履带纹。`phase` 由调用方用「行进距离」累加，不用 randf。
+static func track_marks(canvas: CanvasItem, box: Rect2, colour: Color, phase: float) -> void:
+	var start := fposmod(phase, TRACK_PHASE_PERIOD)
+	var mark := Color(colour, 0.8)
+	var y := box.position.y + 3.0
+	while y < box.end.y:
+		var x := box.position.x + start
+		while x < box.end.x:
+			canvas.draw_line(Vector2(x, y), Vector2(minf(x + TRACK_MARK_LEN, box.end.x), y), mark, 1.0)
+			x += TRACK_MARK_X_STEP
+		y += TRACK_MARK_Y_STEP

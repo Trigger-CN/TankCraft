@@ -165,6 +165,14 @@ var _drive_cannon_loaded: Array = []
 ## v3.23：试驾页的炮口闪光与消散（多实例；与另两页共用同一套推进/绘制）。
 var _drive_muzzles: Array = []
 var _drive_expires: Array = []
+## v3.33：命中闪光。与对局页 / 生存页同一套（`CombatView.draw_hit_flash`），
+## 之前试驾页完全没有这一层——打中了屏幕上除了弹坑什么都没有。
+var _drive_hit_flash_at := Vector2.ZERO
+var _drive_hit_flash_left := 0.0
+## 调试辅助：打开后车体按**模块种类**上色（试驾页 v3.33 之前的旧配色）。
+## 默认关：三页统一走「驾驶舱琥珀 / 其余队伍色 + 血量分档」这一条唯一规则。
+## 否则同一个模块在三个页面上是三种颜色，玩家学到的「红 = 快坏了」在试驾页不成立。
+var _drive_kind_highlight := false
 ## M6 对局：MatchState 包一层对局实体的 Duel，AI 驱动敌方侧。
 var match_session: MatchState
 var match_ai: BotAI
@@ -1244,6 +1252,8 @@ func _enter_drive() -> void:
 	_drive_accumulator = 0.0
 	_drive_track_phase = 0.0
 	_drive_last_event = ""
+	_drive_hit_flash_at = Vector2.ZERO
+	_drive_hit_flash_left = 0.0
 	_drive_ready = true
 	_set_screen(SCREEN_DRIVE)
 	_status_error = false
@@ -1313,6 +1323,12 @@ func _handle_drive_key(event: InputEventKey) -> void:
 		if pressed:
 			_enter_drive()
 		return
+	if key == KEY_K:
+		if pressed:
+			_drive_kind_highlight = not _drive_kind_highlight
+			_drive_last_event = "种类高亮：开" if _drive_kind_highlight else "种类高亮：关"
+			queue_redraw()
+		return
 	if key == KEY_W or key == KEY_UP:
 		_drive_held["throttle_up"] = event.pressed
 	elif key == KEY_S or key == KEY_DOWN:
@@ -1351,8 +1367,24 @@ func _drive_step(step_time: float) -> void:
 		throttle *= damage.thrust_scale()
 		steer *= damage.thrust_scale()
 	tank.step(step_time, throttle, steer)
-	tank.apply_obstacles(_drive_obstacles)
-	tank.apply_boundary(_drive_arena)
+	## v3.33：撞墙 / 撞障碍的伤害是试驾页**唯一可达**的自伤来源，悬浮数字就补在这里。
+	## 两个函数都返回「本次调用累计的伤害」，所以不需要再自己算一遍公式。
+	var wall_damage := tank.apply_obstacles(_drive_obstacles)
+	wall_damage += tank.apply_boundary(_drive_arena)
+	if wall_damage > 0.0 and not tank.parts.is_empty():
+		## 撞击点取「离车心最远的那一格」：`_apply_impact_damage()` 打的就是最贴近撞击面的部件，
+		## 但那里没有回传具体是哪一件，所以这里取几何上最外侧的格作为数字落点。
+		var impact_at := tank.position
+		var furthest := -INF
+		for part in tank.parts:
+			var part_at := tank.world_position_of_part(part)
+			var reach := part_at.distance_squared_to(tank.position)
+			if reach > furthest:
+				furthest = reach
+				impact_at = part_at
+		_drive_hit_flash_at = impact_at
+		_drive_hit_flash_left = CombatView.HIT_FLASH_TIME
+		_drive_push_damage(impact_at, wall_damage, Palette.ACCENT_RED, "received")
 	bank.step(step_time)
 	## 20 Hz 独立累加器推进网络；fill_cannons 只把已送达的弹药压入膛室。
 	network.step(step_time)
@@ -1461,7 +1493,8 @@ func _drive_resolve_impact(event: Dictionary) -> void:
 	if part_index < 0:
 		return
 	var upgrades: Array = event.get("upgrades", [])
-	damage.apply_hit(
+	var at := Vector2(event.get("pos", Vector2.ZERO))
+	var result := damage.apply_hit(
 		tank,
 		Vector2i(event.get("cell", Vector2i.ZERO)),
 		part_index,
@@ -1470,6 +1503,10 @@ func _drive_resolve_impact(event: Dictionary) -> void:
 		Vector2(event.get("normal", Vector2.ZERO)),
 		float(event.get("damage_scale", 1.0))
 	)
+	## 注意：试驾页的弹丸**永远打不到自己**（`ProjectileField._sweep()` 会排除射手自己的 tag，
+	## 而这里的发射方恒为 "player"），所以这条分支在当前沙盒里不可达。
+	## 试驾页真正的自伤来源是撞墙 / 撞障碍与殉爆，伤害数字放在那两处（见 `_drive_step`）。
+	return
 
 ## damage_system 的事件 → 绘制动效 + 状态文案；动效倒计时只在 _drive_step 里推进。
 func _drive_consume_damage_events(list: Array) -> void:
@@ -1543,6 +1580,8 @@ func _push_drive_fx(kind: String, at: Vector2, radius: float, colour: Color, lif
 
 ## 动效倒计时在固定步长里累减，保持确定性（绝不放 _process，绝不用 randf）。
 func _drive_tick_fx(step_time: float) -> void:
+	if _drive_hit_flash_left > 0.0:
+		_drive_hit_flash_left = maxf(_drive_hit_flash_left - step_time, 0.0)
 	_drive_fx.step(step_time)
 	_advance_timed(_drive_muzzles, step_time)
 	_advance_timed(_drive_expires, step_time)
@@ -1675,6 +1714,31 @@ func _draw_panel(rect: Rect2, title: String) -> void:
 	draw_rect(rect, Color(Palette.WIRE, 0.55), false, 1.0)
 	draw_line(rect.position + Vector2(0, 58), Vector2(rect.end.x, rect.position.y + 58), Color(Palette.WIRE, 0.35), 1.0)
 	_draw_text(title, rect.position + Vector2(22, 37), 20, Palette.TEXT_HI, false)
+
+## ===== 三页共用的战斗 HUD 骨架（v3.33） =====
+##
+## 只统一**排版**，不统一内容：各模式仍然自己决定写什么、写几个值。
+## 驾驶页是物理调试页（质量 / 惯量 / 推力），生存页带肉鸽进度（波次 / 金钱 / 等级），
+## 所以 HUD 内容不同是**合理的**，不该被拉平；但「小标签 + 大标题」两行的字号与间距、
+## 以及底部状态条的框与内边距，三页没有理由各不相同。
+##
+## 坐标由调用方传入而不是写死：试驾页标题在 (48,62)/(48,106)，另两页在 (left,120)/(left,152)，
+## 这是各页的既有布局，写死任何一套都会改掉另两页的像素。
+func _draw_battle_header(eyebrow: String, eyebrow_colour: Color, eyebrow_at: Vector2, eyebrow_size: int, title: String, title_at: Vector2, title_size: int) -> void:
+	_draw_text(eyebrow, eyebrow_at, eyebrow_size, eyebrow_colour, true)
+	_draw_text(title, title_at, title_size, Palette.TEXT_HI, false)
+
+## 底部状态条。三页的框、边框与文字内边距完全一致，只有文字与强调色不同。
+## `highlight` 是对局页「对局结束」用的强调版：更深的底、更粗的背光、更大的字。
+func _draw_battle_status(text: String, text_colour: Color = Palette.TEXT_HI, highlight: bool = false) -> void:
+	if highlight:
+		draw_rect(DRIVE_STATUS, Color(Palette.BG_BASE, 0.92), true)
+		draw_rect(DRIVE_STATUS, Palette.ACCENT_CYAN, false, 2.0)
+		_draw_text(text, DRIVE_STATUS.position + Vector2(20.0, 44.0), 20, text_colour, false)
+		return
+	draw_rect(DRIVE_STATUS, Color(Palette.BG_BASE, 0.86), true)
+	draw_rect(DRIVE_STATUS, Color(Palette.WIRE, 0.55), false, 1.0)
+	_draw_text(text, DRIVE_STATUS.position + Vector2(20.0, 42.0), 16, text_colour, false)
 
 func _draw_build_sidebar() -> void:
 	var layer_names := ["1  平台层", "2  行进机构层", "3  功能模块层"]
@@ -2238,8 +2302,7 @@ func _draw_match_hud() -> void:
 	var duel: Duel = match_session.duel
 	var left := DRIVE_HUD_LEFT.position.x
 	var right := DRIVE_HUD_RIGHT.position.x
-	_draw_text("对战 / %s" % MATCH_DIFFICULTY_LABEL[_match_difficulty], Vector2(left, 120), 16, Palette.ACCENT_CYAN, true)
-	_draw_text("MATCH", Vector2(left, 152), 32, Palette.TEXT_HI, false)
+	_draw_battle_header("对战 / %s" % MATCH_DIFFICULTY_LABEL[_match_difficulty], Palette.ACCENT_CYAN, Vector2(left, 120), 16, "MATCH", Vector2(left, 152), 32)
 	_draw_text("对局计时", Vector2(left, 220), 14, Palette.TEXT_LO, false)
 	_draw_text("%05.1f s" % maxf(match_session.battle_time_left, 0.0), Vector2(left, 252), 26, Palette.ACCENT_AMBER, true)
 	var player_dealt := float(duel.damage_dealt.get(Duel.TAG_PLAYER, 0.0))
@@ -2271,13 +2334,9 @@ func _draw_match_hud() -> void:
 		draw_rect(Rect2(right, 480.0, 272.0, 6.0), Color(Palette.WIRE, 0.35), true)
 		draw_rect(Rect2(right, 480.0, 272.0 * progress, 6.0), Palette.ACCENT_AMBER if bool(cannon["loaded"]) else Palette.WIRE, true)
 	if match_session.is_over():
-		draw_rect(DRIVE_STATUS, Color(Palette.BG_BASE, 0.92), true)
-		draw_rect(DRIVE_STATUS, Palette.ACCENT_CYAN, false, 2.0)
-		_draw_text("对局结束：%s（R 重开 / Esc 返回）" % _match_outcome_text(), Vector2(DRIVE_STATUS.position.x + 20.0, DRIVE_STATUS.position.y + 44.0), 20, Palette.TEXT_HI, false)
+		_draw_battle_status("对局结束：%s（R 重开 / Esc 返回）" % _match_outcome_text(), Palette.TEXT_HI, true)
 	else:
-		draw_rect(DRIVE_STATUS, Color(Palette.BG_BASE, 0.86), true)
-		draw_rect(DRIVE_STATUS, Color(Palette.WIRE, 0.55), false, 1.0)
-		_draw_text(_status_message, Vector2(DRIVE_STATUS.position.x + 20.0, DRIVE_STATUS.position.y + 42.0), 16, Palette.TEXT_HI, false)
+		_draw_battle_status(_status_message)
 
 ## ===== 试驾沙盒绘制（M3）：世界缩放、刚体姿态、弹道与 HUD =====
 func _drive_scale() -> float:
@@ -2430,48 +2489,33 @@ func _draw_aim_reticle() -> void:
 	draw_line(pointer - Vector2(AIM_RETICLE_CROSS, 0.0), pointer + Vector2(AIM_RETICLE_CROSS, 0.0), Color(colour, 0.55), 1.0)
 	draw_line(pointer - Vector2(0.0, AIM_RETICLE_CROSS), pointer + Vector2(0.0, AIM_RETICLE_CROSS), Color(colour, 0.55), 1.0)
 
+## 绘制顺序与对局页 / 生存页**完全一致**（v3.33）：
+## arena → hull → conveyor → fx → expires → shots → muzzles → hit flash → damage popups → HUD → reticle。
+## 旧顺序把 fx 画在 shots 之后、且没有命中闪光与伤害数字，是「三页体感不一样」的直接来源。
 func _draw_drive() -> void:
 	_draw_drive_field()
 	_draw_drive_hull()
 	_draw_drive_conveyors()
+	_draw_drive_fx()
 	_draw_timed_expires(_drive_expires, _drive_arena, _drive_scale())
 	_draw_drive_shots()
 	_draw_timed_muzzles(_drive_muzzles, _drive_arena, _drive_scale())
-	_draw_drive_shields()
-	_draw_drive_fx()
+	## 命中闪光画在炮弹之上，确保不会被格线淹掉。
+	CombatView.draw_hit_flash(self, DRIVE_VIEW, _drive_arena, _drive_scale(), _drive_hit_flash_at, _drive_hit_flash_left)
+	## 伤害数字画在最后：必须盖在炮弹、命中闪光与所有地形之上。
+	CombatView.draw_damage_popups(self, DRIVE_VIEW, _drive_arena, _drive_scale(), _drive_fx.entries, _draw_text)
 	_draw_drive_hud()
 	## v3.25：准星必须最后画，盖住车体 / 弹道 / HUD。
 	_draw_aim_reticle()
 
+## 试驾页的竞技场：直接走 `CombatView.draw_arena`，只多传一个网格间距。
+## 网格间距是「4 格宽」的屏幕像素（旧实现里 `cell_step` 就是 `cell_size·scale·4`），
+## `draw_arena` 的 `grid_step_px = 0` 缺省值保证另两页不会因此多画一根线。
 func _draw_drive_field() -> void:
+	if tank == null:
+		return
 	var scale_factor := _drive_scale()
-	draw_rect(DRIVE_VIEW, Color(Palette.BG_BASE, 0.94), true)
-	var cell_step: float = tank.cell_size() * scale_factor * 4.0
-	var x := DRIVE_VIEW.position.x
-	var column := 0
-	while x <= DRIVE_VIEW.end.x:
-		draw_line(Vector2(x, DRIVE_VIEW.position.y), Vector2(x, DRIVE_VIEW.end.y), Color(Palette.GRID_LINE, 0.55 if column % 4 == 0 else 0.26), 1.0)
-		x += cell_step
-		column += 1
-	var y := DRIVE_VIEW.position.y
-	var row := 0
-	while y <= DRIVE_VIEW.end.y:
-		draw_line(Vector2(DRIVE_VIEW.position.x, y), Vector2(DRIVE_VIEW.end.x, y), Color(Palette.GRID_LINE, 0.55 if row % 4 == 0 else 0.26), 1.0)
-		y += cell_step
-		row += 1
-	draw_rect(Rect2(_drive_to_screen(_drive_arena.position), _drive_arena.size * scale_factor), Palette.ACCENT_CYAN, false, 2.0)
-	for raw_obstacle in _drive_obstacles:
-		var obstacle: Dictionary = raw_obstacle
-		if String(obstacle["shape"]) == "rect":
-			var rect: Rect2 = obstacle["rect"]
-			var screen_rect := Rect2(_drive_to_screen(rect.position), rect.size * scale_factor)
-			draw_rect(screen_rect, Color(Palette.ACCENT_RED, 0.16), true)
-			draw_rect(screen_rect, Palette.ACCENT_RED, false, 1.5)
-		else:
-			var centre := _drive_to_screen(Vector2(obstacle["center"]))
-			var radius := float(obstacle["radius"]) * scale_factor
-			draw_circle(centre, radius, Color(Palette.ACCENT_RED, 0.16))
-			draw_arc(centre, radius, 0.0, TAU, 48, Palette.ACCENT_RED, 1.5)
+	CombatView.draw_arena(self, DRIVE_VIEW, _drive_arena, scale_factor, _drive_obstacles, Palette.ACCENT_CYAN, tank.cell_size() * scale_factor * 4.0)
 
 ## 整机绕质心旋转；design §5.5 的转向倾斜与加速滞后均为纯视觉量。
 func _draw_drive_hull() -> void:
@@ -2482,97 +2526,39 @@ func _draw_drive_hull() -> void:
 	if _motion_enabled:
 		tilt = clampf(tank.angular_velocity * deg_to_rad(0.7), -deg_to_rad(2.0), deg_to_rad(2.0))
 	var effects := _hull_effects(tank, damage, network)
-	_draw_hull_shared(tank, _drive_to_screen(tank.position), tank.heading + tilt, scale_factor, _drive_part_color, Callable(), _drive_part_offset, _drive_cell_hook, effects)
+	## v3.33：后拖与履带纹已收归 `CombatView`，试驾页只是把两个开关打开。
+	## 另两页不传这两个回调，`_draw_hull_shared()` 的缺省分支与旧版逐字节相同。
+	_draw_hull_shared(tank, _drive_to_screen(tank.position), tank.heading + tilt, scale_factor, _drive_part_color, CombatView.hull_damage_alpha, _drive_part_offset, _drive_cell_hook, effects)
 
-## 加速时行进机构整体向后拖一点，纯视觉量（design §5.5）。
+## 加速时行进机构整体向后拖一点（纯视觉量，design §5.5）。
+## 只在试驾页启用：`_motion_enabled` 与油门都是试驾页的状态。
 func _drive_part_offset(part: Dictionary) -> Vector2:
-	if String(part["kind"]) != TankBody.KIND_MOBILITY:
-		return Vector2.ZERO
-	if not _motion_enabled or is_zero_approx(_drive_throttle):
-		return Vector2.ZERO
-	return Vector2(-0.5 * signf(_drive_throttle), 0.0)
+	return CombatView.track_offset(part, _drive_throttle, _motion_enabled)
 
 ## 只在行进机构格上叠履带纹。
 func _drive_cell_hook(box: Rect2, colour: Color, part: Dictionary) -> void:
 	if String(part["kind"]) == TankBody.KIND_MOBILITY:
-		_draw_drive_track_marks(box, colour)
+		CombatView.track_marks(self, box, colour, _drive_track_phase)
 
-func _draw_drive_track_marks(box: Rect2, colour: Color) -> void:
-	var phase := fposmod(_drive_track_phase, 6.0)
-	var mark := Color(colour, 0.8)
-	var y := box.position.y + 3.0
-	while y < box.end.y:
-		var x := box.position.x + phase
-		while x < box.end.x:
-			draw_line(Vector2(x, y), Vector2(minf(x + 3.0, box.end.x), y), mark, 1.0)
-			x += 6.0
-		y += 5.0
-
+## 弹道走 `CombatView.draw_shots`：颜色按 `shooter` 判，试驾页的发射方 tag 恒为 "player"。
+## 旧实现写死琥珀色——一旦以后有敌人的弹道进入试驾页，就分不出谁在打谁。
 func _draw_drive_shots() -> void:
 	if field == null:
 		return
-	var scale_factor := _drive_scale()
-	for shot in field.shots:
-		var head := _drive_to_screen(Vector2(shot["pos"]))
-		var tail := _drive_to_screen(Vector2(shot["prev"]))
-		draw_line(tail, head, Color(Palette.ACCENT_AMBER, 0.7), 1.5)
-		draw_circle(head, maxf(float(shot["radius"]) * scale_factor, 2.0), Palette.ACCENT_AMBER)
-
-## M5 护盾可视化：ACTIVE 画覆盖格轮廓，BROKEN 画充能脉冲（相位取自 _time，不用 randf）。
-func _draw_drive_shields() -> void:
-	if damage == null or tank == null:
-		return
-	var scale_factor := _drive_scale()
-	var cell: float = tank.cell_size()
-	var pulse := 0.5 + 0.5 * sin(_time * 6.0)
-	for raw_shield in damage.shields():
-		var shield: Dictionary = raw_shield
-		var active := String(shield["state"]) == DamageSystem.SHIELD_ACTIVE
-		var colour := Palette.ACCENT_LIME if active else Palette.ACCENT_RED
-		var alpha := 0.55 if active else 0.25 + 0.45 * pulse
-		for raw_cell in (shield["cells"] as Array):
-			var box := _drive_local_box(Vector2i(raw_cell), cell)
-			draw_rect(box, Color(colour, alpha * 0.18), true)
-			draw_rect(box, Color(colour, alpha), false, maxf(1.0 / scale_factor, 1.0))
-		if active:
-			continue
-		## 充能进度条画在护盾首格下方。
-		var anchor := _drive_local_box(Vector2i((shield["cells"] as Array)[0]), cell)
-		var total := maxf(float(shield["recharge_s"]), 0.01)
-		var progress := clampf(1.0 - float(shield["charge"]) / total, 0.0, 1.0)
-		var bar := Rect2(anchor.position + Vector2(0.0, cell + 2.0), Vector2(cell, 3.0))
-		draw_rect(bar, Color(Palette.BG_BASE, 0.8), true)
-		draw_rect(Rect2(bar.position, Vector2(bar.size.x * progress, bar.size.y)), _drive_lime_pulse(pulse), true)
-
-func _drive_lime_pulse(pulse: float) -> Color:
-	return Color(Palette.ACCENT_LIME, 0.45 + 0.55 * pulse)
+	CombatView.draw_shots(self, DRIVE_VIEW, _drive_arena, _drive_scale(), field.shots, "player")
 
 ## M5 战斗动效：残骸、爆炸环、护盾、脱落撕裂与驾驶舱被毁；全部由 left/life 倒数驱动。
+## v3.33：形状与推进全部走 `CombatView.draw_fx` + `FX_STYLE_DRIVE`。
+## 残骸 / 护盾受击 / 脱落 / 驾驶舱这四种专用形状随 `FX_STYLE_DRIVE["special"]` 开关走，
+## 另两页不开这个开关，所以它们的动效仍然是通用圆环——像素不变。
 func _draw_drive_fx() -> void:
 	if _drive_fx.is_empty():
 		return
-	var scale_factor := _drive_scale()
-	for raw_entry in _drive_fx.entries:
-		var entry: Dictionary = raw_entry
-		var kind := String(entry["kind"])
-		var at := _drive_to_screen(Vector2(entry["pos"]))
-		var radius := float(entry["radius"]) * scale_factor
-		var colour: Color = entry["colour"]
-		var life := maxf(float(entry["life"]), 0.001)
-		var ratio := clampf(float(entry["left"]) / life, 0.0, 1.0)
-		var grow := 1.0 - ratio
-		if kind == "debris":
-			draw_circle(at, maxf(radius * ratio, 1.0), Color(colour, 0.7 * ratio))
-			continue
-		if kind == "shield_hit":
-			draw_arc(at, maxf(radius, 2.0), 0.0, TAU, 12, Color(colour, ratio), 2.0)
-			continue
-		if kind == "detach" or kind == "core":
-			draw_arc(at, radius * (0.35 + 0.65 * grow), 0.0, TAU, 32, Color(colour, 0.85 * ratio), 3.0)
-			draw_arc(at, radius * (0.15 + 0.4 * grow), 0.0, TAU, 24, Color(colour, 0.55 * ratio), 2.0)
-			continue
-		draw_arc(at, radius * (0.2 + 0.8 * grow), 0.0, TAU, 24, Color(colour, 0.8 * ratio), 2.0)
-		draw_circle(at, maxf(radius * 0.18 * ratio, 1.0), Color(colour, 0.5 * ratio))
+	CombatView.draw_fx(self, DRIVE_VIEW, _drive_arena, _drive_scale(), _drive_fx.entries, CombatView.FX_STYLE_DRIVE)
+
+## 试驾页的伤害悬浮数字：逻辑全在 `CombatView.push_damage()`（三页同一份）。
+func _drive_push_damage(at: Vector2, amount: float, colour: Color, mode: String) -> void:
+	CombatView.push_damage(_drive_fx, at, amount, colour, mode)
 
 ## M4 管路可视化：底槽、在途炮弹、拥塞红色闪烁（design §7.4）。
 ## 闪烁相位取自 _time，不用 randf，保持确定性。
@@ -2633,7 +2619,23 @@ func _draw_drive_broken_link(screen: Vector2) -> void:
 	draw_arc(screen, 14.0, 0.0, TAU, 20, Palette.ACCENT_RED, 2.0)
 	draw_line(screen + Vector2(-9.0, -9.0), screen + Vector2(9.0, 9.0), Palette.ACCENT_RED, 2.0)
 
+## 试驾页每部件颜色：与对局页 / 生存页**同一条规则**——驾驶舱琥珀、其余队伍色
+## （试驾页的队伍色是青色，与竞技场边框同色），再统一过血量分档。
+## 分档判据与另两页是同一个函数 `CombatView.hull_damage_colour`，改一处三页同时变。
+## v3.33 之前这里按**模块种类**上色（机动青柠 / 核心青 / 炮管琥珀 / 弹道品红 / 平台导线色），
+## 伤害只用一次性 `lerp(RED, 0.5)` 掺红，于是同一个模块在三个页面上是三种颜色，
+## 且看不出「哪一块被打残了」。旧配色没有删，改成 `_drive_kind_highlight` 打开时的调试高亮层。
 func _drive_part_color(part: Dictionary) -> Color:
+	if _drive_kind_highlight:
+		return _drive_kind_colour(part)
+	var team := Palette.ACCENT_CYAN
+	if bool(definitions.get_module(String(part["module_id"])).get("core", false)):
+		team = Palette.ACCENT_AMBER
+	return CombatView.hull_damage_colour(part, team)
+
+## 调试高亮层：按模块种类上色，用来一眼看清「这台车由哪些种类拼成」。
+## 用途是分类而不是看损伤，所以原样保留旧配色（含一次性掺红），不做血量分档。
+func _drive_kind_colour(part: Dictionary) -> Color:
 	var colour := Palette.WIRE
 	var kind := String(part["kind"])
 	if kind == TankBody.KIND_MOBILITY:
@@ -2718,8 +2720,7 @@ func _draw_drive_status_rows(x: float, y: float) -> void:
 		_draw_text("◆ 减速 %.1fs · 推力 ×%.2f" % [slow_left, slow_factor], Vector2(x, y), 13, Palette.ACCENT_MAGENTA, false)
 
 func _draw_drive_hud() -> void:
-	_draw_text("DRIVE LAB / M5", Vector2(48, 62), 18, Palette.ACCENT_CYAN, true)
-	_draw_text("试驾沙盒", Vector2(48, 106), 34, Palette.TEXT_HI, false)
+	_draw_battle_header("DRIVE LAB / M5", Palette.ACCENT_CYAN, Vector2(48, 62), 18, "试驾沙盒", Vector2(48, 106), 34)
 	_draw_text("自建刚体 · 差速驱动 · 管路供弹 · 护盾与状态效果 · 可拆解摧毁", Vector2(48, 138), 15, Palette.TEXT_LO, false)
 	_draw_panel(DRIVE_HUD_LEFT, "刚体状态")
 	_draw_panel(DRIVE_HUD_RIGHT, "炮管 / 操作")
@@ -2779,7 +2780,7 @@ func _draw_drive_hud() -> void:
 	_draw_text("W / S    油门", Vector2(right, hint_y), 16, Palette.TEXT_HI, false)
 	_draw_text("A / D    转向", Vector2(right, hint_y + 30.0), 16, Palette.TEXT_HI, false)
 	_draw_text("鼠标瞄准 · 左键开火", Vector2(right, hint_y + 60.0), 16, Palette.TEXT_HI, false)
-	_draw_text("R        重开试驾", Vector2(right, hint_y + 90.0), 16, Palette.TEXT_HI, false)
+	_draw_text("R        重开试驾 · K 种类高亮", Vector2(right, hint_y + 90.0), 16, Palette.TEXT_HI, false)
 	_draw_text("Esc      返回主菜单", Vector2(right, hint_y + 120.0), 16, Palette.TEXT_HI, false)
 	var supply := "M4 管路：未初始化"
 	if network != null:
@@ -2794,9 +2795,7 @@ func _draw_drive_hud() -> void:
 			network.rounds_in_flight(), network.congestion().size(), broken, network.rejected_count(),
 		]
 	_draw_text(supply, Vector2(right, hint_y + 150.0), 12, Palette.TEXT_LO, false)
-	draw_rect(DRIVE_STATUS, Color(Palette.BG_BASE, 0.86), true)
-	draw_rect(DRIVE_STATUS, Color(Palette.WIRE, 0.55), false, 1.0)
-	_draw_text(_status_message, Vector2(DRIVE_STATUS.position.x + 20.0, DRIVE_STATUS.position.y + 42.0), 16, Palette.TEXT_HI, false)
+	_draw_battle_status(_status_message)
 
 func _design_position(position: Vector2) -> Vector2:
 	return position
@@ -3388,8 +3387,7 @@ func _draw_survival_hud() -> void:
 	var right := DRIVE_HUD_RIGHT.position.x
 	var boss_mark := " · BOSS" if survival.is_boss_wave() else ""
 	var wave_colour := Palette.ACCENT_MAGENTA if survival.is_boss_wave() else Palette.ACCENT_CYAN
-	_draw_text("波次 %d%s" % [survival.wave, boss_mark], Vector2(left, 120), 16, wave_colour, true)
-	_draw_text("SURVIVE", Vector2(left, 152), 30, Palette.TEXT_HI, false)
+	_draw_battle_header("波次 %d%s" % [survival.wave, boss_mark], wave_colour, Vector2(left, 120), 16, "SURVIVE", Vector2(left, 152), 30)
 	_draw_text("剩余时间", Vector2(left, 220), 14, Palette.TEXT_LO, false)
 	var time_colour := Palette.ACCENT_AMBER if survival.wave_time_left > 10.0 else Palette.ACCENT_RED
 	_draw_text("%04.1f s" % maxf(survival.wave_time_left, 0.0), Vector2(left, 252), 26, time_colour, true)
@@ -3420,9 +3418,7 @@ func _draw_survival_hud() -> void:
 	_draw_text("Esc      返回主菜单", Vector2(right, 360), 16, Palette.TEXT_HI, false)
 	_draw_text("战斗期禁止改装", Vector2(right, 410), 14, Palette.ACCENT_AMBER, false)
 	_draw_survival_mirror()
-	draw_rect(DRIVE_STATUS, Color(Palette.BG_BASE, 0.86), true)
-	draw_rect(DRIVE_STATUS, Color(Palette.WIRE, 0.55), false, 1.0)
-	_draw_text(_status_message, DRIVE_STATUS.position + Vector2(20.0, 42.0), 16, Palette.TEXT_HI, false)
+	_draw_battle_status(_status_message)
 
 ## 坦克镜像面板（用户 2026-10-17 要求：「要有一个小窗口显示一个坦克的镜像，展示坦克每个模块的状态」）。
 ##

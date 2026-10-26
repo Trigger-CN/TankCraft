@@ -4,7 +4,7 @@
 
 玩家在网格上从零搭一台坦克：先铺**平台**，再挂**行进机构**，最后堆**功能模块**。炮弹不是凭空出现的——它要被**制造、被输送、被装填**，所以「内部物流布局」和「外形武器」同样重要。打掉对手一段甲板，可能让他的整条弹药管路失效。
 
-> **当前状态：可运行的实现原型，尚未发布。** 核心玩法（建造 / 物理 / 弹药网络 / 战斗结算 / AI / 波次生存）均已实现并有 18 项自动化 smoke 测试覆盖；**Windows release exe 已能一键构建并已 headless 实跑通过**（见「构建 release exe」）。**从未做过人工试玩验证**，也**没有产出过任何 APK**。
+> **当前状态：可运行的实现原型，尚未发布。** 核心玩法（建造 / 物理 / 弹药网络 / 战斗结算 / AI / 波次生存）均已实现并有 19 项自动化 smoke 测试覆盖；**Windows release exe 已能一键构建并已 headless 实跑通过**（见「构建 release exe」）。**从未做过人工试玩验证**，也**没有产出过任何 APK**。
 
 ---
 
@@ -154,7 +154,7 @@ build_release.bat
 
 ## 测试
 
-18 项 smoke，全部 headless、无外部依赖：
+19 项 smoke，全部 headless、无外部依赖：
 
 ```bash
 godot --headless --path . --script res://tests/ammo_combo_smoke.gd
@@ -180,8 +180,11 @@ godot --headless --path . --script res://tests/ammo_combo_smoke.gd
 | `mouse_input_smoke.gd` | `MOUSE_OK` |
 | `editor_bounds_smoke.gd` | `PREVIEW_OK` |
 | `perf_smoke.gd` | `PERF_OK` |
+| `drive_feedback_smoke.gd` | `DRIVE_FEEDBACK_OK` |
 
 > `perf_smoke` 只断言 **p99 / max**，**刻意不断言平均**——平均会掩盖长尾卡顿。阈值由反向对照校准（关掉加速后 `PERF_FAIL count=3`），详见 `docs/design.md` §11.4.2.14。
+>
+> `drive_feedback_smoke` 实例化真实 `main.tscn` 进试驾页，把坦克摆到贴边并给一个朝墙的速度，逐固定步长断言「撞墙产生伤害 / 命中闪光被置位 / 动效层出现 `-N` 承受语义的伤害数字」。**它存在的理由**：试驾页的弹丸永远打不到发射者自己，所以「命中反馈」这类改动若写错分支，静态截图完全看不出来。该测试已用**变异测试**证明非空转（删掉产品代码里的推入调用后立即失败），详见 `docs/design.md` §11.4.2.15。
 
 另有语法检查（不会执行脚本）：
 
