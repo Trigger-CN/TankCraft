@@ -20,6 +20,8 @@ const CombatView := preload("res://scripts/combat_view.gd")
 ## v3.35：管道几何与弹道内行进（建造/改装页与三个战斗页共用同一份）。
 ## 与 `CombatView` 同样全部 static、零状态、零 preload 回本文件。
 const PipeView := preload("res://scripts/pipe_view.gd")
+## v3.37：炮管几何与绘制（建造/改装页与三个战斗页共用同一份，全静态）。
+const CannonView := preload("res://scripts/cannon_view.gd")
 
 ## M2 正式建造编辑器入口。
 ## 菜单、输入与绘制留在单一场景；建造状态和规则由 GridBuilder 负责。
@@ -87,6 +89,10 @@ const PORT_ARROW_WING_ANGLE := 0.6
 const AIM_RETICLE_RADIUS := 9.0
 const AIM_RETICLE_WIDTH := 1.5
 const AIM_RETICLE_CROSS := 5.0
+## v3.37：战斗页炮管的绘制不透明度。炮管是**实体**而不是格子的填充色块，所以用固定高不透明度，
+## 让管形在任何缩放与任何队伍色下都读得出来；血量状态由部件主色（`hull_damage_colour`）表达，
+## 不再让透明度也参与表达 —— 否则被打残的炮管会直接看不见。
+const CANNON_BATTLE_ALPHA := 0.9
 
 var definitions: ModuleDefs
 var builder: GridBuilder
@@ -1840,14 +1846,25 @@ func _draw_grid() -> void:
 			PipeView.draw_pipe(self, module_id, cells, specs, GRID_CELL, color, module_alpha,
 				1.0, connected, 0.5 + 0.5 * sin(pipe_phase), GRID_ORIGIN)
 		else:
-			for cell in cells:
-				_draw_cell(cell, color, _module_glyph(String(definition.get("name", "模"))), is_core, module_alpha)
+			## v3.37：炮管不再画成方块 + 汉字，而是画出基座 / 管身 / 炮口。
+			## **`offset` 必须传 `GRID_ORIGIN`** —— 与管道同一条纪律（v3.36 的漏传教训）：
+			## `CannonView` 只认「格坐标 × cell」，而建造/改装页的网格画在 `GRID_ORIGIN` 处；
+			## 漏了这个平移，炮管会被画到画布左上角，而端口箭头走 `_cell_rect()`（已含原点）留在原地。
+			## 方向取**建造期 `aim`**：那本来就是相对车体的角度，已经是局部的，不需要再减任何东西。
+			if CannonView.is_cannon(definition):
+				CannonView.draw_cannon(self, cells, deg_to_rad(float(part.get("aim", 0))),
+					GRID_CELL, color, module_alpha, 1.0, GRID_ORIGIN)
+			else:
+				for cell in cells:
+					_draw_cell(cell, color, _module_glyph(String(definition.get("name", "模"))), is_core, module_alpha)
 		## v3.24：所有带端口的模块都要标出物料进出方向（用户：「不只是升级效果模块，
 		## 其他所有有输出或者有输入的模块都要显示箭头，方便规划流水线」）。
 		## 放在 `_draw_cell` 循环之后、`_draw_aim_line` 之前：箭头贴着格子边缘，
 		## 而瞄准线从首格中心向外延伸，两者在几何上就不会混在一起。
 		_draw_port_arrows(part, definition, module_alpha)
-		if module_id.begins_with("cannon_"):
+		## v3.37：判据与 `CannonView.is_cannon()` 同源（`aim_steps`），不再按 id 前缀 ——
+		## 前缀判据在「炮管改名」或「新增以 cannon_ 开头的非炮管」时会静默失准。
+		if CannonView.is_cannon(definition):
 			_draw_aim_line(part, module_alpha)
 	var preview_cells: Array[Vector2i] = _preview_cells()
 	var preview_error := _placement_error()
@@ -1953,6 +1970,15 @@ static func _side_direction(side: String) -> Vector2:
 			return Vector2.LEFT
 	return Vector2.UP
 
+## 瞄准线：从**炮口末端之外**画一条细短线，指出这门炮往哪打。
+##
+## v3.37：炮管本体已由 `CannonView.draw_cannon()` 画出（基座 / 管身 / 炮口），
+## 这条线于是从「唯一的炮管视觉」退化成**方向指示器**。起点必须从「首格中心」
+## 挪到炮口末端（`CannonView.mouth_offset()`），否则它整根埋在管子里，画了等于没画。
+##
+## 传 `scale_factor = 1.0`：建造/改装页的网格不缩放（`GRID_CELL` 就是屏幕像素），
+## 必须与 `CannonView.draw_cannon(..., 1.0, GRID_ORIGIN)` 的实参逐字一致，否则
+## 小尺寸长度补偿会让瞄准线起点与炮口错开。
 func _draw_aim_line(part: Dictionary, alpha: float = 1.0) -> void:
 	var cells: Array[Vector2i] = _editor_model().part_cells(part)
 	if cells.is_empty():
@@ -1960,7 +1986,8 @@ func _draw_aim_line(part: Dictionary, alpha: float = 1.0) -> void:
 	var center := _cell_rect(cells[0]).get_center()
 	var angle := deg_to_rad(float(part.get("aim", 0)))
 	var direction := Vector2(cos(angle), sin(angle))
-	draw_line(center, center + direction * 24.0, Color(Palette.ACCENT_LIME, alpha), 2.0)
+	var mouth := center + direction * CannonView.mouth_offset(GRID_CELL, 1.0)
+	draw_line(mouth, mouth + direction * 18.0, Color(Palette.ACCENT_LIME, alpha), 2.0)
 
 ## `alpha` 控制整格的可见度：非选中层传 `LAYER_DIM_ALPHA`，文字一起变淡。
 ## `outlined=false` 用于「被管道压住的平台格」：那道方框会横跨在管身上，把一根
@@ -2157,11 +2184,15 @@ func _draw_timed_expires(entries: Array, arena: Rect2, scale_factor: float) -> v
 ##   为什么必需：平台层是逐格部件，每格都画方框；方框横跨在管身上会把一根连续的管
 ##   切成一段一段，看上去就是接缝。**调用方必须先构出钩子再调用本函数** ——
 ##   钩子负责填 `_pipe_covered_cells`，这里直接读它，不另算一份。
+## `cannon_hook(part, colour, offset) -> bool` **整部件**钩子（v3.37）：炮管走这条 ——
+##   管形是**沿瞄准方向伸出的旋转体**，不沿格网铺开，逐格画不出基座 / 管身 / 炮口。
+##   返回 `true` 表示「已由钩子画完」。`offset` 与 `pipe_hook` 完全相同。
+##   **缺省 `Callable()` 时不走任何分支**，像素与旧版逐字节相同。
 ## `effects` 逐模块特效（可选，缺省空字典）：
 ##   `effects["parts"]` : part_key → {fill, fill_colour, bar, bar_colour, outline, outline_colour}
 ##   `effects["links"]` : [{from: Vector2i, to: Vector2i, colour: Color}] 局部格坐标连线（维修）
 ## **缺省 `{}` 时一个绘制分支都不会走，像素与旧版逐字节相同**——这是截图基线可比的前提。
-func _draw_hull_shared(hull: TankBody, origin: Vector2, heading: float, scale_factor: float, colour_fn: Callable, alpha_fn: Callable = Callable(), offset_fn: Callable = Callable(), cell_hook: Callable = Callable(), effects: Dictionary = {}, pipe_hook: Callable = Callable(), pipe_cells: Dictionary = {}) -> void:
+func _draw_hull_shared(hull: TankBody, origin: Vector2, heading: float, scale_factor: float, colour_fn: Callable, alpha_fn: Callable = Callable(), offset_fn: Callable = Callable(), cell_hook: Callable = Callable(), effects: Dictionary = {}, pipe_hook: Callable = Callable(), pipe_cells: Dictionary = {}, cannon_hook: Callable = Callable()) -> void:
 	if hull == null or hull.parts.is_empty():
 		return
 	var cell: float = hull.cell_size()
@@ -2179,7 +2210,12 @@ func _draw_hull_shared(hull: TankBody, origin: Vector2, heading: float, scale_fa
 		var pipe_drawn := false
 		if pipe_hook.is_valid():
 			pipe_drawn = bool(pipe_hook.call(part, colour, -hull.centroid_local + part_offset))
-		if not pipe_drawn:
+		## v3.37：炮管层。一个部件不可能同时是管道和炮管，但**保持「先管道后炮管」**
+		## 可以避免将来两者语义交叉时出错（管道已经先占了 `pipe_drawn`）。
+		var cannon_drawn := false
+		if not pipe_drawn and cannon_hook.is_valid():
+			cannon_drawn = bool(cannon_hook.call(part, colour, -hull.centroid_local + part_offset))
+		if not pipe_drawn and not cannon_drawn:
 			for raw_cell in part["cells"]:
 				var cell_value: Vector2i = raw_cell
 				var centre: Vector2 = (Vector2(cell_value) + Vector2(0.5, 0.5)) * cell - hull.centroid_local + part_offset
@@ -2281,7 +2317,7 @@ func _network_pipe_hook(net: AmmoNetwork, cell: float, scale_factor: float) -> C
 				round_colour = Palette.ACCENT_RED
 			PipeView.draw_round(self, path, cell, t, round_colour, 1.0, scale_factor)
 		return true
-## 格数组的稳定键：排序后拼串。两边的 `cells` 都来自同一个 `part_cells()`，
+
 ## 格数组的稳定键：排序后拼串。两边的 `cells` 都来自同一个 `part_cells()`，
 ## 但顺序不保证一致，所以必须先排序。
 static func _cells_key(cells: Array) -> String:
@@ -2291,6 +2327,54 @@ static func _cells_key(cells: Array) -> String:
 		parts_out.append("%d:%d" % [value.x, value.y])
 	parts_out.sort()
 	return ",".join(parts_out)
+
+## 炮管与部件的配对键：`module_id + 首格`。
+##
+## `CannonBank.cannons[]` 只存首格 `cell`（没有 `cells`、没有 `rot`），而 `hull.parts[]` 存 `cells`；
+## 两边唯一稳定且唯一的共同标识就是这两项 —— 同型号两门炮靠首格区分。
+static func _cannon_key(module_id: String, first_cell: Vector2i) -> String:
+	return "%s|%d:%d" % [module_id, first_cell.x, first_cell.y]
+
+## 战斗页共用：把炮管模块画成真炮管，并让它**实时指向当前瞄准方向**（v3.37）。
+##
+## 与 `_network_pipe_hook()` 同样的做法：**每帧只算一次快照**，所有部件共用同一份角度表。
+## 方向取自 `CannonBank.muzzle_dir()` —— 瞄准的权威来源：有鼠标覆盖时是绝对世界角，
+## 否则退回「`hull 朝向` + 建造期 `aim`」（Bot 走这条，永不调 `aim_at()`）。
+## 页面层绝不自己算角度，否则「开火的方向」与「画出来的炮管」会各有一套推导。
+##
+## **必须减 `drawn_heading`。** `muzzle_dir()` 返回的是**世界**方向，而调用本钩子时
+## `_draw_hull_shared()` 已经 `draw_set_transform(origin, heading, scale)`，
+## 处在**车体局部坐标系**里。不减的话车体一转炮管就多转一个 `heading`；
+## 这个错 headless 探针抓不到（探针不画图），只有截图或实机能发现。
+##
+## 传 `drawn_heading` 而不是直接用 `hull.heading`：试驾页额外叠了转向倾斜 `tilt`，
+## 那里传给 `_draw_hull_shared()` 的是 `heading + tilt`，炮管必须跟着同一个值转，
+## 否则高角速度下炮口会与炮口闪光错开几个像素。
+##
+## 返回 `false` 表示「这不是炮管」，交给 `_draw_hull_shared()` 照旧画方格。
+func _battle_cannon_hook(bank: CannonBank, hull: TankBody, cell: float, scale_factor: float, drawn_heading: float) -> Callable:
+	if bank == null or hull == null or bank.cannons.is_empty():
+		return Callable()
+	var aims: Dictionary = {}
+	for cannon in bank.cannons:
+		aims[_cannon_key(String(cannon["module_id"]), Vector2i(cannon["cell"]))] = bank.muzzle_dir(cannon).angle() - drawn_heading
+	return func(part: Dictionary, colour: Color, part_offset: Vector2) -> bool:
+		var module_id := String(part.get("module_id", ""))
+		if not CannonView.is_cannon(definitions.get_module(module_id)):
+			return false
+		var cells: Array = part.get("cells", [])
+		if cells.is_empty():
+			return false
+		var key := _cannon_key(module_id, Vector2i(cells[0]))
+		if not aims.has(key):
+			return false
+		## **`part_offset` 已经是「车体局部坐标」的平移，不能再减 `centroid_local`。**
+		## 调用方 `_draw_hull_shared()` 传进来的就是 `-hull.centroid_local + offset_fn(part)`；
+		## 这里若再减一次，炮管就会多平移一个质心 —— 实测直接把炮管甩到车身之外（v3.37 修）。
+		## 管道钩子同样直接把这个值转给 `PipeView`，两边口径必须一致。
+		CannonView.draw_cannon(self, cells, float(aims[key]), cell, colour, CANNON_BATTLE_ALPHA,
+			scale_factor, part_offset)
+		return true
 
 ## 逐模块特效的常量。
 ## 进度条高度用**局部像素**，再夹一个最小**屏幕**厚度：生存页缩放系数只有 0.594，
@@ -2449,7 +2533,9 @@ func _draw_match_hull(tag: String, scale_factor: float) -> void:
 	## 所以这里不用关心车体在哪。
 	var cell: float = hull.cell_size()
 	var pipe_hook := _network_pipe_hook(duel.network_of(tag), cell, scale_factor)
-	_draw_hull_shared(hull, origin, hull.heading, scale_factor, _match_part_colour.bind(base), CombatView.hull_damage_alpha, Callable(), Callable(), effects, pipe_hook, _pipe_covered_cells)
+	## v3.37：炮管层。对局页的车体朝向就是 `hull.heading`，没有额外的视觉倾斜。
+	var cannon_hook := _battle_cannon_hook(duel.bank_of(tag), hull, cell, scale_factor, hull.heading)
+	_draw_hull_shared(hull, origin, hull.heading, scale_factor, _match_part_colour.bind(base), CombatView.hull_damage_alpha, Callable(), Callable(), effects, pipe_hook, _pipe_covered_cells, cannon_hook)
 
 
 ## 对局页每部件颜色：驾驶舱恒为琥珀，其余按队伍色，再统一过血量分档。
@@ -2699,7 +2785,11 @@ func _draw_drive_hull() -> void:
 	## 「看得见接缝」的直接原因（16× 裁切里一目了然）。现在管道件走钩子、非管道件走方格，
 	## 与对局页 / 生存页同一条路径。
 	var pipe_hook := _network_pipe_hook(network, tank.cell_size(), scale_factor)
-	_draw_hull_shared(tank, _drive_to_screen(tank.position), tank.heading + tilt, scale_factor, _drive_part_color, CombatView.hull_damage_alpha, _drive_part_offset, _drive_cell_hook, effects, pipe_hook, _pipe_covered_cells)
+	## v3.37：炮管层。注意传的是**画出来**的朝向（含转向倾斜 `tilt`），
+	## 而不是 `tank.heading` —— 炮管要与车体一起倾，否则炮口会与炮口闪光错开。
+	var drawn_heading := tank.heading + tilt
+	var cannon_hook := _battle_cannon_hook(bank, tank, tank.cell_size(), scale_factor, drawn_heading)
+	_draw_hull_shared(tank, _drive_to_screen(tank.position), drawn_heading, scale_factor, _drive_part_color, CombatView.hull_damage_alpha, _drive_part_offset, _drive_cell_hook, effects, pipe_hook, _pipe_covered_cells, cannon_hook)
 
 ## 加速时行进机构整体向后拖一点（纯视觉量，design §5.5）。
 ## 只在试驾页启用：`_motion_enabled` 与油门都是试驾页的状态。
@@ -3563,7 +3653,8 @@ func _draw_survival_hull(tag: String, scale_factor: float) -> void:
 	var effects := _hull_effects(hull, survival.duel.damage_of(tag), survival.duel.network_of(tag))
 	var cell: float = hull.cell_size()
 	var pipe_hook := _network_pipe_hook(survival.duel.network_of(tag), cell, scale_factor)
-	_draw_hull_shared(hull, origin, hull.heading, scale_factor, _survival_part_colour.bind(tag), _survival_hull_alpha, Callable(), Callable(), effects, pipe_hook, _pipe_covered_cells)
+	var cannon_hook := _battle_cannon_hook(survival.duel.bank_of(tag), hull, cell, scale_factor, hull.heading)
+	_draw_hull_shared(hull, origin, hull.heading, scale_factor, _survival_part_colour.bind(tag), _survival_hull_alpha, Callable(), Callable(), effects, pipe_hook, _pipe_covered_cells, cannon_hook)
 
 
 func _draw_survival_hud() -> void:

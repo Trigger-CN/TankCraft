@@ -1,0 +1,23 @@
+{
+  "format":"tankcraft.blueprint",
+  "version":2,
+  "name":"双格炮管定位验证车",
+  "size":[24,24],
+  "economy":{"credits_total":2400,"credits_spent":834.00,"mass_cap_level":0},
+  "platform_cells":[
+    [5,6],[6,6],[7,6],[8,6],[9,6],[10,6],[11,6],
+    [5,7],[6,7],[7,7],[8,7],[9,7],[10,7],[11,7],
+    [5,5],[6,5],[7,5],[8,5],[9,5],[10,5],[11,5]
+  ],
+  "platform_shapes":[],
+  "mobility":[
+    {"id":"track_heavy","pos":[5,7],"rot":0},
+    {"id":"track_heavy","pos":[10,7],"rot":0}
+  ],
+  "modules":[
+    {"id":"cockpit_light","pos":[7,7],"rot":0},
+    {"id":"cannon_155","pos":[7,6],"rot":0,"aim":270},
+    {"id":"cannon_155","pos":[6,5],"rot":0,"aim":180}
+  ],
+  "routes":[]
+}
