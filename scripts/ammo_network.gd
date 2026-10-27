@@ -170,6 +170,14 @@ func tick_once() -> void:
 		_module_advance(index, dt)
 
 ## 每条管路段的在途状态与拥塞标记，供 HUD 绘制管路与红色闪烁。
+##
+## v3.35：新增 `entry_port` / `exit_port` / `ports` —— 管道可视化必须知道「这一发
+## 从哪条臂进来、要往哪条臂出去」，否则三通与四通的弹药只能沿 in0→out0 画，
+## 会和它实际被调度的方向相反。
+##
+## `exit_port` 是**下一次转移已经选定的那条 out 臂**（由 `_out_order()` 逐个探测得出）；
+## 还没到段的末端时它是空串，此时调用方沿 `entry_port → 默认主路径` 画即可。
+## `ports` 直接给出该模块按 rot 旋转后的端口表，避免页面层再调一次 `ui_ports()`。
 func strand_positions() -> Array:
 	var result: Array = []
 	for uid in _rounds.keys():
@@ -181,13 +189,48 @@ func strand_positions() -> Array:
 			"part": part_index,
 			"module_id": String(part["module_id"]),
 			"cells": part["cells"],
+			"ports": (part["specs"] as Array).duplicate(true),
 			"progress": float(r["progress"]),
 			"ammo_id": String(r["ammo_id"]),
 			"upgrades": (r.get("upgrades", []) as Array).duplicate(),
 			"forward": bool(r["forward"]),
+			"entry_port": String(r.get("entry_port", "")),
+			"exit_port": _chosen_exit_port(part, r),
+			"exit_blocked": _chosen_exit_blocked(part, r),
 			"congested": float(r["progress"]) >= 1.0 and not _downstream_open(part_index, String(r["ammo_id"])),
 		})
 	return result
+
+## 这一发**被调度首选的**那条 out 臂的端口 id。
+##
+## 只读，且与 `_collect_request()` 同源：按 `_out_order()` 的顺序（三通轮询 / 四通直通优先）
+## 找第一条**有连线**的出口。
+##
+## **为什么不把「下游当前能不能收」也作为判据**：那样在管道满时它会变成空串，
+## 画面上弹头就失去方向。而「走哪条臂」是路由决策（由 `_out_order()` 与拓扑决定，稳定），
+## 「现在收不收得下」是瞬时容量（会变）。两者分开，画面才能既稳定又诚实：
+## 方向由 `exit_port` 给，阻塞由 `exit_blocked` 另行标注。
+func _chosen_exit_port(part: Dictionary, r: Dictionary) -> String:
+	if not bool(r.get("forward", true)):
+		return ""
+	for key in _out_order(part, r):
+		var link := String(_links_out.get(String(key), ""))
+		if link.is_empty():
+			continue
+		return String(nodes[link].get("port", ""))
+	return ""
+
+## 首选出口当前**收不下**（满 / 退避中）。没有首选出口时返回 false。
+func _chosen_exit_blocked(part: Dictionary, r: Dictionary) -> bool:
+	if not bool(r.get("forward", true)):
+		return false
+	var ammo_id := String(r.get("ammo_id", ""))
+	for key in _out_order(part, r):
+		var link := String(_links_out.get(String(key), ""))
+		if link.is_empty():
+			continue
+		return _probe(int(nodes[link]["part"]), ammo_id) != "ok"
+	return false
 
 func congestion() -> Array:
 	var result: Array = []

@@ -4,7 +4,7 @@
 
 玩家在网格上从零搭一台坦克：先铺**平台**，再挂**行进机构**，最后堆**功能模块**。炮弹不是凭空出现的——它要被**制造、被输送、被装填**，所以「内部物流布局」和「外形武器」同样重要。打掉对手一段甲板，可能让他的整条弹药管路失效。
 
-> **当前状态：可运行的实现原型，尚未发布。** 核心玩法（建造 / 物理 / 弹药网络 / 战斗结算 / AI / 波次生存）均已实现并有 19 项自动化 smoke 测试覆盖；**Windows release exe 已能一键构建并已 headless 实跑通过**（见「构建 release exe」）。**真人试玩由用户持续进行**（本项目几乎所有缺陷与需求都来自用户实机试玩）；**AI 侧的验证手段是 headless 测试 + 脚本驱动截图 + 像素比对**，不是人工试玩。**没有产出过任何 APK**。
+> **当前状态：可运行的实现原型，尚未发布。** 核心玩法（建造 / 物理 / 弹药网络 / 战斗结算 / AI / 波次生存）均已实现并有 21 项自动化 smoke 测试覆盖；**Windows release exe 已能一键构建并已 headless 实跑通过**（见「构建 release exe」）。**真人试玩由用户持续进行**（本项目几乎所有缺陷与需求都来自用户实机试玩）；**AI 侧的验证手段是 headless 测试 + 脚本驱动截图 + 像素比对**，不是人工试玩。**没有产出过任何 APK**。
 
 ---
 
@@ -154,7 +154,7 @@ build_release.bat
 
 ## 测试
 
-19 项 smoke，全部 headless、无外部依赖：
+21 项 smoke，全部 headless、无外部依赖：
 
 ```bash
 godot --headless --path . --script res://tests/ammo_combo_smoke.gd
@@ -181,10 +181,16 @@ godot --headless --path . --script res://tests/ammo_combo_smoke.gd
 | `editor_bounds_smoke.gd` | `PREVIEW_OK` |
 | `perf_smoke.gd` | `PERF_OK` |
 | `drive_feedback_smoke.gd` | `DRIVE_FEEDBACK_OK` |
+| `pipe_geometry_smoke.gd` | `PIPE_GEOMETRY_OK` |
+| `conveyor_showcase_smoke.gd` | `SHOWCASE_OK` |
 
 > `perf_smoke` 只断言 **p99 / max**，**刻意不断言平均**——平均会掩盖长尾卡顿。阈值由反向对照校准（关掉加速后 `PERF_FAIL count=3`），详见 `docs/design.md` §11.4.2.14。
 >
 > `drive_feedback_smoke` 实例化真实 `main.tscn` 进试驾页，把坦克摆到贴边并给一个朝墙的速度，逐固定步长断言「撞墙产生伤害 / 命中闪光被置位 / 动效层出现 `-N` 承受语义的伤害数字」。**它存在的理由**：试驾页的弹丸永远打不到发射者自己，所以「命中反馈」这类改动若写错分支，静态截图完全看不出来。该测试已用**变异测试**证明非空转（删掉产品代码里的推入调用后立即失败），详见 `docs/design.md` §11.4.2.15。
+>
+> `pipe_geometry_smoke` 对**六种管道 × 四个朝向**做 139 条几何断言：端口必须落在**格边中点**、相邻模块的端口点必须**精确重合**（不给容差）、弧端点切线必须垂直于所在格边、弧上采样点必须落在圆上、汇流臂端点必须两两分开。它**另有一条反向对照**：用旧实现那种「首格中心 → 末格中心」直线插值在四分弧上取点，最大偏离 `2.3431 px`（正好是弦高 `r(1−cos45°)`）——用来证明「弹头会飘出管子」这件事真实存在，而不是我把正确实现改掉了。**两条探针纪律都记在 `docs/design.md` §11.4.2.16**：容差必须从离散化阶数推（弧是 16 段折线，首尾弦偏差 `sin(90°/16/2)=0.0491`）；探针**不得复用被测实现的内部推导**，否则两边同错也会通过。
+>
+> `conveyor_showcase_smoke` 读入 `data/blueprints/conveyor_showcase.json`（专门为看管道做的展示车），断言六种管道齐备、每个管道件都有非空中心线、`connected_sides()` 同时产出「接上」与「没接上」两种端口，然后驱动 600 个 tick，断言「汇流类里 forward 弹药的 `exit_port` 永远非空」「段内 / 段末 / 阻塞三态都观察到」「至少投递成功一次」。**它守的是一个曾经会撒谎的字段**：`exit_port` 早期把「下游现在能不能收」也当判据，管道一满就变空串，画面上弹头立刻失去方向。详见 `docs/design.md` §11.4.2.16。
 
 另有语法检查（不会执行脚本）：
 
@@ -204,8 +210,8 @@ godot --headless --path . --check-only --script res://scripts/ammo_network.gd
 TankCraft/
 ├── project.godot            # 引擎配置（Godot 4.7.2 / GL Compatibility / 启动最大化）
 ├── scenes/main.tscn         # 唯一场景（单场景架构，禁止 change_scene）
-├── scripts/                 # 19 个 .gd
-│   ├── main.gd              # 单场景外壳：所有页面、输入分发、绘制（上帝类，3924 行 / 194 KB）
+├── scripts/                 # 20 个 .gd
+│   ├── main.gd              # 单场景外壳：所有页面、输入分发、绘制（上帝类，4105 行 / 203 KB）
 │   ├── grid_builder.gd      # 三层网格建造与校验
 │   ├── tank_body.gd         # 坦克运动解算与逐格碰撞
 │   ├── ammo_network.gd      # 弹药网络调度（20 Hz 独立步进）
@@ -215,18 +221,19 @@ TankCraft/
 │   ├── duel.gd              # 对局装配与事件分发
 │   ├── bot_ai.gd            # 机器人 AI
 │   ├── survival_run.gd      # 波次生存状态机
-│   ├── combat_view.gd       # 可复用战斗视图（生存页与对局页共用）
+│   ├── combat_view.gd       # 可复用战斗视图（三页共用）
+│   ├── pipe_view.gd         # 管道几何与绘制（建造/改装页 + 三个战斗页共用，全静态）
 │   ├── module_defs.gd / data_registry.gd / data_validator.gd
 │   ├── palette.gd / fx_layer.gd / match_state.gd
 │   ├── expedition_run.gd / runtime_builder.gd   # 遗留，无玩法调用方
-├── data/                    # 23 个 JSON —— 所有运行时数值的权威来源
+├── data/                    # 24 个 JSON —— 所有运行时数值的权威来源
 │   ├── modules/             # systems / mobility / platforms
 │   ├── ammo/calibers.json   # 五口径伤害、初速、射程
 │   ├── upgrades/upgrades.json
 │   ├── arenas/              # 3 张竞技场
-│   ├── blueprints/          # 14 个：12 张 Bot 蓝图 + Boss + 1 张无效示例
+│   ├── blueprints/          # 15 个：12 张 Bot 蓝图 + Boss + 1 张无效示例 + 1 张管道展示车
 │   └── globals.json
-├── tests/                   # 18 个 smoke
+├── tests/                   # 21 个 smoke
 └── docs/
     ├── design.md            # 设计文档（机制、数值、架构、ADR）
     └── roadmap.md           # 里程碑与实时状态

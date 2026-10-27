@@ -17,6 +17,9 @@ const FxLayer := preload("res://scripts/fx_layer.gd")
 ## v3.22：战斗视图（竞技场 / 障碍 / 中立物 / 弹道 / 动效 / 命中闪光 / 伤害数字）
 ## 抽成独立类，对局页与生存页共用同一份实现；模式差异由参数表达，不再各写一份。
 const CombatView := preload("res://scripts/combat_view.gd")
+## v3.35：管道几何与弹道内行进（建造/改装页与三个战斗页共用同一份）。
+## 与 `CombatView` 同样全部 static、零状态、零 preload 回本文件。
+const PipeView := preload("res://scripts/pipe_view.gd")
 
 ## M2 正式建造编辑器入口。
 ## 菜单、输入与绘制留在单一场景；建造状态和规则由 GridBuilder 负责。
@@ -191,6 +194,10 @@ var _match_hit_flash_left := 0.0
 ## 而 FxLayer 的公共字段集是给通用圆环用的；把方向塞进去会弄脏所有旧调用点。
 var _match_muzzles: Array = []
 var _match_expires: Array = []
+## v3.36：被管道占据的格（局部格坐标）。`_network_pipe_hook()` 每帧重建一次，
+## `_draw_hull_shared()` 用它给平台层「不描边」—— 否则平台格的方框会横跨在管身上，
+## 把一根连续的管切成一段一段，看上去就是接缝。
+var _pipe_covered_cells: Dictionary = {}
 ## M9 波次生存：SurvivalRun 承载 run 状态，玩家坦克由 survival_builder 持有（波间不回滚）。
 var survival: SurvivalRun
 var survival_builder: GridBuilder
@@ -1797,29 +1804,50 @@ func _draw_grid() -> void:
 	var platform_alpha: float = 1.0 if _build_layer == LAYER_PLATFORM else LAYER_DIM_ALPHA
 	var mobility_alpha: float = 1.0 if _build_layer == LAYER_MOBILITY else LAYER_DIM_ALPHA
 	var module_alpha: float = 1.0 if _build_layer == LAYER_MODULE else LAYER_DIM_ALPHA
+	## 被管道压住的格：平台/行进的方框不再描边（见 `_draw_cell` 的 `outlined`）。
+	var pipe_cells := _editor_pipe_cells()
 	for raw_cell in _editor_model().platform_cells.keys():
 		var cell: Vector2i = raw_cell
-		_draw_cell(cell, Palette.WIRE, "", false, platform_alpha)
+		_draw_cell(cell, Palette.WIRE, "", false, platform_alpha, not pipe_cells.has(cell))
 	for shape in _editor_model().platform_shapes:
 		var definition: Dictionary = definitions.get_module(String(shape["id"]))
 		for cell in _editor_model().part_cells(shape):
-			_draw_cell(cell, Palette.WIRE, _module_glyph(String(definition.get("name", "板"))), false, platform_alpha)
+			_draw_cell(cell, Palette.WIRE, _module_glyph(String(definition.get("name", "板"))), false, platform_alpha, not pipe_cells.has(cell))
 	for part in _editor_model().mobility_parts:
 		var definition: Dictionary = definitions.get_module(String(part["id"]))
 		for cell in _editor_model().part_cells(part):
-			_draw_cell(cell, Palette.ACCENT_CYAN, _module_glyph(String(definition.get("name", "行"))), false, mobility_alpha)
+			_draw_cell(cell, Palette.ACCENT_CYAN, _module_glyph(String(definition.get("name", "行"))), false, mobility_alpha, not pipe_cells.has(cell))
+	## v3.35：先把全车端口登记一次，管道才能知道“哪一侧真的有邻居” —— 只有没接上
+	## 的那一侧才画端帽，接上的那一侧不画，两节管子于是看起来是同一根。
+	var occupancy := _editor_pipe_occupancy()
+	var pipe_phase := fposmod(_time * PipeView.PIPE_FLOW_SPEED, TAU)
 	for part in _editor_model().module_parts:
 		var definition: Dictionary = definitions.get_module(String(part["id"]))
 		var is_core: bool = bool(definition.get("core", false))
 		var color: Color = Palette.ACCENT_CYAN if is_core else Palette.ACCENT_AMBER
-		for cell in _editor_model().part_cells(part):
-			_draw_cell(cell, color, _module_glyph(String(definition.get("name", "模"))), is_core, module_alpha)
+		var module_id := String(part["id"])
+		var cells: Array[Vector2i] = _editor_model().part_cells(part)
+		if PipeView.has_shape(module_id):
+			## 管道不再画成方块：方块会把内部抽成“填充色块”，看不见管子。
+			## 但保留一个很淡的格底，否则非选中层降 alpha 时管道会彻底消失。
+			for cell in cells:
+				draw_rect(_cell_rect(cell), Color(color, 0.06 * module_alpha), true)
+			var specs := AmmoNetwork.ui_ports(module_id, definition, int(part.get("rot", 0)))
+			var connected := PipeView.connected_sides(cells, specs, occupancy)
+			## **`offset` 必须传 `GRID_ORIGIN`**：`PipeView` 只认「格坐标 × cell」，而建造/改装页的
+			## 网格是画在 `GRID_ORIGIN` 处的。漏了这个平移，管道会被画到画布左上角——
+			## 而端口箭头走 `_cell_rect()`（已经含原点）就留在原地，于是画面里只剩箭头不见管子。
+			PipeView.draw_pipe(self, module_id, cells, specs, GRID_CELL, color, module_alpha,
+				1.0, connected, 0.5 + 0.5 * sin(pipe_phase), GRID_ORIGIN)
+		else:
+			for cell in cells:
+				_draw_cell(cell, color, _module_glyph(String(definition.get("name", "模"))), is_core, module_alpha)
 		## v3.24：所有带端口的模块都要标出物料进出方向（用户：「不只是升级效果模块，
 		## 其他所有有输出或者有输入的模块都要显示箭头，方便规划流水线」）。
 		## 放在 `_draw_cell` 循环之后、`_draw_aim_line` 之前：箭头贴着格子边缘，
 		## 而瞄准线从首格中心向外延伸，两者在几何上就不会混在一起。
 		_draw_port_arrows(part, definition, module_alpha)
-		if String(part["id"]).begins_with("cannon_"):
+		if module_id.begins_with("cannon_"):
 			_draw_aim_line(part, module_alpha)
 	var preview_cells: Array[Vector2i] = _preview_cells()
 	var preview_error := _placement_error()
@@ -1831,6 +1859,34 @@ func _draw_grid() -> void:
 			draw_rect(_cell_rect(cell), preview_color if valid else Palette.ACCENT_RED, false, 2.0)
 	_draw_text("GRID %d×%d" % [_editor_model().grid_size.x, _editor_model().grid_size.y], rect.position + Vector2(0, -16), 13, Palette.TEXT_LO, true)
 	_draw_text("cursor %02d:%02d" % [_cursor.x, _cursor.y], rect.position + Vector2(rect.size.x - 150, -16), 13, Palette.TEXT_LO, true)
+
+## 建造/改装页的端口占位表：`{cell: {side: true}}`。
+##
+## 只登记**模块层**（只有模块层带端口）。平台与行进机构没有端口，不参与。
+## 每项用 `AmmoNetwork.ui_ports()` 取已旋转的端口表 —— 不在这里再判一次角色，
+## 否则 UI 与仿真各有一套端口推导，迟早会对不上。
+func _editor_pipe_occupancy() -> Dictionary:
+	var entries: Array = []
+	for part in _editor_model().module_parts:
+		var module_id := String(part["id"])
+		var definition: Dictionary = definitions.get_module(module_id)
+		var specs := AmmoNetwork.ui_ports(module_id, definition, int(part.get("rot", 0)))
+		if specs.is_empty():
+			continue
+		entries.append({"cells": _editor_model().part_cells(part), "ports": specs})
+	return PipeView.occupancy(entries)
+
+## 建造/改装页的「被管道压住的格」集合，供平台层/行进层跳过描边。
+## 只算真能画出管道的模块（`PipeView.has_shape`），否则会把普通模块下方的平台也去掉框。
+func _editor_pipe_cells() -> Dictionary:
+	var result: Dictionary = {}
+	for part in _editor_model().module_parts:
+		if not PipeView.has_shape(String(part["id"])):
+			continue
+		for cell in _editor_model().part_cells(part):
+			result[cell] = true
+	return result
+
 
 func _preview_cells() -> Array[Vector2i]:
 	var options: PackedStringArray = _option_ids()
@@ -1907,10 +1963,13 @@ func _draw_aim_line(part: Dictionary, alpha: float = 1.0) -> void:
 	draw_line(center, center + direction * 24.0, Color(Palette.ACCENT_LIME, alpha), 2.0)
 
 ## `alpha` 控制整格的可见度：非选中层传 `LAYER_DIM_ALPHA`，文字一起变淡。
-func _draw_cell(cell: Vector2i, color: Color, label: String, core: bool, alpha: float = 1.0) -> void:
+## `outlined=false` 用于「被管道压住的平台格」：那道方框会横跨在管身上，把一根
+## 连续的管切成一段一段 —— 在 32× 栽切里与「接缝」完全分不出来。
+func _draw_cell(cell: Vector2i, color: Color, label: String, core: bool, alpha: float = 1.0, outlined: bool = true) -> void:
 	var rect := _cell_rect(cell)
-	draw_rect(rect, Color(color, 0.12 * alpha), true)
-	draw_rect(rect.grow(-1.0), Color(color, 0.82 * alpha), false, 1.5)
+	draw_rect(rect, Color(color, (0.12 if outlined else 0.05) * alpha), true)
+	if outlined:
+		draw_rect(rect.grow(-1.0), Color(color, 0.82 * alpha), false, 1.5)
 	if core:
 		draw_rect(rect.grow(-4.0), Color(Palette.ACCENT_RED, alpha), false, 1.0)
 	if not label.is_empty():
@@ -2090,11 +2149,19 @@ func _draw_timed_expires(entries: Array, arena: Rect2, scale_factor: float) -> v
 ## `alpha_fn(part) -> float`     填充透明度（缺省 0.22，与试驾/对局页旧行为一致）
 ## `offset_fn(part) -> Vector2`  该部件所有格的额外偏移（缺省零）
 ## `cell_hook(box, colour, part)` 每格额外装饰，例如履带纹（缺省无）
+## `pipe_hook(part, colour, offset) -> bool` **整部件**钩子（v3.35）：
+##   返回 `true` 表示「这个部件已经由钩子自己画完」，`_draw_hull_shared` 不再画它的方格。
+##   管道模块走这条——管道必须按**整个占位**算中心线，逐格画不出弧与拐角。
+##   `offset` 是已经算好的 `-centroid_local + offset_fn` 平移，钩子直接传给 `PipeView`。
+## `pipe_cells` 被管道压住的格（v3.36，可选，缺省 `{}`）：这些格只保留淡填充、**不描边**。
+##   为什么必需：平台层是逐格部件，每格都画方框；方框横跨在管身上会把一根连续的管
+##   切成一段一段，看上去就是接缝。**调用方必须先构出钩子再调用本函数** ——
+##   钩子负责填 `_pipe_covered_cells`，这里直接读它，不另算一份。
 ## `effects` 逐模块特效（可选，缺省空字典）：
 ##   `effects["parts"]` : part_key → {fill, fill_colour, bar, bar_colour, outline, outline_colour}
 ##   `effects["links"]` : [{from: Vector2i, to: Vector2i, colour: Color}] 局部格坐标连线（维修）
 ## **缺省 `{}` 时一个绘制分支都不会走，像素与旧版逐字节相同**——这是截图基线可比的前提。
-func _draw_hull_shared(hull: TankBody, origin: Vector2, heading: float, scale_factor: float, colour_fn: Callable, alpha_fn: Callable = Callable(), offset_fn: Callable = Callable(), cell_hook: Callable = Callable(), effects: Dictionary = {}) -> void:
+func _draw_hull_shared(hull: TankBody, origin: Vector2, heading: float, scale_factor: float, colour_fn: Callable, alpha_fn: Callable = Callable(), offset_fn: Callable = Callable(), cell_hook: Callable = Callable(), effects: Dictionary = {}, pipe_hook: Callable = Callable(), pipe_cells: Dictionary = {}) -> void:
 	if hull == null or hull.parts.is_empty():
 		return
 	var cell: float = hull.cell_size()
@@ -2106,20 +2173,29 @@ func _draw_hull_shared(hull: TankBody, origin: Vector2, heading: float, scale_fa
 		var alpha := 0.22
 		if alpha_fn.is_valid():
 			alpha = float(alpha_fn.call(part))
-		var offset := Vector2.ZERO
+		var part_offset := Vector2.ZERO
 		if offset_fn.is_valid():
-			offset = Vector2(offset_fn.call(part))
-		for raw_cell in part["cells"]:
-			var cell_value: Vector2i = raw_cell
-			var centre: Vector2 = (Vector2(cell_value) + Vector2(0.5, 0.5)) * cell - hull.centroid_local + offset
-			var box := Rect2(centre - Vector2(cell, cell) * 0.5, Vector2(cell, cell))
-			draw_rect(box, Color(colour, alpha), true)
-			draw_rect(box, colour, false, maxf(1.0 / scale_factor, 1.0))
-			if cell_hook.is_valid():
-				cell_hook.call(box, colour, part)
+			part_offset = Vector2(offset_fn.call(part))
+		var pipe_drawn := false
+		if pipe_hook.is_valid():
+			pipe_drawn = bool(pipe_hook.call(part, colour, -hull.centroid_local + part_offset))
+		if not pipe_drawn:
+			for raw_cell in part["cells"]:
+				var cell_value: Vector2i = raw_cell
+				var centre: Vector2 = (Vector2(cell_value) + Vector2(0.5, 0.5)) * cell - hull.centroid_local + part_offset
+				var box := Rect2(centre - Vector2(cell, cell) * 0.5, Vector2(cell, cell))
+				## 被管道压住的格（`pipe_cells` 命中）：只留填充、不描边。
+				## 否则平台层逐格的方框会横跨在管身上，把一根连续的管切成一段一段 ——
+				## 那在 32× 裁切里与「接缝」完全分不出来。缺省 `{}` 时不走这个分支。
+				var under_pipe := pipe_cells.has(cell_value)
+				draw_rect(box, Color(colour, alpha * (0.45 if under_pipe else 1.0)), true)
+				if not under_pipe:
+					draw_rect(box, colour, false, maxf(1.0 / scale_factor, 1.0))
+				if cell_hook.is_valid():
+					cell_hook.call(box, colour, part)
 		var part_key := String(part.get("key", ""))
 		if effect_parts.has(part_key):
-			_draw_part_effect(part, effect_parts[part_key], cell, -hull.centroid_local + offset, scale_factor)
+			_draw_part_effect(part, effect_parts[part_key], cell, -hull.centroid_local + part_offset, scale_factor)
 	## 维修连线：从维修装置首格指向「下一次真正会被修的那一件」首格。
 	## 画在格之后、变换复位之前，所以自动随车体旋转与缩放。
 	if not effect_links.is_empty():
@@ -2131,6 +2207,90 @@ func _draw_hull_shared(hull: TankBody, origin: Vector2, heading: float, scale_fa
 			var link_colour: Color = link.get("colour", Palette.ACCENT_LIME)
 			draw_line(link_from, link_to, Color(link_colour, 0.30 + 0.45 * link_pulse), maxf(1.0 / scale_factor, 1.0))
 	draw_set_transform(Vector2.ZERO, 0.0, Vector2.ONE)
+
+## 战斗页共用：在某张网的传送带上画管道与在途弹药。
+##
+## 调用时车体变换已经设好（原点 + 朝向 + 缩放），所以这里一律用格坐标 + `offset`。
+## 返回的是 `_draw_hull_shared()` 的 `pipe_hook`：`false` 表示「这不是管道，照旧画方格」。
+##
+## **关键：不能从传入的 `part` 读 `specs` / `index`。**
+## `hull.parts`（`TankBody`）只带 `kind/module_id/rot/aim/hp/cells/key`，
+## 没有弹药网络那套 `specs`/`index`；端口必须重新按 `module_id + rot` 经
+## `AmmoNetwork.ui_ports()` 推导（与仿真同一条函数），在途弹药则用**格数组做键**
+## 去匹配 —— 两边的 `cells` 都是同一个 `part_cells()` 的结果，格集合一一对应。
+func _network_pipe_hook(net: AmmoNetwork, cell: float, scale_factor: float) -> Callable:
+	if net == null:
+		return Callable()
+	## 占位表与在途弹药每帧只算一次，所有部件共用同一份快照。
+	var entries: Array = []
+	var congested_cells: Dictionary = {}
+	## 被管道占据的格：平台层那一格不要再描边（详见 `_draw_hull_shared` 的 `pipe_cells`）。
+	## 存在实例字段上而不是靠调用方再算一遍：平台格与管道格的对应关系必须与钩子同源，
+	## 两份推导一旦漂移，就会出现「管道盖在这格、描边却留在那格」。
+	var pipe_cells: Dictionary = {}
+	for entry in net.congestion():
+		var hot_part: Dictionary = net.parts[int(entry["part"])]
+		congested_cells[_cells_key(hot_part["cells"])] = true
+	for part in net.parts:
+		if String(part["role"]) != AmmoNetwork.ROLE_CONVEYOR:
+			continue
+		entries.append({"cells": part["cells"], "ports": part["specs"]})
+		for raw_cell in part["cells"]:
+			pipe_cells[Vector2i(raw_cell)] = true
+	_pipe_covered_cells = pipe_cells
+	var occupancy := PipeView.occupancy(entries)
+	var flying: Dictionary = {}
+	var phase_step := 0
+	for round_state in net.strand_positions():
+		flying[_cells_key(round_state["cells"])] = round_state
+		phase_step += 1
+	var phase := fposmod(_time * PipeView.PIPE_FLOW_SPEED, TAU)
+	return func(part: Dictionary, colour: Color, part_offset: Vector2) -> bool:
+		var module_id := String(part.get("module_id", ""))
+		if not PipeView.has_shape(module_id):
+			return false
+		var cells: Array = part.get("cells", [])
+		if cells.is_empty():
+			return false
+		var definition: Dictionary = definitions.get_module(module_id)
+		var specs := AmmoNetwork.ui_ports(module_id, definition, int(part.get("rot", 0)))
+		if specs.is_empty():
+			return false
+		var cells_key := _cells_key(cells)
+		var hot := congested_cells.has(cells_key)
+		## **管道不能用队伍色。** 队伍色与平台格同色时，管子会完全沉进甲板里看不出是管；
+		## 这里一律用 `ACCENT_LIME`（调色板里的「能量 / 充能」色），与青/品红两支队伍
+		## 和 Wire 灰的平台都能拉开。只在拥堵/出口阻塞时才换红。
+		var tint: Color = Palette.ACCENT_RED if hot else Palette.ACCENT_LIME
+		var alpha := 0.55 + 0.35 * (0.5 + 0.5 * sin(_time * 9.0)) if hot else 0.85
+		var connected := PipeView.connected_sides(cells, specs, occupancy)
+		var seed := float(cells_key.hash() % 97) / 97.0
+		PipeView.draw_pipe(self, module_id, cells, specs, cell, tint, alpha, scale_factor,
+			connected, 0.5 + 0.5 * sin(phase + seed), part_offset)
+		if flying.has(cells_key):
+			var round_state: Dictionary = flying[cells_key]
+			var path := PipeView.round_path(module_id, cells, specs, cell,
+				String(round_state["entry_port"]), String(round_state["exit_port"]), part_offset)
+			var progress := clampf(float(round_state["progress"]), 0.0, 1.0)
+			var t := progress if bool(round_state["forward"]) else 1.0 - progress
+			var round_colour: Color = Palette.ACCENT_AMBER if bool(round_state["forward"]) else Palette.ACCENT_MAGENTA
+			## 两种不同的「卡」：`congested` 是本格进度到顶（已停在本段末端），
+			## `exit_blocked` 是**首选出口当前收不下**（还在走，但前面堵了）。
+			## 两者都应是红色 —— 玩家看到红色就知道这条管线在堵，而不用区分是哪一种。
+			if bool(round_state["congested"]) or bool(round_state.get("exit_blocked", false)):
+				round_colour = Palette.ACCENT_RED
+			PipeView.draw_round(self, path, cell, t, round_colour, 1.0, scale_factor)
+		return true
+## 格数组的稳定键：排序后拼串。两边的 `cells` 都来自同一个 `part_cells()`，
+## 格数组的稳定键：排序后拼串。两边的 `cells` 都来自同一个 `part_cells()`，
+## 但顺序不保证一致，所以必须先排序。
+static func _cells_key(cells: Array) -> String:
+	var parts_out: Array = []
+	for raw in cells:
+		var value := Vector2i(raw)
+		parts_out.append("%d:%d" % [value.x, value.y])
+	parts_out.sort()
+	return ",".join(parts_out)
 
 ## 逐模块特效的常量。
 ## 进度条高度用**局部像素**，再夹一个最小**屏幕**厚度：生存页缩放系数只有 0.594，
@@ -2285,7 +2445,11 @@ func _draw_match_hull(tag: String, scale_factor: float) -> void:
 	var base := Palette.ACCENT_CYAN if tag == Duel.TAG_PLAYER else Palette.ACCENT_MAGENTA
 	var origin := CombatView.to_screen(DRIVE_VIEW, duel.arena, hull.position, scale_factor)
 	var effects := _hull_effects(hull, duel.damage_of(tag), duel.network_of(tag))
-	_draw_hull_shared(hull, origin, hull.heading, scale_factor, _match_part_colour.bind(base), CombatView.hull_damage_alpha, Callable(), Callable(), effects)
+	## v3.35：管道层。钩子只看格坐标，质心平移由 `_draw_hull_shared` 自己算好传进来，
+	## 所以这里不用关心车体在哪。
+	var cell: float = hull.cell_size()
+	var pipe_hook := _network_pipe_hook(duel.network_of(tag), cell, scale_factor)
+	_draw_hull_shared(hull, origin, hull.heading, scale_factor, _match_part_colour.bind(base), CombatView.hull_damage_alpha, Callable(), Callable(), effects, pipe_hook, _pipe_covered_cells)
 
 
 ## 对局页每部件颜色：驾驶舱恒为琥珀，其余按队伍色，再统一过血量分档。
@@ -2495,7 +2659,7 @@ func _draw_aim_reticle() -> void:
 func _draw_drive() -> void:
 	_draw_drive_field()
 	_draw_drive_hull()
-	_draw_drive_conveyors()
+	_draw_drive_broken_links()
 	_draw_drive_fx()
 	_draw_timed_expires(_drive_expires, _drive_arena, _drive_scale())
 	_draw_drive_shots()
@@ -2528,7 +2692,14 @@ func _draw_drive_hull() -> void:
 	var effects := _hull_effects(tank, damage, network)
 	## v3.33：后拖与履带纹已收归 `CombatView`，试驾页只是把两个开关打开。
 	## 另两页不传这两个回调，`_draw_hull_shared()` 的缺省分支与旧版逐字节相同。
-	_draw_hull_shared(tank, _drive_to_screen(tank.position), tank.heading + tilt, scale_factor, _drive_part_color, CombatView.hull_damage_alpha, _drive_part_offset, _drive_cell_hook, effects)
+	##
+	## v3.36：管道必须走**车载层**的 `pipe_hook`，而不是另外在车体上面再画一遍。
+	## 旧写法是 `_draw_drive_hull()` 画逐格方块 + `_draw_drive_conveyors()` 再画管道，
+	## 两层叠在一起时每格都被方框描边，管子就被人为切成一小段一小段 —— 那正是
+	## 「看得见接缝」的直接原因（16× 裁切里一目了然）。现在管道件走钩子、非管道件走方格，
+	## 与对局页 / 生存页同一条路径。
+	var pipe_hook := _network_pipe_hook(network, tank.cell_size(), scale_factor)
+	_draw_hull_shared(tank, _drive_to_screen(tank.position), tank.heading + tilt, scale_factor, _drive_part_color, CombatView.hull_damage_alpha, _drive_part_offset, _drive_cell_hook, effects, pipe_hook, _pipe_covered_cells)
 
 ## 加速时行进机构整体向后拖一点（纯视觉量，design §5.5）。
 ## 只在试驾页启用：`_motion_enabled` 与油门都是试驾页的状态。
@@ -2560,54 +2731,20 @@ func _draw_drive_fx() -> void:
 func _drive_push_damage(at: Vector2, amount: float, colour: Color, mode: String) -> void:
 	CombatView.push_damage(_drive_fx, at, amount, colour, mode)
 
-## M4 管路可视化：底槽、在途炮弹、拥塞红色闪烁（design §7.4）。
-## 闪烁相位取自 _time，不用 randf，保持确定性。
-func _draw_drive_conveyors() -> void:
+## 试驾页的断链图标（design §7.5）：源模块不可达时标红圈加斜杠。
+##
+## v3.36 之前这一小段夹在 `_draw_drive_conveyors()` 里，因为那个函数要自己建变换。
+## 现在管道与在途弹药全部走 `_draw_hull_shared()` 的 `pipe_hook`（与另两页同一条路径），
+## 断链图标与管道无关，所以在这里单独留一个函数，由 `_draw_drive()` 直接调用。
+func _draw_drive_broken_links() -> void:
 	if network == null or tank == null or tank.parts.is_empty():
 		return
-	var scale_factor := _drive_scale()
 	var cell: float = tank.cell_size()
-	var congested: Dictionary = {}
-	for entry in network.congestion():
-		congested[int(entry["part"])] = true
-	var pulse := 0.5 + 0.5 * sin(_time * 9.0)
-	draw_set_transform(_drive_to_screen(tank.position), tank.heading, Vector2(scale_factor, scale_factor))
-	for part in network.parts:
-		if String(part["role"]) != AmmoNetwork.ROLE_CONVEYOR:
-			continue
-		var hot := congested.has(int(part["index"]))
-		var colour := Palette.ACCENT_RED if hot else Palette.ACCENT_CYAN
-		var alpha := 0.35 + 0.6 * pulse if hot else 0.55
-		for raw_cell in (part["cells"] as Array):
-			var box := _drive_local_box(Vector2i(raw_cell), cell)
-			draw_rect(box, Color(colour, alpha * 0.3), true)
-			draw_rect(box, Color(colour, alpha), false, maxf(1.0 / scale_factor, 1.0))
-	for round_state in network.strand_positions():
-		var cells: Array = round_state["cells"]
-		if cells.is_empty():
-			continue
-		var from_cell := Vector2(Vector2i(cells[0])) + Vector2(0.5, 0.5)
-		var to_cell := Vector2(Vector2i(cells[cells.size() - 1])) + Vector2(0.5, 0.5)
-		var progress := clampf(float(round_state["progress"]), 0.0, 1.0)
-		var point := from_cell.lerp(to_cell, progress)
-		if not bool(round_state["forward"]):
-			point = to_cell.lerp(from_cell, progress)
-		var centre := point * cell - tank.centroid_local
-		var colour := Palette.ACCENT_AMBER if bool(round_state["forward"]) else Palette.ACCENT_MAGENTA
-		if bool(round_state["congested"]):
-			colour = Palette.ACCENT_RED
-		draw_circle(centre, cell * 0.22, colour)
-		draw_arc(centre, cell * 0.34, 0.0, TAU, 16, Color(colour, 0.6), maxf(1.0 / scale_factor, 1.0))
-	draw_set_transform(Vector2.ZERO, 0.0, Vector2.ONE)
 	for entry in network.route_status():
 		if bool(entry["reachable"]):
 			continue
 		var source_cell := Vector2i((network.parts[int(entry["part"])]["cells"] as Array)[0])
 		_draw_drive_broken_link(_drive_local_to_screen(Vector2(source_cell) + Vector2(0.5, 0.5), cell))
-
-func _drive_local_box(cell_value: Vector2i, cell: float) -> Rect2:
-	var centre := (Vector2(cell_value) + Vector2(0.5, 0.5)) * cell - tank.centroid_local
-	return Rect2(centre - Vector2(cell, cell) * 0.5, Vector2(cell, cell))
 
 ## 部件局部格中心 → 屏幕坐标（绕质心旋转后投影）。
 func _drive_local_to_screen(local_cell: Vector2, cell: float) -> Vector2:
@@ -2846,9 +2983,45 @@ func _requested_capture_steps() -> int:
 		return parsed
 	return -1
 
+## 读取 `--blueprint=<res:// 路径>`：截图钩子专用，把指定蓝图读进 `builder`。
+## 为什么必需：受支持的七个 `--screen=` 取值里**没有建造页**，而改装页的库存由生存
+## 进度决定（默认那局没有管道件），试驾页又只会用**当前建造蓝图**——于是没有任何
+## 截图路径能摆出一辆带管道的车。v3.36 就是在这里踩过：三张截图全都证明不了管道存在。
+## 这是**测试钩子**，不参与玩法逻辑，也不读游戏数据以外的东西。
+func _requested_capture_blueprint() -> String:
+	for argument in OS.get_cmdline_user_args():
+		if argument.begins_with("--blueprint="):
+			return argument.substr("--blueprint=".length())
+	return ""
+
+func _apply_capture_blueprint(path: String) -> void:
+	if path.is_empty():
+		return
+	if not FileAccess.file_exists(path):
+		printerr("CAPTURE_BAD_BLUEPRINT missing=%s" % path)
+		return
+	var file := FileAccess.open(path, FileAccess.READ)
+	if file == null:
+		printerr("CAPTURE_BAD_BLUEPRINT open_failed=%s" % path)
+		return
+	var data: Variant = JSON.parse_string(file.get_as_text())
+	file.close()
+	if not data is Dictionary:
+		printerr("CAPTURE_BAD_BLUEPRINT json=%s" % path)
+		return
+	var reason: String = builder.load_blueprint(data)
+	if not reason.is_empty():
+		printerr("CAPTURE_BAD_BLUEPRINT %s" % reason)
+		return
+	print("CAPTURE_BLUEPRINT_OK %s cells=%d modules=%d" % [
+		path, builder.platform_cells.size(), builder.module_parts.size()])
+
 func _handle_capture_request() -> void:
 	## 先解析 `--steps=N`，因为下面各页的预热函数会读它。
 	_capture_steps = _requested_capture_steps()
+	## `--blueprint=` 必须**早于**下面的 `--screen=` 生效：`--screen=drive` / `--screen=match`
+	## 当场就会用 `builder` 把坦克装出来，晚一步读到的就是 `reset_demo()` 的默认演示车。
+	_apply_capture_blueprint(_requested_capture_blueprint())
 	for argument in OS.get_cmdline_user_args():
 		if argument.begins_with("--capture="):
 			_capture_target = argument.substr("--capture=".length())
@@ -2861,6 +3034,15 @@ func _handle_capture_request() -> void:
 			var parts := argument.substr("--cursor=".length()).split(",")
 			if parts.size() == 2:
 				_capture_cursor = Vector2(float(parts[0]), float(parts[1]))
+		elif argument == "--screen=build":
+			## v3.36：受支持的截图取值里一直没有建造页，于是最该看管道的那个页面反而抓不到。
+			## 这里只做「进建造页 + 居中」，不触碰 `builder` 内容 —— 蓝图由 `--blueprint=` 单独负责，
+			## 两者可以分开用，也可以叠用。
+			_set_screen(SCREEN_BUILD)
+			builder.center_content()
+			var seats: Array[Vector2i] = builder.cockpit_cells()
+			if not seats.is_empty():
+				_cursor = seats[0]
 		elif argument == "--screen=drive":
 			_enter_drive()
 			_drive_capture_warmup()
@@ -3379,7 +3561,9 @@ func _draw_survival_hull(tag: String, scale_factor: float) -> void:
 		return
 	var origin := CombatView.to_screen(DRIVE_VIEW, survival.duel.arena, hull.position, scale_factor)
 	var effects := _hull_effects(hull, survival.duel.damage_of(tag), survival.duel.network_of(tag))
-	_draw_hull_shared(hull, origin, hull.heading, scale_factor, _survival_part_colour.bind(tag), _survival_hull_alpha, Callable(), Callable(), effects)
+	var cell: float = hull.cell_size()
+	var pipe_hook := _network_pipe_hook(survival.duel.network_of(tag), cell, scale_factor)
+	_draw_hull_shared(hull, origin, hull.heading, scale_factor, _survival_part_colour.bind(tag), _survival_hull_alpha, Callable(), Callable(), effects, pipe_hook, _pipe_covered_cells)
 
 
 func _draw_survival_hud() -> void:
