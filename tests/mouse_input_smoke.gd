@@ -147,8 +147,11 @@ func _run_checks() -> void:
 	## 方向必须真的指向点击处：换算回世界后与 `aim_world` 一致（容差 0.02 rad）。
 	var view := _main.DRIVE_VIEW as Rect2
 	var arena: Rect2 = _main.survival.duel.arena
+	## v3.38：实际用的相机（未缩放时就是 `arena`），不能直接传 arena —— 否则
+	## 一旦有人给这条测试加了 zoom，就会用一套几何验另一套几何。
+	var camera: Rect2 = _main._battle_camera(arena)
 	var scale_factor: float = _main._survival_scale()
-	var world: Vector2 = _main._screen_to_world(view, arena, battle_point, scale_factor)
+	var world: Vector2 = _main._screen_to_world(view, camera, battle_point, scale_factor)
 	var cannon: Dictionary = player_bank.cannons[0]
 	var centre: Vector2 = player_bank.body.world_position_of_cell(Vector2i(cannon["cell"]))
 	var expected := (world - centre).angle()

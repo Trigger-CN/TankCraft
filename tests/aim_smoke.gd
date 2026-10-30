@@ -181,16 +181,18 @@ func _check_coincident_target(body: TankBody, bank: CannonBank) -> void:
 	_check_near(after.y, before.y, "coincident_dir_y")
 
 ## 屏幕坐标 → 世界坐标必须是 `CombatView.to_screen()` 的精确逆变换。
+## v3.38：相机矩形显式传入（zoom==1 时它就是 `arena`，与旧版逐位相同）。
 func _check_round_trip() -> void:
 	var view := Rect2(320.0, 168.0, 1216.0, 684.0)
 	var arena := Rect2(0.0, 0.0, 2048.0, 1152.0)
-	var scale_factor := CombatView.fit_scale(view, arena)
+	var camera := CombatView.camera_rect(arena, arena.get_center(), 1.0)
+	var scale_factor := CombatView.fit_scale(view, camera)
 	for world in [Vector2(0.0, 0.0), Vector2(1024.0, 576.0), Vector2(2047.0, 1151.0)]:
-		var screen := CombatView.to_screen(view, arena, world, scale_factor)
-		var back: Vector2 = MainScript._screen_to_world(view, arena, screen, scale_factor)
+		var screen := CombatView.to_screen(view, camera, world, scale_factor)
+		var back: Vector2 = MainScript._screen_to_world(view, camera, screen, scale_factor)
 		_check_near(back.x, world.x, "round_trip_x_%.0f" % world.x)
 		_check_near(back.y, world.y, "round_trip_y_%.0f" % world.y)
-	## 退化比例必须回退到竞技场原点，而不是除零。
-	var zero: Vector2 = MainScript._screen_to_world(view, arena, Vector2(0.0, 0.0), 0.0)
-	_check_near(zero.x, arena.position.x, "round_trip_zero_scale_x")
-	_check_near(zero.y, arena.position.y, "round_trip_zero_scale_y")
+	## 退化比例必须回退到相机原点，而不是除零。
+	var zero: Vector2 = MainScript._screen_to_world(view, camera, Vector2(0.0, 0.0), 0.0)
+	_check_near(zero.x, camera.position.x, "round_trip_zero_scale_x")
+	_check_near(zero.y, camera.position.y, "round_trip_zero_scale_y")

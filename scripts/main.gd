@@ -93,6 +93,26 @@ const AIM_RETICLE_CROSS := 5.0
 ## 让管形在任何缩放与任何队伍色下都读得出来；血量状态由部件主色（`hull_damage_colour`）表达，
 ## 不再让透明度也参与表达 —— 否则被打残的炮管会直接看不见。
 const CANNON_BATTLE_ALPHA := 0.9
+## v3.38：战斗场景鼠标滚轮缩放。
+##
+## `zoom` 是相机的**倍数**，不是像素比例：最终传给 `to_screen` 的比例是 `fit_scale(view, camera)`，
+## 而 `camera.size = arena.size / zoom` 会自动把基准比例抬到 `fit * zoom`。
+## 所以 `zoom == 1.0` 时的 `camera` **就是 `arena` 本身**（`camera_rect()` 直接返回入参，不做乘除），
+## 默认像素与 v3.37 逐字相同。
+##
+## 范围 0.5–4.0：
+##   0.5 —— 视野 2 倍宽（4096 世界像素 > 竞技场宽 2048），整张地图缩到中间、四周留背景网格，
+##           这是「退远看全貌」的上限；再往外就只剩空白了。
+##   4.0 —— 一格从 9.5 屏幕像素变成 38 px，6×4 的车 228×152 px，接近建造页（32 px 格）的可读度，
+##           这是「清楚看到坦克细节」的下限；再往里 HUD 相对比例就失调了。
+const CAMERA_ZOOM_MIN := 0.5
+const CAMERA_ZOOM_MAX := 4.0
+## 每格滚轮乘/除的倍数。从 0.5 到 4.0 恰好 log(8)/log(1.15) ≈ 14.6 格，
+## 手感连续又不至于「滚半天还没放大」。
+const CAMERA_ZOOM_STEP := 1.15
+## 相机跟随玩家车的平滑系数（每秒）。焦点用 `1 - exp(-k·dt)` 插值，
+## 与帧率无关；`dt` 走固定步长累加的 `_time`，不用 `randf`、不依赖引擎 delta。
+const CAMERA_FOCUS_FOLLOW := 9.0
 
 var definitions: ModuleDefs
 var builder: GridBuilder
@@ -178,6 +198,15 @@ var _drive_expires: Array = []
 ## 之前试驾页完全没有这一层——打中了屏幕上除了弹坑什么都没有。
 var _drive_hit_flash_at := Vector2.ZERO
 var _drive_hit_flash_left := 0.0
+## v3.38：战斗场景鼠标滚轮缩放状态。**三个页共一份** —— 同一时刻只在一个战斗页上，
+## 但切页时必须复位，否则上一页的放大倍数会带到下一页（也会让截图基线不可复现）。
+var _camera_zoom := 1.0
+## 相机焦点的**当前值**与**目标值**（世界坐标）。目标 = 玩家车中心；
+## 当前值每帧向目标插值，避免坦克一动镜头就硬跳。
+## `zoom == 1.0` 时焦点不是 `arena` 中心，`_battle_camera()` 会直接返回 `arena`，
+## 所以这两个值在不缩放时对像素零影响。
+var _camera_focus := Vector2.ZERO
+var _camera_focus_ready := false
 ## 调试辅助：打开后车体按**模块种类**上色（试驾页 v3.33 之前的旧配色）。
 ## 默认关：三页统一走「驾驶舱琥珀 / 其余队伍色 + 血量分档」这一条唯一规则。
 ## 否则同一个模块在三个页面上是三种颜色，玩家学到的「红 = 快坏了」在试驾页不成立。
@@ -288,9 +317,14 @@ func _process(delta: float) -> void:
 		_survival_simulate(delta)
 		queue_redraw()
 
+	## v3.38：相机焦点必须在**推进模拟之后**才更新 —— 目标取的是玩家车的新位置，
+	## 提前更新会让镜头比车晚一帧。顺序：simulate → camera_follow → sync_pointer。
+	_camera_follow(delta)
 	## v3.26：战斗页每帧把准星与炮口同步到真实光标。
 	## 不能只依赖 `InputEventMouseMotion`——切页后不动鼠标、或坦克行驶而鼠标静止时，
-	## 瞄准都会停在上一个状态（详见 `_sync_battle_pointer()`）。
+	## 矄准都会停在上一个状态（详见 `_sync_battle_pointer()`）。
+	## v3.38：它现在必须在 `_camera_follow()` **之后**，因为缩放后同一个屏幕点
+	## 对应的世界点取决于相机焦点；先同步就会用上一帧的焦点瞄一次。
 	_sync_battle_pointer()
 
 func _load_fonts() -> void:
@@ -323,6 +357,18 @@ func _input(event: InputEvent) -> void:
 		return
 	if event is InputEventMouseButton:
 		var button_event: InputEventMouseButton = event as InputEventMouseButton
+		## v3.38：战斗页滚轮 = 相机缩放。**必须放在所有分流之前**：
+		## 滚轮本来有「模块列表滚动」语义，而生存页的 `_handle_survival_mouse()` 会把滚轮
+		## 继续下传给 `_handle_mouse()`（v3.18 修过：不下传则改装页列表不能滚）。
+		## 用 `_is_battle_screen()` 限定，所以在改装页 / 升级页 / 商店页上滚轮仍旧滚列表 ——
+		## 那些阶段 `_is_battle_screen()` 为 false，根本不会进这个分支。
+		if button_event.pressed and _is_battle_screen():
+			if button_event.button_index == MOUSE_BUTTON_WHEEL_UP:
+				_camera_zoom_by(CAMERA_ZOOM_STEP)
+				return
+			if button_event.button_index == MOUSE_BUTTON_WHEEL_DOWN:
+				_camera_zoom_by(1.0 / CAMERA_ZOOM_STEP)
+				return
 		## v3.25：战斗页左键 = 开火。放在分流之前，因为生存页的 `_handle_survival_mouse()`
 		## 只处理升级卡 / 商品格 / 改装按钮，战斗期会把左键转发给 `_handle_mouse()` 然后早退。
 		## 这里先截下战斗页左键，避免「点了没反应」。
@@ -399,6 +445,11 @@ func _set_screen(next_screen: String) -> void:
 	_hover_tool_index = -1
 	_hover_layer_index = -1
 	_focus_rail_y = _focus_target_y()
+	## v3.38：切页必须把相机退回默认。否则上一页的放大倍数会带到下一页，
+	## 也会让同一组 `--capture` 参数因为上一次操作残留而拍出不同画面。
+	_camera_zoom = 1.0
+	_camera_focus_ready = false
+	_camera_focus = Vector2.ZERO
 
 func _menu_index_at(position: Vector2) -> int:
 	for index in range(MENU_ITEM_COUNT):
@@ -1062,6 +1113,11 @@ func _handle_match_key(event: InputEventKey) -> void:
 		if pressed:
 			_enter_match()
 		return
+	## v3.38：Z 一键把相机退回 1.0（与试驾页 / 生存页一致）。
+	if key == KEY_Z:
+		if pressed:
+			_camera_reset_zoom()
+		return
 	## design §3.1：BATTLE_PHASE 中 Esc 打开暂停面板（这里用 P 打开 / 关闭，Esc 逐层返回）。
 	if key == KEY_P:
 		if pressed and match_session != null:
@@ -1341,6 +1397,12 @@ func _handle_drive_key(event: InputEventKey) -> void:
 			_drive_kind_highlight = not _drive_kind_highlight
 			_drive_last_event = "种类高亮：开" if _drive_kind_highlight else "种类高亮：关"
 			queue_redraw()
+		return
+	## v3.38：Z 一键把相机退回 1.0。`R` 已被「重开」占用，所以另开一键；
+	## 不用滚轮反滚十几格才能回到默认。
+	if key == KEY_Z:
+		if pressed:
+			_camera_reset_zoom()
 		return
 	if key == KEY_W or key == KEY_UP:
 		_drive_held["throttle_up"] = event.pressed
@@ -2116,13 +2178,15 @@ func _draw_preview_tank(center: Vector2, scale: float) -> void:
 ## 缩放与坐标换算都委托 `CombatView`：三页原本各有一份逐字相同的副本，
 ## 现在的差别只在于「读哪个会话的竞技场」，而那正应该由页面自己决定。
 ## 注意：不能复用 _drive_scale() —— 它读的是试驾页的 _drive_arena，对局页下为空会退回 1.0。
+## v3.38：比例来自 `fit_scale(view, camera)` 而**不是** `fit_scale(view, arena)`，
+## 相机矩形已经含了 zoom，所以这里不需要（也不允许）再乘一次。
 func _match_scale() -> float:
 	if match_session == null:
 		return 1.0
-	return CombatView.fit_scale(DRIVE_VIEW, match_session.duel.arena)
+	return CombatView.fit_scale(DRIVE_VIEW, _battle_camera(match_session.duel.arena))
 
 func _match_to_screen(world: Vector2, scale_factor: float) -> Vector2:
-	return CombatView.to_screen(DRIVE_VIEW, match_session.duel.arena, world, scale_factor)
+	return CombatView.to_screen(DRIVE_VIEW, _battle_camera(match_session.duel.arena), world, scale_factor)
 
 ## 对局页战斗视图：竞技场 / 障碍 / 车体 / 动效 / 弹道 / 命中闪光 / 伤害数字全部走
 ## `CombatView`，与生存页同一份实现。页面只负责组装参数与画自己的 HUD。
@@ -2134,38 +2198,44 @@ func _draw_match() -> void:
 		return
 	var duel: Duel = match_session.duel
 	var scale_factor := _match_scale()
-	CombatView.draw_arena(self, DRIVE_VIEW, duel.arena, scale_factor, duel.obstacles, Palette.ACCENT_CYAN)
+	## v3.38：本函数内所有绘制共用**同一个相机矩形**（只算一次）。
+	## 逐处重算会在缩放且焦点在插值中的那一帧拿到两个不同值，画面会抽一下。
+	var camera := _battle_camera(duel.arena)
+	CombatView.draw_arena(self, DRIVE_VIEW, duel.arena, camera, scale_factor, duel.obstacles, Palette.ACCENT_CYAN)
 	## 中立物（房屋 / 残骸）是对局模式没有的，传空数组即可——
 	## 这就是「同一份实现按模式配置」而不是「两套分支」的意思。
-	CombatView.draw_neutrals(self, DRIVE_VIEW, duel.arena, scale_factor, [], [], float(definitions.global_number("cell_size", 16.0)))
+	CombatView.draw_neutrals(self, DRIVE_VIEW, duel.arena, camera, scale_factor, [], [], float(definitions.global_number("cell_size", 16.0)))
 	for tag in [Duel.TAG_ENEMY, Duel.TAG_PLAYER]:
-		_draw_match_hull(String(tag), scale_factor)
-	CombatView.draw_fx(self, DRIVE_VIEW, duel.arena, scale_factor, _match_fx.entries, CombatView.FX_STYLE_MATCH)
+		_draw_match_hull(String(tag), scale_factor, camera)
+	CombatView.draw_fx(self, DRIVE_VIEW, camera, scale_factor, _match_fx.entries, CombatView.FX_STYLE_MATCH)
 	## 消散画在弹道**之下**：残余弹道残影不应该被遮住，而且消散本身没有实体。
-	_draw_timed_expires(_match_expires, duel.arena, scale_factor)
-	CombatView.draw_shots(self, DRIVE_VIEW, duel.arena, scale_factor, duel.field.shots, Duel.TAG_PLAYER)
+	_draw_timed_expires(_match_expires, camera, scale_factor)
+	CombatView.draw_shots(self, DRIVE_VIEW, camera, scale_factor, duel.field.shots, Duel.TAG_PLAYER)
 	## 炮口闪光画在弹道**之上**：它是「刚刚发出这一发」的因果提示，必须盖在拖尾上。
-	_draw_timed_muzzles(_match_muzzles, duel.arena, scale_factor)
-	CombatView.draw_hit_flash(self, DRIVE_VIEW, duel.arena, scale_factor, _match_hit_flash_at, _match_hit_flash_left)
-	CombatView.draw_damage_popups(self, DRIVE_VIEW, duel.arena, scale_factor, _match_fx.entries, _draw_text)
+	_draw_timed_muzzles(_match_muzzles, camera, scale_factor)
+	CombatView.draw_hit_flash(self, DRIVE_VIEW, camera, scale_factor, _match_hit_flash_at, _match_hit_flash_left)
+	CombatView.draw_damage_popups(self, DRIVE_VIEW, camera, scale_factor, _match_fx.entries, _draw_text)
 	_draw_match_hud()
 	## v3.25：准星画在最后——它必须盖在弹道 / 炮口闪光 / 命中闪光 / HUD 之上，
 	## 否则鼠标压在特效上时准星会被遮住，玩家会以为鼠标丢了。
 	_draw_aim_reticle()
 
-## 炮口闪光与消散的绘制包装：两个页面共用同一个循环形状，只有竞技场与缩放不同。
+## 炮口闪光与消散的绘制包装：两个页面共用同一个循环形状，只有相机与缩放不同。
 ##
 ## 为什么不把循环也搬进 `CombatView`：那需要把「颜色属于谁」的判据也搬进去，
 ## 而队伍色是**页面知识**（哪个 tag 是玩家）。组件只该知道「给我位置、方向、颜色」。
-func _draw_timed_muzzles(entries: Array, arena: Rect2, scale_factor: float) -> void:
+##
+## v3.38：第二个参数从 `arena` 改成 `camera` —— 相机矩形已经含了缩放焦点，
+## 传错了就会让光效与炮弹在缩放后分开（两者必须用同一个相机）。
+func _draw_timed_muzzles(entries: Array, camera: Rect2, scale_factor: float) -> void:
 	for raw_entry in entries:
 		var entry: Dictionary = raw_entry
-		CombatView.draw_muzzle_flash(self, DRIVE_VIEW, arena, scale_factor, Vector2(entry["pos"]), Vector2(entry["dir"]), float(entry["left"]), Color(entry["colour"]))
+		CombatView.draw_muzzle_flash(self, DRIVE_VIEW, camera, scale_factor, Vector2(entry["pos"]), Vector2(entry["dir"]), float(entry["left"]), Color(entry["colour"]))
 
-func _draw_timed_expires(entries: Array, arena: Rect2, scale_factor: float) -> void:
+func _draw_timed_expires(entries: Array, camera: Rect2, scale_factor: float) -> void:
 	for raw_entry in entries:
 		var entry: Dictionary = raw_entry
-		CombatView.draw_expire_flash(self, DRIVE_VIEW, arena, scale_factor, Vector2(entry["pos"]), float(entry["left"]), Color(entry["colour"]))
+		CombatView.draw_expire_flash(self, DRIVE_VIEW, camera, scale_factor, Vector2(entry["pos"]), float(entry["left"]), Color(entry["colour"]))
 
 ## 坦克绘制的唯一实现：试驾 / 对局 / 生存三页原本各有一份逐行同构的副本，
 ## 差异只在「每部件颜色」「填充透明度」「部件格偏移」「额外的格装饰」。
@@ -2521,13 +2591,14 @@ func _draw_part_effect(part: Dictionary, effect: Dictionary, cell: float, base: 
 		draw_rect(bar, Color(bar_colour, 0.55), false, maxf(0.5, line_width * 0.5))
 
 ## 对局页车体：坐标走 `CombatView.to_screen`，颜色走血量分档，特效走 `_hull_effects`。
-func _draw_match_hull(tag: String, scale_factor: float) -> void:
+## v3.38：`camera` 由 `_draw_match()` 算好传进来，与同帧其他绘制严格同源。
+func _draw_match_hull(tag: String, scale_factor: float, camera: Rect2) -> void:
 	var duel: Duel = match_session.duel
 	var hull: TankBody = duel.tank_of(tag)
 	if hull == null or hull.parts.is_empty():
 		return
 	var base := Palette.ACCENT_CYAN if tag == Duel.TAG_PLAYER else Palette.ACCENT_MAGENTA
-	var origin := CombatView.to_screen(DRIVE_VIEW, duel.arena, hull.position, scale_factor)
+	var origin := CombatView.to_screen(DRIVE_VIEW, camera, hull.position, scale_factor)
 	var effects := _hull_effects(hull, duel.damage_of(tag), duel.network_of(tag))
 	## v3.35：管道层。钩子只看格坐标，质心平移由 `_draw_hull_shared` 自己算好传进来，
 	## 所以这里不用关心车体在哪。
@@ -2572,9 +2643,10 @@ func _draw_match_hud() -> void:
 	_draw_text("W / S    油门", Vector2(right, 260), 16, Palette.TEXT_HI, false)
 	_draw_text("A / D    转向", Vector2(right, 290), 16, Palette.TEXT_HI, false)
 	_draw_text("鼠标瞄准 · 左键开火", Vector2(right, 320), 16, Palette.TEXT_HI, false)
-	_draw_text("P        暂停", Vector2(right, 350), 16, Palette.TEXT_HI, false)
-	_draw_text("R        重开对局", Vector2(right, 380), 16, Palette.TEXT_HI, false)
-	_draw_text("Esc      返回主菜单", Vector2(right, 410), 16, Palette.TEXT_HI, false)
+	_draw_text("滚轮缩放 · Z 复位  %.2f×" % _camera_zoom, Vector2(right, 350), 14, Palette.ACCENT_CYAN, false)
+	_draw_text("P        暂停", Vector2(right, 380), 16, Palette.TEXT_HI, false)
+	_draw_text("R        重开对局", Vector2(right, 410), 16, Palette.TEXT_HI, false)
+	_draw_text("Esc      返回主菜单", Vector2(right, 440), 16, Palette.TEXT_HI, false)
 	var player_bank = duel.bank_of(Duel.TAG_PLAYER)
 	if player_bank != null and not player_bank.cannons.is_empty():
 		var cannon: Dictionary = player_bank.cannons[0]
@@ -2588,34 +2660,123 @@ func _draw_match_hud() -> void:
 	else:
 		_draw_battle_status(_status_message)
 
+## ===== 战斗场景相机（v3.38）：鼠标滚轮缩放 =====
+##
+## 相机状态只有两个：`_camera_zoom`（倍数）与 `_camera_focus`（世界焦点）。
+## 相机矩形由 `CombatView.camera_rect(arena, focus, zoom)` 现算 —— **不缓存**，
+## 因为缓存一旦与 arena 不同步，就会出现「画用旧相机、矄准用新相机」。
+##
+## `zoom == 1.0` 时 `camera_rect()` **直接返回 `arena`**，于是所有 `to_screen()` 的输入
+## 与 v3.37 逐字相同，默认像素与历史截图基线继续可比。
+func _battle_camera(arena: Rect2) -> Rect2:
+	if arena.size.x <= 0.0:
+		return arena
+	return CombatView.camera_rect(arena, _camera_focus, _camera_zoom)
+
+## 滚轮缩放。`factor` > 1 放大、< 1 缩小；结果夹在 `[CAMERA_ZOOM_MIN, CAMERA_ZOOM_MAX]`。
+## 缩到 1.0 时顺手把焦点重置成竞技场中心（`_camera_focus_ready = false`），
+## 让「刚好回到默认倍数」这一个状态只剩下一种可能取值，方便测试与截图。
+func _camera_zoom_by(factor: float) -> void:
+	var next := clampf(_camera_zoom * factor, CAMERA_ZOOM_MIN, CAMERA_ZOOM_MAX)
+	if is_equal_approx(next, _camera_zoom):
+		return
+	_camera_zoom = next
+	if absf(_camera_zoom - 1.0) < 0.000001:
+		_camera_zoom = 1.0
+		_camera_focus_ready = false
+	_set_status("缩放 %.2f×（滚轮调整 · Z 复位）" % _camera_zoom)
+	queue_redraw()
+
+## 把相机退回默认：倍数 1.0 + 焦点未就绪。`Z` 键走这条。
+## 直接回 1.0 而不是「反滚十几格」，也不做平滑 —— 复位应当是瞬时且确定的。
+func _camera_reset_zoom() -> void:
+	if absf(_camera_zoom - 1.0) < 0.000001 and not _camera_focus_ready:
+		return
+	_camera_zoom = 1.0
+	_camera_focus_ready = false
+	_camera_focus = Vector2.ZERO
+	if _screen == SCREEN_DRIVE:
+		_drive_last_event = "缩放 1.00×"
+	elif _screen == SCREEN_MATCH:
+		_match_event = "缩放 1.00×"
+	elif _screen == SCREEN_SURVIVAL:
+		_survival_event = "缩放 1.00×"
+	queue_redraw()
+
+## 当前战斗页的竞技场（不管有没有缩放）。拿不到时返回空 `Rect2`。
+## 抽出来是因为「取焦点目标」与「取相机」需要同一个 arena，而 `_battle_view()`
+## 会顺带算 scale/camera —— 在只想拿 arena 的地方多算一次没必要。
+func _battle_arena_now() -> Rect2:
+	if _screen == SCREEN_SURVIVAL and survival != null and survival.duel != null:
+		return survival.duel.arena
+	if _screen == SCREEN_MATCH and match_session != null:
+		return match_session.duel.arena
+	if _screen == SCREEN_DRIVE:
+		return _drive_arena
+	return Rect2()
+
+## 相机焦点每帧推进。`delta` 是本帧真实时长（与引擎帧率一致）。
+##
+## 目标优先取玩家车体中心；拿不到就退回竞技场中心。
+## **不缩放时不追焦**（`zoom == 1.0` 直接把焦点标记为未就绪），
+## 于是「从未缩放过」的截图路径不可能因为焦点漂移而改变像素。
+func _camera_follow(delta: float) -> void:
+	if absf(_camera_zoom - 1.0) < 0.000001:
+		_camera_focus_ready = false
+		return
+	var arena := _battle_arena_now()
+	if arena.size.x <= 0.0:
+		return
+	var target := _battle_focus_target(arena)
+	if not _camera_focus_ready:
+		_camera_focus = target
+		_camera_focus_ready = true
+		return
+	## 与帧率无关的指数插值：`1 - exp(-k·dt)`。k 取 9.0 时几乎瞬到，但不硬跳。
+	var t := 1.0 - exp(-CAMERA_FOCUS_FOLLOW * maxf(delta, 0.0))
+	_camera_focus = _camera_focus.lerp(target, clampf(t, 0.0, 1.0))
+
+## 相机应该看向的世界点：玩家车中心，否则竞技场中心。
+func _battle_focus_target(arena: Rect2) -> Vector2:
+	if _screen == SCREEN_SURVIVAL and survival != null and survival.duel != null:
+		var alive: TankBody = survival.duel.tank_of(Duel.TAG_PLAYER)
+		if alive != null:
+			return alive.position
+	elif _screen == SCREEN_MATCH and match_session != null:
+		var matched: TankBody = match_session.duel.tank_of(Duel.TAG_PLAYER)
+		if matched != null:
+			return matched.position
+	elif _screen == SCREEN_DRIVE and tank != null:
+		return tank.position
+	return arena.get_center()
+
 ## ===== 试驾沙盒绘制（M3）：世界缩放、刚体姿态、弹道与 HUD =====
 func _drive_scale() -> float:
-	if _drive_arena.size.x <= 0.0:
-		return 1.0
-	return DRIVE_VIEW.size.x / _drive_arena.size.x
+	return CombatView.fit_scale(DRIVE_VIEW, _battle_camera(_drive_arena))
 
 func _drive_to_screen(world: Vector2) -> Vector2:
-	return DRIVE_VIEW.position + (world - _drive_arena.position) * _drive_scale()
+	var camera := _battle_camera(_drive_arena)
+	return CombatView.to_screen(DRIVE_VIEW, camera, world, CombatView.fit_scale(DRIVE_VIEW, camera))
 
-## 屏幕坐标 → 世界坐标。三个战斗页共用同一条逆变换公式（`to_screen` 的逆）。
+## 屏幕坐标 → 世界坐标。三个战斗页共用同一条逆变换公式（`to_world`）。
 ## 为什么不能三页各写一份：正向变换在 `CombatView` 里只写了一份，逆变换如果每页自己拼，
-## 一旦 `fit_scale` 改成「铺满高度」，三处就会同时错。
-static func _screen_to_world(view: Rect2, arena: Rect2, screen: Vector2, scale_factor: float) -> Vector2:
-	if scale_factor <= 0.0001:
-		return arena.position
-	return arena.position + (screen - view.position) / scale_factor
+## 一旦相机不一致，三处就会同时错——而且错的是「看得见的炮管」与「真的弹道」之间的关系。
+## `camera` 与同一个页面的 `to_screen()` 用的必须是**同一个** `_battle_camera()` 结果。
+static func _screen_to_world(view: Rect2, camera: Rect2, screen: Vector2, scale_factor: float) -> Vector2:
+	return CombatView.to_world(view, camera, screen, scale_factor)
 
 ## 把鼠标位置换成世界坐标并让该侧所有炮管指向它。三个战斗页共用。
 ##
 ## 只在 `view` 矩形内部生效：鼠标飘到 HUD 上时不应该把炮口拉向面板边缘。
+## `camera` 必须是该页 `_battle_camera()` 的结果 —— 与绘制同源。
 ## 返回是否真的改动了方向（供调用方决定要不要重绘）。
-func _aim_player_cannons(view: Rect2, arena: Rect2, scale_factor: float, position: Vector2) -> bool:
+func _aim_player_cannons(view: Rect2, camera: Rect2, scale_factor: float, position: Vector2) -> bool:
 	if not view.has_point(position):
 		return false
 	var bank := _player_bank()
 	if bank == null:
 		return false
-	var world := _screen_to_world(view, arena, position, scale_factor)
+	var world := _screen_to_world(view, camera, position, scale_factor)
 	return bank.aim_all_at(world) > 0
 
 ## 当前屏幕对应的玩家炮管组；非战斗页返回 null。
@@ -2671,11 +2832,13 @@ func _sync_battle_pointer() -> void:
 
 ## 把鼠标位置换算成世界坐标并让玩家全部炮管指过去。三页共用。
 ## 返回是否真的改了方向（供调用方决定要不要重绘）。
+## v3.38：`info["camera"]` 与绘制用的是同一个 `_battle_camera()` —— **不能只传 arena**，
+## 否则缩放后「画出来的炮管」与「真实开火方向」会分成两套推导（v3.37 的教训）。
 func _aim_with_mouse(position: Vector2) -> bool:
 	var info := _battle_view()
 	if info.is_empty():
 		return false
-	return _aim_player_cannons(info.get("view", Rect2()), info.get("arena", Rect2()), float(info.get("scale", 1.0)), position)
+	return _aim_player_cannons(info.get("view", Rect2()), info.get("camera", Rect2()), float(info.get("scale", 1.0)), position)
 
 ## v3.25：左键开火。三个战斗页共用一条路径，但开火后的 UI 反馈各写各的，
 ## 因为三个页面的「最近事件」字段与开火入口本来就不同（试驾页绕过 Duel）。
@@ -2703,17 +2866,21 @@ func _fire_battle_player(position: Vector2) -> void:
 ## 当前屏幕对应玩家侧的竞技场：生存页 / 对局页各读自己的 `duel.arena`，
 ## 试驾页读 `_drive_arena`（它不经过 `Duel`）。
 ##
-## 返回 `{view, arena, scale}`，三页的鼠标瞄准与准星绘制都走这一份，
+## 返回 `{view, arena, camera, scale}`，三页的鼠标瞄准与准星绘制都走这一份，
 ## 避免「某页用了别的页的竞技场」这类静默错位。
+##
+## **`camera` 与 `scale` 必须同时返回，且必须同步**：`scale` 是 `fit_scale(view, camera)`
+## 的结果，`camera` 是 `_battle_camera(arena)` 的结果。只传其中一个（例如只传 arena
+## 而丢掉 zoom）会让矄准与绘制各自推一套几何。
 func _battle_view() -> Dictionary:
 	if _screen == SCREEN_SURVIVAL and survival != null and survival.duel != null:
-		var scale := _survival_scale()
-		return {"view": DRIVE_VIEW, "arena": survival.duel.arena, "scale": scale}
+		var arena: Rect2 = survival.duel.arena
+		return {"view": DRIVE_VIEW, "arena": arena, "camera": _battle_camera(arena), "scale": _survival_scale()}
 	if _screen == SCREEN_MATCH and match_session != null:
-		var scale := _match_scale()
-		return {"view": DRIVE_VIEW, "arena": match_session.duel.arena, "scale": scale}
+		var match_arena: Rect2 = match_session.duel.arena
+		return {"view": DRIVE_VIEW, "arena": match_arena, "camera": _battle_camera(match_arena), "scale": _match_scale()}
 	if _screen == SCREEN_DRIVE:
-		return {"view": DRIVE_VIEW, "arena": _drive_arena, "scale": _drive_scale()}
+		return {"view": DRIVE_VIEW, "arena": _drive_arena, "camera": _battle_camera(_drive_arena), "scale": _drive_scale()}
 	return {}
 
 ## 准星：鼠标在战场区内时画一个空心环 + 十字）。
@@ -2739,21 +2906,20 @@ func _draw_aim_reticle() -> void:
 	draw_line(pointer - Vector2(AIM_RETICLE_CROSS, 0.0), pointer + Vector2(AIM_RETICLE_CROSS, 0.0), Color(colour, 0.55), 1.0)
 	draw_line(pointer - Vector2(0.0, AIM_RETICLE_CROSS), pointer + Vector2(0.0, AIM_RETICLE_CROSS), Color(colour, 0.55), 1.0)
 
-## 绘制顺序与对局页 / 生存页**完全一致**（v3.33）：
-## arena → hull → conveyor → fx → expires → shots → muzzles → hit flash → damage popups → HUD → reticle。
-## 旧顺序把 fx 画在 shots 之后、且没有命中闪光与伤害数字，是「三页体感不一样」的直接来源。
 func _draw_drive() -> void:
-	_draw_drive_field()
-	_draw_drive_hull()
+	## v3.38：本函数内所有绘制共用**同一个相机矩形**（只算一次），理由与 `_draw_match()` 相同。
+	var camera := _battle_camera(_drive_arena)
+	_draw_drive_field(camera)
+	_draw_drive_hull(camera)
 	_draw_drive_broken_links()
-	_draw_drive_fx()
-	_draw_timed_expires(_drive_expires, _drive_arena, _drive_scale())
-	_draw_drive_shots()
-	_draw_timed_muzzles(_drive_muzzles, _drive_arena, _drive_scale())
+	_draw_drive_fx(camera)
+	_draw_timed_expires(_drive_expires, camera, _drive_scale())
+	_draw_drive_shots(camera)
+	_draw_timed_muzzles(_drive_muzzles, camera, _drive_scale())
 	## 命中闪光画在炮弹之上，确保不会被格线淹掉。
-	CombatView.draw_hit_flash(self, DRIVE_VIEW, _drive_arena, _drive_scale(), _drive_hit_flash_at, _drive_hit_flash_left)
+	CombatView.draw_hit_flash(self, DRIVE_VIEW, camera, _drive_scale(), _drive_hit_flash_at, _drive_hit_flash_left)
 	## 伤害数字画在最后：必须盖在炮弹、命中闪光与所有地形之上。
-	CombatView.draw_damage_popups(self, DRIVE_VIEW, _drive_arena, _drive_scale(), _drive_fx.entries, _draw_text)
+	CombatView.draw_damage_popups(self, DRIVE_VIEW, camera, _drive_scale(), _drive_fx.entries, _draw_text)
 	_draw_drive_hud()
 	## v3.25：准星必须最后画，盖住车体 / 弹道 / HUD。
 	_draw_aim_reticle()
@@ -2761,14 +2927,14 @@ func _draw_drive() -> void:
 ## 试驾页的竞技场：直接走 `CombatView.draw_arena`，只多传一个网格间距。
 ## 网格间距是「4 格宽」的屏幕像素（旧实现里 `cell_step` 就是 `cell_size·scale·4`），
 ## `draw_arena` 的 `grid_step_px = 0` 缺省值保证另两页不会因此多画一根线。
-func _draw_drive_field() -> void:
+func _draw_drive_field(camera: Rect2) -> void:
 	if tank == null:
 		return
 	var scale_factor := _drive_scale()
-	CombatView.draw_arena(self, DRIVE_VIEW, _drive_arena, scale_factor, _drive_obstacles, Palette.ACCENT_CYAN, tank.cell_size() * scale_factor * 4.0)
+	CombatView.draw_arena(self, DRIVE_VIEW, _drive_arena, camera, scale_factor, _drive_obstacles, Palette.ACCENT_CYAN, tank.cell_size() * scale_factor * 4.0)
 
 ## 整机绕质心旋转；design §5.5 的转向倾斜与加速滞后均为纯视觉量。
-func _draw_drive_hull() -> void:
+func _draw_drive_hull(camera: Rect2) -> void:
 	if tank == null or tank.parts.is_empty():
 		return
 	var scale_factor := _drive_scale()
@@ -2789,7 +2955,9 @@ func _draw_drive_hull() -> void:
 	## 而不是 `tank.heading` —— 炮管要与车体一起倾，否则炮口会与炮口闪光错开。
 	var drawn_heading := tank.heading + tilt
 	var cannon_hook := _battle_cannon_hook(bank, tank, tank.cell_size(), scale_factor, drawn_heading)
-	_draw_hull_shared(tank, _drive_to_screen(tank.position), drawn_heading, scale_factor, _drive_part_color, CombatView.hull_damage_alpha, _drive_part_offset, _drive_cell_hook, effects, pipe_hook, _pipe_covered_cells, cannon_hook)
+	## v3.38：坐标走**同一个相机**——`_drive_to_screen()` 会自己取 `_battle_camera()`，
+	## 但这里已经有一份了，重算一次不保证逐位相同（相机焦点在插值中）。
+	_draw_hull_shared(tank, CombatView.to_screen(DRIVE_VIEW, camera, tank.position, scale_factor), drawn_heading, scale_factor, _drive_part_color, CombatView.hull_damage_alpha, _drive_part_offset, _drive_cell_hook, effects, pipe_hook, _pipe_covered_cells, cannon_hook)
 
 ## 加速时行进机构整体向后拖一点（纯视觉量，design §5.5）。
 ## 只在试驾页启用：`_motion_enabled` 与油门都是试驾页的状态。
@@ -2803,19 +2971,19 @@ func _drive_cell_hook(box: Rect2, colour: Color, part: Dictionary) -> void:
 
 ## 弹道走 `CombatView.draw_shots`：颜色按 `shooter` 判，试驾页的发射方 tag 恒为 "player"。
 ## 旧实现写死琥珀色——一旦以后有敌人的弹道进入试驾页，就分不出谁在打谁。
-func _draw_drive_shots() -> void:
+func _draw_drive_shots(camera: Rect2) -> void:
 	if field == null:
 		return
-	CombatView.draw_shots(self, DRIVE_VIEW, _drive_arena, _drive_scale(), field.shots, "player")
+	CombatView.draw_shots(self, DRIVE_VIEW, camera, _drive_scale(), field.shots, "player")
 
 ## M5 战斗动效：残骸、爆炸环、护盾、脱落撕裂与驾驶舱被毁；全部由 left/life 倒数驱动。
 ## v3.33：形状与推进全部走 `CombatView.draw_fx` + `FX_STYLE_DRIVE`。
 ## 残骸 / 护盾受击 / 脱落 / 驾驶舱这四种专用形状随 `FX_STYLE_DRIVE["special"]` 开关走，
 ## 另两页不开这个开关，所以它们的动效仍然是通用圆环——像素不变。
-func _draw_drive_fx() -> void:
+func _draw_drive_fx(camera: Rect2) -> void:
 	if _drive_fx.is_empty():
 		return
-	CombatView.draw_fx(self, DRIVE_VIEW, _drive_arena, _drive_scale(), _drive_fx.entries, CombatView.FX_STYLE_DRIVE)
+	CombatView.draw_fx(self, DRIVE_VIEW, camera, _drive_scale(), _drive_fx.entries, CombatView.FX_STYLE_DRIVE)
 
 ## 试驾页的伤害悬浮数字：逻辑全在 `CombatView.push_damage()`（三页同一份）。
 func _drive_push_damage(at: Vector2, amount: float, colour: Color, mode: String) -> void:
@@ -3005,10 +3173,13 @@ func _draw_drive_hud() -> void:
 	var hint_y := DRIVE_HUD_RIGHT.end.y - 178.0
 	_draw_text("在飞弹药    %d" % field.shots.size(), Vector2(right, hint_y - 36.0), 14, Palette.ACCENT_AMBER, false)
 	_draw_text("W / S    油门", Vector2(right, hint_y), 16, Palette.TEXT_HI, false)
-	_draw_text("A / D    转向", Vector2(right, hint_y + 30.0), 16, Palette.TEXT_HI, false)
-	_draw_text("鼠标瞄准 · 左键开火", Vector2(right, hint_y + 60.0), 16, Palette.TEXT_HI, false)
-	_draw_text("R        重开试驾 · K 种类高亮", Vector2(right, hint_y + 90.0), 16, Palette.TEXT_HI, false)
-	_draw_text("Esc      返回主菜单", Vector2(right, hint_y + 120.0), 16, Palette.TEXT_HI, false)
+	_draw_text("A / D    转向", Vector2(right, hint_y + 26.0), 16, Palette.TEXT_HI, false)
+	_draw_text("鼠标瞄准 · 左键开火", Vector2(right, hint_y + 52.0), 16, Palette.TEXT_HI, false)
+	## v3.38：三页 HUD 的缩放读数必须一致。试驾页行数最多，因此把行距从 30 收到 26，
+	## 在不压到下方管路状态行的前提下把缩放行插进键位块。
+	_draw_text("滚轮缩放 · Z 复位  %.2f×" % _camera_zoom, Vector2(right, hint_y + 78.0), 14, Palette.ACCENT_CYAN, false)
+	_draw_text("R        重开试驾 · K 种类高亮", Vector2(right, hint_y + 104.0), 16, Palette.TEXT_HI, false)
+	_draw_text("Esc      返回主菜单", Vector2(right, hint_y + 130.0), 16, Palette.TEXT_HI, false)
 	var supply := "M4 管路：未初始化"
 	if network != null:
 		var broken := 0
@@ -3124,6 +3295,17 @@ func _handle_capture_request() -> void:
 			var parts := argument.substr("--cursor=".length()).split(",")
 			if parts.size() == 2:
 				_capture_cursor = Vector2(float(parts[0]), float(parts[1]))
+		elif argument.begins_with("--zoom="):
+			## v3.38 探针参数：把相机倍数钉到指定值。
+			## 为什么必需：`--capture` 路径**不产生任何滚轮事件**，不给钩子就只能拍到 1.0×，
+			## 无法用像素证据证明「放大后细节更清楚 / 缩小后看得更远」。
+			## 这是**测试钩子**，不参与玩法逻辑；夹在 `[CAMERA_ZOOM_MIN, CAMERA_ZOOM_MAX]` 里。
+			var raw_zoom := argument.substr("--zoom=".length())
+			if raw_zoom.is_valid_float():
+				_camera_zoom = clampf(float(raw_zoom), CAMERA_ZOOM_MIN, CAMERA_ZOOM_MAX)
+				_camera_focus_ready = false
+			else:
+				printerr("CAPTURE_BAD_ZOOM %s" % raw_zoom)
 		elif argument == "--screen=build":
 			## v3.36：受支持的截图取值里一直没有建造页，于是最该看管道的那个页面反而抓不到。
 			## 这里只做「进建造页 + 居中」，不触碰 `builder` 内容 —— 蓝图由 `--blueprint=` 单独负责，
@@ -3161,7 +3343,13 @@ func _handle_capture_request() -> void:
 	## 它原本靠在 `_process` 里 `move_toward` 才涨到 1.0；一旦冻结，页面就停在
 	## 淡入起点，实测截图只有 8587 B（几乎全黑）。这里显式置终值。
 	## v3.25：如果传了 `--cursor=`，页面已经建好，现在才能真正应用鼠标位置。
-	## 顺带把炮口也指向该点：截图里准星与炮口方向一致，才能一眼看出「鼠标瞄准」生效。
+	## 顺带把炮口也指向该点：截图里矄准与炮口方向一致，才能一眼看出「鼠标瞄准」生效。
+	## v3.38：相机焦点必须在这里**显式钉一次** —— `_camera_follow()` 跑在 `_process` 里，
+	## 而下三行就把 `_process` 冻结了；不在这里置焦点的话，带 `--zoom=` 的截图会
+	## 永远拍到「焦点 = 世界原点」的画面（一个锚点都没夹住的错误视角）。
+	## 焦点放到位之后才 `_aim_with_mouse()`，否则矄准算的是旧相机的世界点。
+	_camera_focus = _battle_focus_target(_battle_arena_now())
+	_camera_focus_ready = true
 	if _capture_cursor.is_finite():
 		_mouse_position = _capture_cursor
 		_aim_with_mouse(_capture_cursor)
@@ -3253,10 +3441,10 @@ var _survival_modify_index := 0
 func _survival_scale() -> float:
 	if survival == null or survival.duel == null:
 		return 1.0
-	return CombatView.fit_scale(DRIVE_VIEW, survival.duel.arena)
+	return CombatView.fit_scale(DRIVE_VIEW, _battle_camera(survival.duel.arena))
 
 func _survival_to_screen(world: Vector2, scale_factor: float) -> Vector2:
-	return CombatView.to_screen(DRIVE_VIEW, survival.duel.arena, world, scale_factor)
+	return CombatView.to_screen(DRIVE_VIEW, _battle_camera(survival.duel.arena), world, scale_factor)
 
 ## 摆放起始坦克：直接转调唯一来源，不在页面层重复一份布局。
 func _build_survival_starter(model: GridBuilder) -> String:
@@ -3356,6 +3544,11 @@ func _survival_battle_key(key: Key, event: InputEventKey) -> void:
 	if key == KEY_R:
 		if event.pressed and not event.echo:
 			_enter_survival()
+		return
+	## v3.38：Z 一键把相机退回 1.0（仅战斗阶段；改装页的 Z 没有特殊语义）。
+	if key == KEY_Z:
+		if event.pressed and not event.echo:
+			_camera_reset_zoom()
 		return
 	if key == KEY_SPACE:
 		if event.pressed and not event.echo:
@@ -3608,24 +3801,26 @@ func _draw_survival_arena() -> void:
 	var duel: Duel = survival.duel
 	var scale_factor := _survival_scale()
 	var cell_px := float(definitions.global_number("cell_size", 16.0))
+	## v3.38：本函数内所有绘制共用**同一个相机矩形**（与另两页同一纪律）。
+	var camera := _battle_camera(duel.arena)
 	## 竞技场固定障碍直接读数据，避免与 duel.obstacles 里的房屋条目重复绘制。
 	## 数据文件用**格单位**，进组件前统一换算成像素（对局页的 obstacles 已是像素）。
 	var obstacles := CombatView.scale_obstacles(definitions.get_arena(DRIVE_ARENA_ID).get("obstacles", []), cell_px)
-	CombatView.draw_arena(self, DRIVE_VIEW, duel.arena, scale_factor, obstacles, Palette.ACCENT_CYAN)
+	CombatView.draw_arena(self, DRIVE_VIEW, duel.arena, camera, scale_factor, obstacles, Palette.ACCENT_CYAN)
 	## 房屋与残骸是生存模式的专属中立物；同一函数传空数组就是「没有」。
-	CombatView.draw_neutrals(self, DRIVE_VIEW, duel.arena, scale_factor, survival.houses, survival.debris, cell_px)
+	CombatView.draw_neutrals(self, DRIVE_VIEW, duel.arena, camera, scale_factor, survival.houses, survival.debris, cell_px)
 	## 坦克：逐部件按血量上色（完好队伍色 / 中度琥珀 / 濒危红）。
 	for raw_tag in duel.alive_tags():
-		_draw_survival_hull(String(raw_tag), scale_factor)
-	CombatView.draw_fx(self, DRIVE_VIEW, duel.arena, scale_factor, _survival_fx.entries, CombatView.FX_STYLE_SURVIVAL)
+		_draw_survival_hull(String(raw_tag), scale_factor, camera)
+	CombatView.draw_fx(self, DRIVE_VIEW, camera, scale_factor, _survival_fx.entries, CombatView.FX_STYLE_SURVIVAL)
 	## 消散画在弹道之下（与对局页同一层级）；炮口闪光画在弹道之上。
-	_draw_timed_expires(_survival_expires, duel.arena, scale_factor)
-	CombatView.draw_shots(self, DRIVE_VIEW, duel.arena, scale_factor, duel.field.shots, Duel.TAG_PLAYER)
-	_draw_timed_muzzles(_survival_muzzles, duel.arena, scale_factor)
+	_draw_timed_expires(_survival_expires, camera, scale_factor)
+	CombatView.draw_shots(self, DRIVE_VIEW, camera, scale_factor, duel.field.shots, Duel.TAG_PLAYER)
+	_draw_timed_muzzles(_survival_muzzles, camera, scale_factor)
 	## 命中闪光画在炮弹之上，确保不会被格线淹掉。
-	CombatView.draw_hit_flash(self, DRIVE_VIEW, duel.arena, scale_factor, _hit_flash_at, _hit_flash_left)
+	CombatView.draw_hit_flash(self, DRIVE_VIEW, camera, scale_factor, _hit_flash_at, _hit_flash_left)
 	## 伤害数字画在最后：必须盖在炮弹、命中闪光与所有地形之上。
-	CombatView.draw_damage_popups(self, DRIVE_VIEW, duel.arena, scale_factor, _survival_fx.entries, _draw_text)
+	CombatView.draw_damage_popups(self, DRIVE_VIEW, camera, scale_factor, _survival_fx.entries, _draw_text)
 
 ## 逐部件按**血量比例**上色：完好是队伍色、中度损伤转琥珀、濒危转红、已毁不留格。
 ## 分档阈值与透明度曲线已收归 `CombatView`，对局页用**同一个函数**——这才是复用的实质。
@@ -3645,11 +3840,11 @@ func _survival_part_colour(part: Dictionary, tag: String) -> Color:
 func _survival_hull_alpha(part: Dictionary) -> float:
 	return CombatView.hull_damage_alpha(part)
 
-func _draw_survival_hull(tag: String, scale_factor: float) -> void:
+func _draw_survival_hull(tag: String, scale_factor: float, camera: Rect2) -> void:
 	var hull: TankBody = survival.duel.tank_of(tag)
 	if hull == null or hull.parts.is_empty():
 		return
-	var origin := CombatView.to_screen(DRIVE_VIEW, survival.duel.arena, hull.position, scale_factor)
+	var origin := CombatView.to_screen(DRIVE_VIEW, camera, hull.position, scale_factor)
 	var effects := _hull_effects(hull, survival.duel.damage_of(tag), survival.duel.network_of(tag))
 	var cell: float = hull.cell_size()
 	var pipe_hook := _network_pipe_hook(survival.duel.network_of(tag), cell, scale_factor)
@@ -3689,9 +3884,13 @@ func _draw_survival_hud() -> void:
 	_draw_text("W / S    油门", Vector2(right, 240), 16, Palette.TEXT_HI, false)
 	_draw_text("A / D    转向", Vector2(right, 270), 16, Palette.TEXT_HI, false)
 	_draw_text("鼠标瞄准 · 左键开火", Vector2(right, 300), 16, Palette.TEXT_HI, false)
+	## v3.38：滚轮缩放读数。右 HUD 原键位块是 300 / 330 / 360，
+	## 缩放行接到 390，「战斗期禁止改装」从 410 下推到 430 ——
+	## 430 + 14 px 字高仍在镜像面板（`SURVIVAL_MIRROR_RECT` 从 y=436 开始）之上，不重叠。
 	_draw_text("R        重开 run", Vector2(right, 330), 16, Palette.TEXT_HI, false)
 	_draw_text("Esc      返回主菜单", Vector2(right, 360), 16, Palette.TEXT_HI, false)
-	_draw_text("战斗期禁止改装", Vector2(right, 410), 14, Palette.ACCENT_AMBER, false)
+	_draw_text("滚轮缩放 · Z 复位  %.2f×" % _camera_zoom, Vector2(right, 390), 14, Palette.ACCENT_CYAN, false)
+	_draw_text("战斗期禁止改装", Vector2(right, 428), 14, Palette.ACCENT_AMBER, false)
 	_draw_survival_mirror()
 	_draw_battle_status(_status_message)
 

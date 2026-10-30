@@ -4,7 +4,7 @@
 
 玩家在网格上从零搭一台坦克：先铺**平台**，再挂**行进机构**，最后堆**功能模块**。炮弹不是凭空出现的——它要被**制造、被输送、被装填**，所以「内部物流布局」和「外形武器」同样重要。打掉对手一段甲板，可能让他的整条弹药管路失效。
 
-> **当前状态：可运行的实现原型，尚未发布。** 核心玩法（建造 / 物理 / 弹药网络 / 战斗结算 / AI / 波次生存）均已实现并有 21 项自动化 smoke 测试覆盖；**Windows release exe 已能一键构建并已 headless 实跑通过**（见「构建 release exe」）。**真人试玩由用户持续进行**（本项目几乎所有缺陷与需求都来自用户实机试玩）；**AI 侧的验证手段是 headless 测试 + 脚本驱动截图 + 像素比对**，不是人工试玩。**没有产出过任何 APK**。
+> **当前状态：可运行的实现原型，尚未发布。** 核心玩法（建造 / 物理 / 弹药网络 / 战斗结算 / AI / 波次生存）均已实现并有 23 项自动化 smoke 测试覆盖；**Windows release exe 已能一键构建并已 headless 实跑通过**（见「构建 release exe」）。**真人试玩由用户持续进行**（本项目几乎所有缺陷与需求都来自用户实机试玩）；**AI 侧的验证手段是 headless 测试 + 脚本驱动截图 + 像素比对**，不是人工试玩。**没有产出过任何 APK**。
 
 ---
 
@@ -79,6 +79,8 @@
 | **鼠标左键** | 开火（`空格` 为备选） |
 | `P` | 暂停 / 继续（仅对战页） |
 | `R` | 重开 |
+| **鼠标滚轮** | 缩放战场（0.5×–4.0×，步进 1.15） |
+| `Z` | 缩放复位到 1.0× |
 | `Esc` | 逐层返回 |
 
 ### 建造 / 改装
@@ -118,9 +120,11 @@ godot --path .
 godot --path . -- --capture=out.png --screen=survival --steps=420 --cursor=960,540
 ```
 
-`--screen` 可取：`drive` / `match` / `survival` / `survival_levelup` / `survival_shop` / `survival_summary` / `survival_modify`。
+`--screen` 可取：`drive` / `build` / `match` / `survival` / `survival_levelup` / `survival_shop` / `survival_summary` / `survival_modify`。
 
-`--steps=N` 预热固定步数（让画面可复现），`--cursor=x,y` 把鼠标钉到指定设计坐标（`--capture` 路径本身不产生鼠标事件）。
+`--steps=N` 预热固定步数（让画面可复现），`--cursor=x,y` 把鼠标钉到指定设计坐标（`--capture` 路径本身不产生鼠标事件），`--zoom=<倍数>` 钉住战斗页的相机倍数（夹在 0.5–4.0，没有它就只能拍到 1.0×），`--blueprint=<res:// 路径>` 在进页面前把指定蓝图读进 `builder`。
+
+**`--capture` 必须不带 `--headless`**：`_capture_next_frame()` 依赖 `await RenderingServer.frame_post_draw`，而 headless display server **不发这个信号**，于是 `CAPTURE_OK` 不打印、文件不生成，进程跑到 `--quit-after` 自然退出（看起来像「钩子没被调用」）。加 `--quit-after <帧数>` 自动退出，**单位是帧不是秒**（试驾页 1200 帧够，生存 / 对局页 1600 帧够）。
 
 ### 构建 release exe
 
@@ -154,7 +158,7 @@ build_release.bat
 
 ## 测试
 
-22 项 smoke，全部 headless、无外部依赖：
+23 项 smoke，全部 headless、无外部依赖：
 
 ```bash
 godot --headless --path . --script res://tests/ammo_combo_smoke.gd
@@ -184,6 +188,7 @@ godot --headless --path . --script res://tests/ammo_combo_smoke.gd
 | `pipe_geometry_smoke.gd` | `PIPE_GEOMETRY_OK` |
 | `conveyor_showcase_smoke.gd` | `SHOWCASE_OK` |
 | `cannon_view_smoke.gd` | `CANNONVIEW_OK` |
+| `camera_zoom_smoke.gd` | `CAMERA_OK` |
 
 > `perf_smoke` 只断言 **p99 / max**，**刻意不断言平均**——平均会掩盖长尾卡顿。阈值由反向对照校准（关掉加速后 `PERF_FAIL count=3`），详见 `docs/design.md` §11.4.2.14。
 >
@@ -193,6 +198,8 @@ godot --headless --path . --script res://tests/ammo_combo_smoke.gd
 >
 > `conveyor_showcase_smoke` 读入 `data/blueprints/conveyor_showcase.json`（专门为看管道做的展示车），断言六种管道齐备、每个管道件都有非空中心线、`connected_sides()` 同时产出「接上」与「没接上」两种端口，然后驱动 600 个 tick，断言「汇流类里 forward 弹药的 `exit_port` 永远非空」「段内 / 段末 / 阻塞三态都观察到」「至少投递成功一次」。**它守的是一个曾经会撒谎的字段**：`exit_port` 早期把「下游现在能不能收」也当判据，管道一满就变空串，画面上弹头立刻失去方向。详见 `docs/design.md` §11.4.2.16。
 > `cannon_view_smoke` 对炮管做 57 条断言：**实时指向的逆换算**（钩子算出的局部角加回车体朝向必须精确等于 `muzzle_dir()` 的世界角，四个不同 `heading` 各测一遍，并带一条**反向对照**证明「不减朝向」会错）；`aim_steps` 是「是不是炮管」的唯一判据（带「有 `caliber` 但不是炮管」的反例）；三条几何不变量（制退器必须跨过半格点、管身长细比 `>= 3.0`）；`mouth_offset()` 的尺寸补偿只拉长不缩短；`_cannon_key()` 唯一性。**它还有一条直接审查 `main.gd` 非注释代码行的断言**——因为 v3.37 那个「炮管被甩到车身之外」的缺陷是**平移**错、所有方向都对，纯几何断言根本抓不到；这条断言已做**两次负向验证**（把 bug 放回去必报 `offset_no_second_centroid_subtract`）。详见 `docs/design.md` §11.4.2.17。
+>
+> `camera_zoom_smoke` 对战斗场景相机做 **149 条断言**：`camera_rect(arena, 任意 focus, 1.0)` 必须返回**同一个 `Rect2`**（不是等值，这是默认像素不变的构造性保证）；`camera.size == arena.size / zoom`；放大时相机完全包含于竞技场、缩小时中心与竞技场中心重合；7 个 zoom × 6 个世界点的 `to_screen → to_world` 往返一致；相机中心恒映射到视图中心；`fit_scale(view, camera) == fit_scale(view, arena) * zoom`；步进上下界夹取；一条**负向对照**（用「无相机」旧换算比同一屏幕点，zoom=2 时差 > 1.0 px、zoom=1 时完全相等）；真实 `TankBody` + `CannonBank` 在 4 个 zoom 下的瞄准精度。**它还有一条直接审查 `main.gd` 源码的断言**：`_aim_with_mouse()` 必须把 `camera` 传给 `_aim_player_cannons()`，**不能只传 `arena`** —— 否则绘制用一个 zoom、瞄准用另一个，正是 v3.37 那类「两套推导」；该断言已做**负向验证**（换成 `arena` 立即报 `aim_wiring_passes_camera`）。详见 `docs/design.md` §11.4.2.18。
 >
 
 另有语法检查（不会执行脚本）：
@@ -214,7 +221,7 @@ TankCraft/
 ├── project.godot            # 引擎配置（Godot 4.7.2 / GL Compatibility / 启动最大化）
 ├── scenes/main.tscn         # 唯一场景（单场景架构，禁止 change_scene）
 ├── scripts/                 # 21 个 .gd
-│   ├── main.gd              # 单场景外壳：所有页面、输入分发、绘制（上帝类，4196 行 / 210 KB）
+│   ├── main.gd              # 单场景外壳：所有页面、输入分发、绘制（上帝类，4394 行 / 221.6 KB）
 │   ├── grid_builder.gd      # 三层网格建造与校验
 │   ├── tank_body.gd         # 坦克运动解算与逐格碰撞
 │   ├── ammo_network.gd      # 弹药网络调度（20 Hz 独立步进）
@@ -224,7 +231,7 @@ TankCraft/
 │   ├── duel.gd              # 对局装配与事件分发
 │   ├── bot_ai.gd            # 机器人 AI
 │   ├── survival_run.gd      # 波次生存状态机
-│   ├── combat_view.gd       # 可复用战斗视图（三页共用）
+│   ├── combat_view.gd       # 可复用战斗视图（三页共用；含相机矩形、缩放与几何裁剪，32.6 KB）
 │   ├── pipe_view.gd         # 管道几何与绘制（建造/改装页 + 三个战斗页共用，全静态）
 │   ├── cannon_view.gd       # 炮管几何与绘制（座圈/管身/炮口，四页共用，全静态）
 │   ├── module_defs.gd / data_registry.gd / data_validator.gd
@@ -237,7 +244,7 @@ TankCraft/
 │   ├── arenas/              # 3 张竞技场
 │   ├── blueprints/          # 17 个：12 张 Bot 蓝图 + Boss + 1 张无效示例 + 1 张管道展示车 + 2 张炮管验证车
 │   └── globals.json
-├── tests/                   # 22 个 smoke
+├── tests/                   # 23 个 smoke
 └── docs/
     ├── design.md            # 设计文档（机制、数值、架构、ADR）
     └── roadmap.md           # 里程碑与实时状态
@@ -278,7 +285,8 @@ TankCraft/
 - **真人试玩一直在进行，由用户执行。** 本项目的工作方式是「用户试玩发现 → AI 定位修复」，几乎所有缺陷与需求变更都来自用户实机试玩（UI 分叉、生存模式卡顿、准星错位、标题重叠、炮弹无伤害、转向难控……）。**AI 侧的验证手段是** headless 测试 + 脚本驱动截图 + 像素比对，**不包含人工试玩**——这两件事不能混为一谈。具体到某一项改动，可以说「尚未经过用户实机确认」，但不能说「没有人玩过」。
 - **从未在 Android 设备上验证过任何内容，且不存在任何 APK。** 导出预设已写入工程，但本机缺导出模板与 Android SDK。
 - **移动端触屏只有设计、代码零实现。**
-- **`main.gd` 是上帝类**（3924 行 / 194 KB），按页面拆分被明确搁置。
+- **`main.gd` 是上帝类**（4394 行 / 221.6 KB），按页面拆分被明确搁置。
+- **战斗页相机不能旋转、不能拖拽平移。** 滚轮缩放范围 0.5×–4.0×（步进 1.15，`Z` 复位），焦点恒跟随玩家车（未缩放时是竞技场中心）。缩小到 0.5× 时一格只有 4.75 屏幕像素——「看得到」但不「看得清」，这是像素预算限制。另外**`zoom` 不进存档、不是设置项**，切页会复位成 1.0×。
 - **四通单源接两出口只喂一侧**——这是设计语义（直通优先），不是缺陷，但**没有 UI 说明**。
 - **改进器容量是设计值**：mk1 最多同时容纳 2 发（1 加工 + 1 排队），其余在上游管道排队，不是阻塞。
 - **生存模式高波次仍偶发超预算**：wave12 有约 **36/900 步（4%）**单步超过 16.67 ms（p99 19.0 / max 21.7 ms）。碰撞层已从 O(n²) 改为空间分桶（`docs/design.md` §11.4.2.14），但补兵时 `spawn_enemy_us` 仍有 2.6–10.7 ms 的单帧尖峰；而且**只测了逻辑层，绘制层未测**。
