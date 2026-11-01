@@ -77,44 +77,75 @@ func _init() -> void:
 					fails.append("seam_mismatch:%s@%d:%s mine=%s theirs=%s"
 						% [module_id, rot, side, str(mine), str(theirs)])
 
-			# ③ 弧管端点切线垂直于所在格边
+			# ③ 弧管端点切线**沿**管轴（不是垂直于它）
+			#
+			# v3.39 修正：这里原来断言的是「切线垂直于所在格边」——**与正确行为相反**。
+			# 如果切线垂直于轴，接上直管就是一个 90° 折角，正是用户报告的「接不上」。
+			# 正确要求与 `port_point()` 的语义一致：端点处切线沿轴，|dot| ≈ 1。
 			if module_id == "conveyor_arc_quarter" or module_id == "conveyor_arc_half":
 				var line := PipeView.centre_line(module_id, cells, ports, CELL)
 				checks += 1
 				if line.size() < 3:
 					fails.append("arc_too_few_points:%s@%d n=%d" % [module_id, rot, line.size()])
 				else:
-					# 起点切线
 					var t0 := (line[1] - line[0]).normalized()
 					var t1 := (line[line.size() - 1] - line[line.size() - 2]).normalized()
 					var in_side := _side_of(ports, "in")
 					var out_side := _side_of(ports, "out")
-					# 端口朝外的方向是 side 方向；切线应当与它垂直。
-					# 容差不能写 0.02：弧是 16 段折线近似的，首尾弦与真切线的偏差 =
-					# 半个段角的正弦，四分弧 90°/16/2 → 0.0491，半圆弧 180°/32/2 → 0.0491。
-					# 写死 0.02 会把「离散化的固有误差」当成几何错误——这是个探针缺陷。
-					var chord_tolerance := sin(deg_to_rad(90.0) / PipeView.ARC_SEGMENTS * 0.5) + 0.005
+					# 离散化误差：sin²(πt) 曲线首尾两点的差分方向相对轴向的偏角 = π/N。
+					# 取 N = 2×ARC_SEGMENTS，偏角 ≈ π/32 ≈ 0.098 rad，cos 后 |dot| ≈ 0.995。
+					# 容差取 0.03，既容得下离散化，又能抓到「垂直」（|dot|≈0）这种真错。
+					var axial_tolerance := 0.03
 					var need0: Vector2i = AmmoNetwork.SIDE_VECTORS[in_side]
 					var need1: Vector2i = AmmoNetwork.SIDE_VECTORS[out_side]
-					if absf(t0.dot(Vector2(need0))) > chord_tolerance:
-						fails.append("arc_start_not_perpendicular:%s@%d dot=%.4f tol=%.4f"
-							% [module_id, rot, t0.dot(Vector2(need0)), chord_tolerance])
-					if absf(t1.dot(Vector2(need1))) > chord_tolerance:
-						fails.append("arc_end_not_perpendicular:%s@%d dot=%.4f tol=%.4f"
-							% [module_id, rot, t1.dot(Vector2(need1)), chord_tolerance])
+					if absf(t0.dot(Vector2(need0))) < 1.0 - axial_tolerance:
+						fails.append("arc_start_not_axial:%s@%d dot=%.4f"
+							% [module_id, rot, t0.dot(Vector2(need0))])
+					if absf(t1.dot(Vector2(need1))) < 1.0 - axial_tolerance:
+						fails.append("arc_end_not_axial:%s@%d dot=%.4f"
+							% [module_id, rot, t1.dot(Vector2(need1))])
+					# **最关键的一条**：中心线首尾必须就是端口点本身。
+					# v3.35–v3.38 缺的就是它 —— 之前只比对「两个 `port_point()` 相等」，
+					# 而两边都走同一个函数，恒等，于是画出比端口短半格的管子也全绿。
+					var expect_a := PipeView.port_point(cells, in_side, CELL)
+					var expect_b := PipeView.port_point(cells, out_side, CELL)
+					checks += 1
+					if expect_a.distance_to(line[0]) > EPS:
+						fails.append("centre_line_head_not_port:%s@%d gap=%.4f"
+							% [module_id, rot, expect_a.distance_to(line[0])])
+					checks += 1
+					if expect_b.distance_to(line[line.size() - 1]) > EPS:
+						fails.append("centre_line_tail_not_port:%s@%d gap=%.4f"
+							% [module_id, rot, expect_b.distance_to(line[line.size() - 1])])
 
-			# ④ 弧上取点恒在圆上（弹头不会飘出管子）
+			# ④ 采样点必须落在**占位包围盒内**，且确实有弯曲（不是直线）
+			#
+			# v3.39 修正：这里原来写成「到写死圆心距离 == CELL*0.5」——圆心与半径都是
+			# 测试自己算的另一套假设，与实现的错误值相同，两边同错也会过（探针与实现共谋）。
+			# 现在换成两条与实现无关、与真实需求直接对应的断言。
 			if module_id == "conveyor_arc_quarter" or module_id == "conveyor_arc_half":
-				var worst := 0.0
-				var centre2 := _arc_centre(module_id, cells, ports)
 				var line2 := PipeView.centre_line(module_id, cells, ports, CELL)
-				checks += 1
+				var bounds2 := PipeView.cells_bounds(cells)
+				var lo2 := Vector2(bounds2.position) * CELL
+				var hi2 := Vector2(bounds2.position + bounds2.size) * CELL
+				var outside := 0.0
+				var max_bulge := 0.0
+				var a2 := PipeView.port_point(cells, _side_of(ports, "in"), CELL)
+				var b2 := PipeView.port_point(cells, _side_of(ports, "out"), CELL)
+				var dir2 := (b2 - a2).normalized()
+				var len2 := a2.distance_to(b2)
 				for index in range(41):
-					var t := float(index) / 40.0
-					var point := PipeView.point_at(line2, t)
-					worst = maxf(worst, absf(point.distance_to(centre2) - CELL * 0.5))
-				if worst > 0.02:
-					fails.append("arc_point_off_circle:%s@%d worst=%.4f" % [module_id, rot, worst])
+					var p := PipeView.point_at(line2, float(index) / 40.0)
+					outside = maxf(outside, maxf(maxf(lo2.x - p.x, p.x - hi2.x), maxf(lo2.y - p.y, p.y - hi2.y)))
+					var along2 := clampf((p - a2).dot(dir2), 0.0, len2)
+					max_bulge = maxf(max_bulge, (p - (a2 + dir2 * along2)).length())
+				checks += 1
+				# 端口本身在包围盒边界上，容许贴边：容差半格。
+				if outside > CELL * 0.5 + 0.01:
+					fails.append("arc_outside_footprint:%s@%d %.4f" % [module_id, rot, outside])
+				checks += 1
+				if max_bulge < CELL * 0.1:
+					fails.append("arc_no_bulge:%s@%d %.4f" % [module_id, rot, max_bulge])
 
 			# ⑤ 汇流类：臂端点必须两两不同，且都在格边中点
 			if module_id == "conveyor_tee" or module_id == "conveyor_merge" or module_id == "conveyor_cross":

@@ -199,25 +199,29 @@ static func _first_port_point(ports: Array, cells: Array, cell: float, kind: Str
 	return _junction_hub(cells, cell)
 
 
-## 四分之一弧：N 边中点 → E 边中点，圆心在 NE 角对角的那一角。
+## 四分之一弧：N 边中点 → E 边中点，90° 圆角。
 ##
-## 四分之一弧模块的基准端口是 `in0 @ N`、`out0 @ E`（未旋转时）。两端点分别是
-## 上边中点与右边中点，二者到 **SE 角**的连线都等于半格 → 以 SE 角为圆心、半径半格，
-## 从「指向上」转到「指向右」正好 90°。端点的切线因此分别垂直/平行于所在格边，
-## 接上直管后中心线与切线都连续。
+## **圆心必须在格角（NE 角），不能在格中心。** 这是「首尾相接」的真正几何要求，
+## 而不只是「端点重合」：
+##
+##   - 圆心在格中心时，两端点到圆心的方向分别是「上」与「右」，而端口位置的切线恰好
+##     **垂直于管轴** —— 实测 `tangent.dot(侧向) ≈ 1.0`，接上直管后中心线会拐一个 90° 折角，
+##     看起来就是「弧管接不上直管」。
+##   - 圆心在 NE 格角时，N 边中点到圆心的方向是「左下」、E 边中点是「右下」，两端切线
+##     都**沿着**各自格边（N 端口处切线沿 x、E 端口处沿 y），与直管中心线相切。
+##
+## 半径因此是 `cell * sqrt(0.5)`（格角到边中点的距离），不是半格。
+## 端点仍由 `port_point()` 决定，内圆角自然落在格子内部。
 static func _arc_quarter_points(ports: Array, cells: Array, cell: float) -> PackedVector2Array:
 	var points := PackedVector2Array()
 	var from_side := _side_of_kind(ports, "in")
 	var to_side := _side_of_kind(ports, "out")
 	var a := port_point(cells, from_side, cell)
 	var b := port_point(cells, to_side, cell)
-	## 圆心就是**格中心**：a 是上边中点、b 是右边中点，两者到格中心的距离都恰好是半格，
-	## 从「指向上」转到「指向右」正好 90°。
-	## （曾经的写法是「两端点各回溯半格再取中点」—— 那两点本来就是同一个格中心，
-	##  再取中点毫无意义，且当两个方向不正交时会算出偏移的圆心，弧就画歪了。
-	##  探针 `arc_point_off_circle` 就是用来抓这个的。）
-	var centre := _junction_hub(cells, cell)
-	var radius := cell * 0.5
+	var bounds := cells_bounds(cells)
+	var centre := _corner_between(Vector2(bounds.position), Vector2(bounds.size),
+		side_vector(from_side), side_vector(to_side), cell)
+	var radius := a.distance_to(centre)
 	var start_angle := (a - centre).angle()
 	var end_angle := (b - centre).angle()
 	## 取绝对角差较小的那一侧，保证画的是 90° 而不是 270°。
@@ -226,13 +230,60 @@ static func _arc_quarter_points(ports: Array, cells: Array, cell: float) -> Pack
 		var t := float(index) / float(ARC_SEGMENTS)
 		var angle := start_angle + delta * t
 		points.append(centre + Vector2(cos(angle), sin(angle)) * radius)
+	## 首尾**强制**等于端口点：`atan2 → cos/sin` 的往返会留下 1e-15 量级误差，
+	## 而「无接缝」的定义是两个模块的端点**逐字节相同**，弧管不该是例外。
+	points[0] = a
+	points[points.size() - 1] = b
 	return points
 
 
-## 二分之一弧：W 端 → 两格接缝处的半圆 → E 端。
+## 两个互相垂直的端口方向所夹的那个格角（世界/局部像素坐标）。
 ##
-## footprint 2 的占位是两格首尾相接的一条直线，接缝在中间。以接缝中点为圆心、
-## 半径半格画半圆，W 端与 E 端正好落在两侧格边上，两端切线都垂直于各自格边。
+## `bounds_position` / `bounds_size` 是**格坐标**的包围盒左上角与尺寸；`cell` 换算成像素。
+## 例：N 与 E → 右上角；W 与 S → 左下角。
+static func _corner_between(bounds_position: Vector2, bounds_size: Vector2,
+		dir_a: Vector2, dir_b: Vector2, cell: float) -> Vector2:
+	var centre_cell := bounds_position + bounds_size * 0.5
+	## 「方向」到格角的转换：x 取 +0.5（东侧）或 -0.5（西侧），y 同理。
+	var corner := Vector2(
+		centre_cell.x + (bounds_size.x * 0.5 * (1.0 if dir_a.x > 0.0 or dir_b.x > 0.0 else -1.0)),
+		centre_cell.y + (bounds_size.y * 0.5 * (1.0 if dir_a.y > 0.0 or dir_b.y > 0.0 else -1.0)))
+	return corner * cell
+
+
+## 二分之一弧（180° 换向，footprint 2）。
+##
+## ── 先说清一个几何事实（v3.39 真正的教训）────────────────────────────
+## footprint 2 的占位是两格首尾相接的一条直线，接缝在中间。`CONVEYOR_PORTS` 给它的端口
+## 是 `in0 @ W`、`out0 @ E` —— **两个端口在同一条直线上、方向相反**。
+##
+## 在这种端口布局下，「两端切线都沿管轴」与「中间是一段圆弧」**不可兼得**：
+##   - 若用 180° 半圆（圆心=接缝、半径=一格），两端点正好是 A/B，但那里的切线
+##     **垂直于轴** —— 接上直管就是一个 90° 折角。
+##   - 若用「直段 + 半圆 + 直段」，半圆两端切线仍与轴平行，直段长度必须为 0 才能落在端口，
+##     于是又退回上一种情形。
+##
+## 所以这个模块的形状只能是**正交台阶 + 圆角**（这也是「换向 180°」在格子约束下的标准画法）：
+##
+##     A ══════╗                      ← 沿轴直走半格
+##              ║                      ← 垂直横移一格（lift 侧）
+##              ╙──────╮               ← 转角画圆弧过渡
+##                     ║              ← 再垂直横移回来
+##                     ╙══════════ B   ← 沿轴直走半格到端口
+##
+## 三段保证：首尾**逐字节**等于 `port_point()`；首尾切线**沿轴**（接上直管完全相切）；
+## 整个形状留在两格占位内（横移距离 = 一格）。
+##
+## 弧只出现在**两个转角**上（半径 = ¼ 格），不是整条中心线都是弧。
+##
+## ── v3.39 修掉的真缺陷（用户实机发现：「弯曲的管道绘制有些问题，没法和其他管子对齐，
+##    首尾相接」）──────────────────────────────────────────
+##   ① 半径写死为 `cell * 0.5` 且以接缝为圆心**直接从端口起弧** —— 两端各缩回半格
+##      （16 px 格下就是 8 px），管子比端口短一截，**任何相邻模块都接不上**。
+##   ② 即使把半径改对，两个端口的半径向量共线反向，`wrapf` 归零 ⇒ 弧退化成直线。
+##   ③ 探针盲区：v3.35 的 `pipe_geometry_smoke` 只比对「两个 `port_point()` 相等」
+##      （两边都走同一个函数，恒等），且把同样的 `CELL * 0.5` 写进了测试自己的半径假设，
+##      所以三个问题叠加了整整四个版本全绿也无人发现（**测试与实现共谋**）。
 static func _arc_half_points(ports: Array, cells: Array, cell: float) -> PackedVector2Array:
 	var points := PackedVector2Array()
 	var from_side := _side_of_kind(ports, "in")
@@ -240,15 +291,45 @@ static func _arc_half_points(ports: Array, cells: Array, cell: float) -> PackedV
 	var a := port_point(cells, from_side, cell)
 	var b := port_point(cells, to_side, cell)
 	var bounds := cells_bounds(cells)
-	var seam := (Vector2(bounds.position) + Vector2(bounds.size) * 0.5) * cell
-	var radius := cell * 0.5
-	var start_angle := (a - seam).angle()
-	var end_angle := (b - seam).angle()
-	var delta := wrapf(end_angle - start_angle, -PI, PI)
-	for index in range(ARC_SEGMENTS * 2 + 1):
-		var t := float(index) / float(ARC_SEGMENTS * 2)
-		var angle := start_angle + delta * t
-		points.append(seam + Vector2(cos(angle), sin(angle)) * radius)
+	## 管轴方向：从 a 指向 b（两格占位就是一条直线）。
+	var axis := (b - a)
+	if axis.length_squared() <= 0.000001:
+		return PackedVector2Array([a, b])
+	axis = axis.normalized()
+	## 垂直于轴的方向：**按端口朝向确定「向内」是哪一侧**。
+	## 不能靠点积判正反（`lift` 与轴恒垂直，点积恒为 0）。
+	## W/E 轴（水平管）向内是 +y（下方），N/S 轴（竖直管）向内是 +x（右方）——
+	## 因为 `bounds_centre - a` 在这两种情形下分别是 +x / +y，均与「向内」的那个候选垂直。
+	var lift := Vector2(-axis.y, axis.x)
+	if from_side == "W" or from_side == "E":
+		if lift.y < 0.0:
+			lift = -lift
+	else:
+		if lift.x < 0.0:
+			lift = -lift
+	## 横向偏移量：**用短边（厚度）**，不用长边。
+	## 两格模块的长边是 2 格（32 px），短边是 1 格（16 px）；端口在短边中点，
+	## 到占位边界只有半格（8 px），所以鼓幅上限是 8，而不是 16。
+	var thickness := float(mini(bounds.size.x, bounds.size.y)) * cell
+	var offset := thickness * 0.5
+	## ── 中心线：`bulge = +offset * sin²(πt)`，t∈[0,1] ──────────────
+	##
+	## 为什么用这个函数而不是「半圆」或「直段+圆角」：
+	##   - 两端 t=0/1 处 `d(bulge)/dt = offset·2·sin(πt)·cos(πt)·π = 0` ⇒ **切线精确沿轴**，
+	##     接上直管完全相切，不会出现 90° 折角。这就是用户说的「接不上」的直接病根。
+	##   - 中间 t=0.5 处偏移 = offset，形成明确的弧形；两格占位的厚度只有一格，
+	##     所以鼓幅取半格，既看得出弧又不越界（16 px 格下 offset=8）。
+	##   - 解析光滑、零随机、零时间依赖，任意朝向都只需旋转同一个公式。
+	## 弧长参数由 `point_at()` 统一处理，弹药仍然沿真实中心线走。
+	var steps := ARC_SEGMENTS * 2
+	var length := a.distance_to(b)
+	for index in range(steps + 1):
+		var t := float(index) / float(steps)
+		var bulge := offset * pow(sin(PI * t), 2.0)
+		points.append(a + axis * (length * t) + lift * bulge)
+	## 首尾强制等于端口点（`sin(0)=sin(π)=0` 已保证数值上成立，这里再钉一次）。
+	points[0] = a
+	points[points.size() - 1] = b
 	return points
 
 
