@@ -93,25 +93,31 @@ const AIM_RETICLE_CROSS := 5.0
 ## 让管形在任何缩放与任何队伍色下都读得出来；血量状态由部件主色（`hull_damage_colour`）表达，
 ## 不再让透明度也参与表达 —— 否则被打残的炮管会直接看不见。
 const CANNON_BATTLE_ALPHA := 0.9
-## v3.38：战斗场景鼠标滚轮缩放。
+## 【v3.40 重做】战斗场景相机推拉（鼠标滚轮）。
 ##
-## `zoom` 是相机的**倍数**，不是像素比例：最终传给 `to_screen` 的比例是 `fit_scale(view, camera)`，
-## 而 `camera.size = arena.size / zoom` 会自动把基准比例抬到 `fit * zoom`。
-## 所以 `zoom == 1.0` 时的 `camera` **就是 `arena` 本身**（`camera_rect()` 直接返回入参，不做乘除），
-## 默认像素与 v3.37 逐字相同。
+## v3.38 的模型是「相机矩形 = 竞技场 ÷ 倍数」，于是倍数 < 1 时相机**比地图还大**：
+## 实测 0.5x 时相机 4096×2304、视图里 **75% 是空白的**，整张地图缩成中间一个小方块。
+## 那不像相机，像把地图在桌子上缩放——用户的反馈「很多问题」就是从这里来的。
 ##
-## 范围 0.5–4.0：
-##   0.5 —— 视野 2 倍宽（4096 世界像素 > 竞技场宽 2048），整张地图缩到中间、四周留背景网格，
-##           这是「退远看全貌」的上限；再往外就只剩空白了。
-##   4.0 —— 一格从 9.5 屏幕像素变成 38 px，6×4 的车 228×152 px，接近建造页（32 px 格）的可读度，
-##           这是「清楚看到坦克细节」的下限；再往里 HUD 相对比例就失调了。
-const CAMERA_ZOOM_MIN := 0.5
-const CAMERA_ZOOM_MAX := 4.0
-## 每格滚轮乘/除的倍数。从 0.5 到 4.0 恰好 log(8)/log(1.15) ≈ 14.6 格，
-## 手感连续又不至于「滚半天还没放大」。
+## 现模型：状态是**相机距离**（视野覆盖的世界高度，px），只在两个真实端点之间推拉：
+##   最远 = `arena.size.y`（整图恰好铺满视野，零空白、零乘除 ⇒ 与 v3.37 默认画面逐字节相同）
+##   最近 = 一格 38 屏幕像素（与建造页 32 px 格同等级的可读度）
+## 相机**永远不超出地图**，滚轮是推拉而不是「把地图缩放」，并且有指数平滑过渡。
+const CAMERA_MAG_MAX := 4.0
+## 近端点就是 `CAMERA_MAG_MAX`：相机高 `arena.size.y / 4 = 288`，
+## 于是 `16 世界像素/格 × 684 视图高 / 288 = 38 屏幕像素/格` —— 
+## 与建造页的 32 px 格同等级的可读度。**不再另定义一个 `CELL_PX` 常量**，
+## 否则同一件事有两处定义，迟早只改到一处。
+## 每格滚轮推拉一档。从 1.00× 到 4.00× 恰好 `log(4)/log(1.15) ≈ 9.6` 档，
+## 每格滚轮推拉一档。从 1.00× 到 4.00× 恰好 `log(4)/log(1.15) ≈ 9.6` 档，
+## 手感连续又不至于「滚半天还没拉近」。
 const CAMERA_ZOOM_STEP := 1.15
-## 相机跟随玩家车的平滑系数（每秒）。焦点用 `1 - exp(-k·dt)` 插值，
-## 与帧率无关；`dt` 走固定步长累加的 `_time`，不用 `randf`、不依赖引擎 delta。
+## 相机距离的平滑系数（每秒）。用 `1 - exp(-k·dt)` 插值到目标距离；
+## 与帧率无关，且不用 `randf`、不依赖引擎 delta。
+const CAMERA_DIST_FOLLOW := 7.0
+## 相机跟随玩家车的平滑系数（每秒）。**只在真正拉近之后生效** ——
+## 拉到整图时视野已经盖住全图，焦点对画面零影响，而且必须不追焦，
+## 否则「从未推拉过」的截图路径会因焦点漂移改变像素。
 const CAMERA_FOCUS_FOLLOW := 9.0
 
 var definitions: ModuleDefs
@@ -172,6 +178,10 @@ var _capture_steps := -1
 ## `--cursor=x,y`：把设计坐标下的鼠标位置钉到指定点，供截图探针验证准星绘制（v3.25）。
 ## 不加这个参数时保持 `_mouse_position` 原值，**历史基线截图逐字节不变**。
 var _capture_cursor := Vector2.INF
+## `--zoom=x`：相机读数（1.00 = 整图，越大越近）。NaN 表示「没传」，
+## 此时相机保持最远，**历史基线截图逐字节不变**。
+## 不能在解析循环里当场应用 —— `--zoom=` 可能出现在 `--screen=` 之前，那时竞技场还没建好。
+var _capture_zoom := NAN
 var tank: TankBody
 var bank: CannonBank
 var field: ProjectileField
@@ -198,13 +208,16 @@ var _drive_expires: Array = []
 ## 之前试驾页完全没有这一层——打中了屏幕上除了弹坑什么都没有。
 var _drive_hit_flash_at := Vector2.ZERO
 var _drive_hit_flash_left := 0.0
-## v3.38：战斗场景鼠标滚轮缩放状态。**三个页共一份** —— 同一时刻只在一个战斗页上，
-## 但切页时必须复位，否则上一页的放大倍数会带到下一页（也会让截图基线不可复现）。
-var _camera_zoom := 1.0
+## v3.40：相机状态 = **当前距离**（世界高，px）+ **目标距离**（滚轮写它，每帧插值过去）。
+## 三个页共用一份 —— 同一时刻只在一个战斗页上，但切页必须复位，
+## 否则上一页的推拉程度会带到下一页（也会让截图基线不可复现）。
+## `_camera_dist` 的初值在 `_set_screen()` 里置为 `-1.0`（= 未初始化），
+## 第一次用到时才取「最远」，因为此时才确定是哪个竞技场。
+var _camera_dist := -1.0
+var _camera_dist_target := -1.0
 ## 相机焦点的**当前值**与**目标值**（世界坐标）。目标 = 玩家车中心；
 ## 当前值每帧向目标插值，避免坦克一动镜头就硬跳。
-## `zoom == 1.0` 时焦点不是 `arena` 中心，`_battle_camera()` 会直接返回 `arena`，
-## 所以这两个值在不缩放时对像素零影响。
+## **拉到整图时这两个值对像素零影响**（`camera_at_height()` 直接返回 `arena`）。
 var _camera_focus := Vector2.ZERO
 var _camera_focus_ready := false
 ## 调试辅助：打开后车体按**模块种类**上色（试驾页 v3.33 之前的旧配色）。
@@ -445,9 +458,11 @@ func _set_screen(next_screen: String) -> void:
 	_hover_tool_index = -1
 	_hover_layer_index = -1
 	_focus_rail_y = _focus_target_y()
-	## v3.38：切页必须把相机退回默认。否则上一页的放大倍数会带到下一页，
+	## v3.40：切页必须把相机退回「最远 / 整图」。否则上一页的推拉程度会带到下一页，
 	## 也会让同一组 `--capture` 参数因为上一次操作残留而拍出不同画面。
-	_camera_zoom = 1.0
+	## 置 `-1.0` = 「未初始化」，第一次取相机时才按当前竞技场填值。
+	_camera_dist = -1.0
+	_camera_dist_target = -1.0
 	_camera_focus_ready = false
 	_camera_focus = Vector2.ZERO
 
@@ -2643,7 +2658,7 @@ func _draw_match_hud() -> void:
 	_draw_text("W / S    油门", Vector2(right, 260), 16, Palette.TEXT_HI, false)
 	_draw_text("A / D    转向", Vector2(right, 290), 16, Palette.TEXT_HI, false)
 	_draw_text("鼠标瞄准 · 左键开火", Vector2(right, 320), 16, Palette.TEXT_HI, false)
-	_draw_text("滚轮缩放 · Z 复位  %.2f×" % _camera_zoom, Vector2(right, 350), 14, Palette.ACCENT_CYAN, false)
+	_draw_text("滚轮推拉 · Z 整图  相机 %s" % _camera_readout(_battle_arena_now()), Vector2(right, 350), 14, Palette.ACCENT_CYAN, false)
 	_draw_text("P        暂停", Vector2(right, 380), 16, Palette.TEXT_HI, false)
 	_draw_text("R        重开对局", Vector2(right, 410), 16, Palette.TEXT_HI, false)
 	_draw_text("Esc      返回主菜单", Vector2(right, 440), 16, Palette.TEXT_HI, false)
@@ -2660,50 +2675,79 @@ func _draw_match_hud() -> void:
 	else:
 		_draw_battle_status(_status_message)
 
-## ===== 战斗场景相机（v3.38）：鼠标滚轮缩放 =====
+## ===== 战斗场景相机（v3.40）：鼠标滚轮推拉 =====
 ##
-## 相机状态只有两个：`_camera_zoom`（倍数）与 `_camera_focus`（世界焦点）。
-## 相机矩形由 `CombatView.camera_rect(arena, focus, zoom)` 现算 —— **不缓存**，
-## 因为缓存一旦与 arena 不同步，就会出现「画用旧相机、矄准用新相机」。
+## 相机状态是两个距离：`_camera_dist`（当前）与 `_camera_dist_target`（滚轮写它）。
+## 距离 = 视野覆盖的**世界高**（px）：**数值大 = 相机远 = 画面缩小；数值小 = 相机近 = 画面放大**。
+## 这就是用户要的镜头语言（「相机远就缩小，相机近就放大」），而 v3.38 的模型
+## 把「缩小」做成「地图比视野还小」，于是退远时只能看到空白。
 ##
-## `zoom == 1.0` 时 `camera_rect()` **直接返回 `arena`**，于是所有 `to_screen()` 的输入
-## 与 v3.37 逐字相同，默认像素与历史截图基线继续可比。
+## 相机矩形由 `CombatView.camera_at_height(arena, focus, dist)` 现算 —— **不缓存**，
+## 因为缓存一旦与 arena 不同步，就会出现「画用旧相机、准星用新相机」。
+##
+## 距离 >= `arena.size.y` 时 `camera_at_height()` **直接返回 `arena`**，于是所有 `to_screen()`
+## 的输入与 v3.37 逐字相同，默认像素与历史截图基线继续可比。
 func _battle_camera(arena: Rect2) -> Rect2:
 	if arena.size.x <= 0.0:
 		return arena
-	return CombatView.camera_rect(arena, _camera_focus, _camera_zoom)
+	## 未初始化时取「最远 / 整图」—— 此时才确定是哪个竞技场。
+	if _camera_dist < 0.0:
+		_camera_dist = arena.size.y
+		_camera_dist_target = arena.size.y
+	return CombatView.camera_at_height(arena, _camera_focus, _camera_dist)
 
-## 滚轮缩放。`factor` > 1 放大、< 1 缩小；结果夹在 `[CAMERA_ZOOM_MIN, CAMERA_ZOOM_MAX]`。
-## 缩到 1.0 时顺手把焦点重置成竞技场中心（`_camera_focus_ready = false`），
-## 让「刚好回到默认倍数」这一个状态只剩下一种可能取值，方便测试与截图。
+
+## 滚轮推拉。`factor` > 1 拉近（画面放大）、< 1 推远（画面缩小）。
+## **只改目标值**，当前距离每帧指数插值过去 —— 推拉有惯性，不是阶跃。
 func _camera_zoom_by(factor: float) -> void:
-	var next := clampf(_camera_zoom * factor, CAMERA_ZOOM_MIN, CAMERA_ZOOM_MAX)
-	if is_equal_approx(next, _camera_zoom):
+	var arena := _battle_arena_now()
+	if arena.size.y <= 0.0:
 		return
-	_camera_zoom = next
-	if absf(_camera_zoom - 1.0) < 0.000001:
-		_camera_zoom = 1.0
-		_camera_focus_ready = false
-	_set_status("缩放 %.2f×（滚轮调整 · Z 复位）" % _camera_zoom)
+	if _camera_dist_target < 0.0:
+		_camera_dist_target = arena.size.y
+	## 先把目标距离换算成「读数」，再按倍数推拉，最后换回距离：
+	## 这样读数与距离单调对应，且夹在 [1.00, CAMERA_MAG_MAX] 之内。
+	var mag := CombatView.camera_mag(arena, _camera_dist_target)
+	var next := clampf(mag * factor, 1.0, CAMERA_MAG_MAX)
+	var next_dist := CombatView.camera_height_for_mag(arena, next)
+	if is_equal_approx(next_dist, _camera_dist_target):
+		return
+	_camera_dist_target = next_dist
+	_set_status("相机 %s" % _camera_readout(arena))
 	queue_redraw()
 
-## 把相机退回默认：倍数 1.0 + 焦点未就绪。`Z` 键走这条。
-## 直接回 1.0 而不是「反滚十几格」，也不做平滑 —— 复位应当是瞬时且确定的。
+## HUD 读数：`相机 1.00×（整图）` / `相机 2.35×`。
+## 数字是「当前视距相对整图放大了多少倍」，1.00× 就是最远——镜头语言上与推拉一致。
+func _camera_readout(arena: Rect2) -> String:
+	if arena.size.y <= 0.0:
+		return "1.00×"
+	var dist := _camera_dist if _camera_dist > 0.0 else arena.size.y
+	var mag := CombatView.camera_mag(arena, dist)
+	if mag <= 1.0001:
+		return "1.00×（整图）"
+	return "%.2f×" % mag
+
+## 把相机拉回最远（整图）。`Z` 键走这条。
+## 复位把**当前距离与目标距离一起**置回最远，所以是瞬时且确定的 ——
+## 复位不该还要等一段插值动画。
 func _camera_reset_zoom() -> void:
-	if absf(_camera_zoom - 1.0) < 0.000001 and not _camera_focus_ready:
+	var arena := _battle_arena_now()
+	var far := arena.size.y if arena.size.y > 0.0 else 0.0
+	if _camera_dist == far and _camera_dist_target == far and not _camera_focus_ready:
 		return
-	_camera_zoom = 1.0
+	_camera_dist = far
+	_camera_dist_target = far
 	_camera_focus_ready = false
 	_camera_focus = Vector2.ZERO
 	if _screen == SCREEN_DRIVE:
-		_drive_last_event = "缩放 1.00×"
+		_drive_last_event = "相机 1.00×（整图）"
 	elif _screen == SCREEN_MATCH:
-		_match_event = "缩放 1.00×"
+		_match_event = "相机 1.00×（整图）"
 	elif _screen == SCREEN_SURVIVAL:
-		_survival_event = "缩放 1.00×"
+		_survival_event = "相机 1.00×（整图）"
 	queue_redraw()
 
-## 当前战斗页的竞技场（不管有没有缩放）。拿不到时返回空 `Rect2`。
+## 当前战斗页的竞技场（不管相机远近）。拿不到时返回空 `Rect2`。
 ## 抽出来是因为「取焦点目标」与「取相机」需要同一个 arena，而 `_battle_view()`
 ## 会顺带算 scale/camera —— 在只想拿 arena 的地方多算一次没必要。
 func _battle_arena_now() -> Rect2:
@@ -2715,17 +2759,30 @@ func _battle_arena_now() -> Rect2:
 		return _drive_arena
 	return Rect2()
 
-## 相机焦点每帧推进。`delta` 是本帧真实时长（与引擎帧率一致）。
+## 相机每帧推进：距离与焦点。`delta` 是本帧真实时长（与引擎帧率一致）。
 ##
-## 目标优先取玩家车体中心；拿不到就退回竞技场中心。
-## **不缩放时不追焦**（`zoom == 1.0` 直接把焦点标记为未就绪），
-## 于是「从未缩放过」的截图路径不可能因为焦点漂移而改变像素。
+## 顺序有讲究：**先推距离，再算焦点**。距离决定相机多大，相机多大决定焦点能走到哪里；
+## 反过来的话，推拉那一帧的焦点还在按旧距离夹取。
+##
+## **拉到整图时不追焦**（直接把焦点标记为未就绪）：整张地图都在视野里，焦点对画面零影响，
+## 而「从未推拉过」的截图路径绝不可能因为焦点漂移改变像素。
 func _camera_follow(delta: float) -> void:
-	if absf(_camera_zoom - 1.0) < 0.000001:
-		_camera_focus_ready = false
-		return
 	var arena := _battle_arena_now()
-	if arena.size.x <= 0.0:
+	if arena.size.y <= 0.0:
+		return
+	if _camera_dist < 0.0:
+		_camera_dist = arena.size.y
+	if _camera_dist_target < 0.0:
+		_camera_dist_target = arena.size.y
+	## 与帧率无关的指数插值：`1 - exp(-k·dt)`；k=7 时推拉约 0.3 s 到位，有惯性但不黏手。
+	var dist_t := 1.0 - exp(-CAMERA_DIST_FOLLOW * maxf(delta, 0.0))
+	_camera_dist = lerpf(_camera_dist, _camera_dist_target, clampf(dist_t, 0.0, 1.0))
+	## 收到 1e-3 世界像素内就直接吸附：避免永远停在「差一点点」的状态，
+	## 也让「拉到整图」能真正回到恒等分支（那是个位比较，不是近似比较）。
+	if absf(_camera_dist - _camera_dist_target) < 0.001:
+		_camera_dist = _camera_dist_target
+	if _camera_dist >= arena.size.y - 0.000001:
+		_camera_focus_ready = false
 		return
 	var target := _battle_focus_target(arena)
 	if not _camera_focus_ready:
@@ -3177,7 +3234,7 @@ func _draw_drive_hud() -> void:
 	_draw_text("鼠标瞄准 · 左键开火", Vector2(right, hint_y + 52.0), 16, Palette.TEXT_HI, false)
 	## v3.38：三页 HUD 的缩放读数必须一致。试驾页行数最多，因此把行距从 30 收到 26，
 	## 在不压到下方管路状态行的前提下把缩放行插进键位块。
-	_draw_text("滚轮缩放 · Z 复位  %.2f×" % _camera_zoom, Vector2(right, hint_y + 78.0), 14, Palette.ACCENT_CYAN, false)
+	_draw_text("滚轮推拉 · Z 整图  相机 %s" % _camera_readout(_battle_arena_now()), Vector2(right, hint_y + 78.0), 14, Palette.ACCENT_CYAN, false)
 	_draw_text("R        重开试驾 · K 种类高亮", Vector2(right, hint_y + 104.0), 16, Palette.TEXT_HI, false)
 	_draw_text("Esc      返回主菜单", Vector2(right, hint_y + 130.0), 16, Palette.TEXT_HI, false)
 	var supply := "M4 管路：未初始化"
@@ -3296,14 +3353,14 @@ func _handle_capture_request() -> void:
 			if parts.size() == 2:
 				_capture_cursor = Vector2(float(parts[0]), float(parts[1]))
 		elif argument.begins_with("--zoom="):
-			## v3.38 探针参数：把相机倍数钉到指定值。
-			## 为什么必需：`--capture` 路径**不产生任何滚轮事件**，不给钩子就只能拍到 1.0×，
-			## 无法用像素证据证明「放大后细节更清楚 / 缩小后看得更远」。
-			## 这是**测试钩子**，不参与玩法逻辑；夹在 `[CAMERA_ZOOM_MIN, CAMERA_ZOOM_MAX]` 里。
+			## v3.38 探针参数（v3.40 语义改为「相机读数」）：把相机钉到指定倍数。
+			## 为什么必需：`--capture` 路径**不产生任何滚轮事件**，不给钩子就只能拍到整图，
+			## 无法用像素证据证明「拉近后细节更清楚」。
+			## **只记录不应用**：`--zoom=` 可能排在 `--screen=` 之前，那时竞技场还没建好。
+			## 真正的应用在下面的 “`--screen=` 全部处理完” 之后。
 			var raw_zoom := argument.substr("--zoom=".length())
 			if raw_zoom.is_valid_float():
-				_camera_zoom = clampf(float(raw_zoom), CAMERA_ZOOM_MIN, CAMERA_ZOOM_MAX)
-				_camera_focus_ready = false
+				_capture_zoom = clampf(float(raw_zoom), 1.0, CAMERA_MAG_MAX)
 			else:
 				printerr("CAPTURE_BAD_ZOOM %s" % raw_zoom)
 		elif argument == "--screen=build":
@@ -3338,18 +3395,25 @@ func _handle_capture_request() -> void:
 			_survival_capture_modify()
 	if _capture_target.is_empty():
 		return
-	## 预热已经跑完，从这一刻起冻结 `_process()`，让取图结果成为预热步数的确定函数。
+	## v3.40：`--zoom=` 在这里才应用 —— `--screen=` 已经全部处理完，竞技场已存在。
+	## 当前距离与目标距离**一起**钉住：截图路径不能等插值跑完（`_process` 即将冻结）。
+	if _capture_zoom == _capture_zoom:
+		var zoom_arena := _battle_arena_now()
+		if zoom_arena.size.y > 0.0:
+			var want_dist := CombatView.camera_height_for_mag(zoom_arena, _capture_zoom)
+			_camera_dist = want_dist
+			_camera_dist_target = want_dist
 	## 冻结前必须把「过渡类」状态直接推到终值：`_screen_opacity` 的初始值是 0，
 	## 它原本靠在 `_process` 里 `move_toward` 才涨到 1.0；一旦冻结，页面就停在
 	## 淡入起点，实测截图只有 8587 B（几乎全黑）。这里显式置终值。
 	## v3.25：如果传了 `--cursor=`，页面已经建好，现在才能真正应用鼠标位置。
 	## 顺带把炮口也指向该点：截图里矄准与炮口方向一致，才能一眼看出「鼠标瞄准」生效。
-	## v3.38：相机焦点必须在这里**显式钉一次** —— `_camera_follow()` 跑在 `_process` 里，
-	## 而下三行就把 `_process` 冻结了；不在这里置焦点的话，带 `--zoom=` 的截图会
-	## 永远拍到「焦点 = 世界原点」的画面（一个锚点都没夹住的错误视角）。
-	## 焦点放到位之后才 `_aim_with_mouse()`，否则矄准算的是旧相机的世界点。
-	_camera_focus = _battle_focus_target(_battle_arena_now())
-	_camera_focus_ready = true
+	## v3.40：只有真正拉近之后才钉焦点 —— 整图时相机就是 `arena`，焦点对像素零影响。
+	## 这一条件也让「没传 `--zoom=`」的截图路径完全不经手相机状态，基线更稳。
+	var capture_arena := _battle_arena_now()
+	if _camera_dist > 0.0 and _camera_dist < capture_arena.size.y - 0.000001:
+		_camera_focus = _battle_focus_target(capture_arena)
+		_camera_focus_ready = true
 	if _capture_cursor.is_finite():
 		_mouse_position = _capture_cursor
 		_aim_with_mouse(_capture_cursor)
@@ -3889,7 +3953,7 @@ func _draw_survival_hud() -> void:
 	## 430 + 14 px 字高仍在镜像面板（`SURVIVAL_MIRROR_RECT` 从 y=436 开始）之上，不重叠。
 	_draw_text("R        重开 run", Vector2(right, 330), 16, Palette.TEXT_HI, false)
 	_draw_text("Esc      返回主菜单", Vector2(right, 360), 16, Palette.TEXT_HI, false)
-	_draw_text("滚轮缩放 · Z 复位  %.2f×" % _camera_zoom, Vector2(right, 390), 14, Palette.ACCENT_CYAN, false)
+	_draw_text("滚轮推拉 · Z 整图  相机 %s" % _camera_readout(_battle_arena_now()), Vector2(right, 390), 14, Palette.ACCENT_CYAN, false)
 	_draw_text("战斗期禁止改装", Vector2(right, 428), 14, Palette.ACCENT_AMBER, false)
 	_draw_survival_mirror()
 	_draw_battle_status(_status_message)

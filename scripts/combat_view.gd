@@ -84,19 +84,31 @@ const FX_STYLE_DRIVE := {
 	"centre_alpha": 0.5,
 }
 
-## 世界坐标 → 屏幕坐标（v3.38：相机矩形）。
+## 世界坐标 → 屏幕坐标（v3.38 引入相机矩形，v3.40 相机改为距离模型）。
 ##
 ## 三页原本各有一份逐字相同的副本（`_drive_to_screen` / `_match_to_screen` /
 ## `_survival_to_screen`），差别只在读哪个会话对象。每个页面**必须传自己的竞技场**，
 ## 复用别的页面的竞技场会静默算出错误比例（M6 已踩过一次）。
 ##
-## 参数 `camera` 是「**正好铺满视图的那一块世界矩形**」。滚轮缩小时它比竞技场大、
-## 放大时比竞技场小；`zoom == 1.0` 时调用方直接传 `arena` 本身 ——
-## 于是本式退化成 `view.position + (world - arena.position) * scale`，
-## **与 v3.37 的表达式逐字相同**（同样的输入、同样的运算次序），
-## 默认像素与历史截图基线的可比性由构造保证，不靠浮点恒等式。
+## 参数 `camera` 是「**相机当前看到的那一块世界矩形**」。相机拉近时它比竞技场小，且
+## **永远不超出竞技场**（v3.40）；拉到最远时它就是 `arena` 本身 ——
+## 于是本式退化成 `view.position + (world - arena.position) * scale`，与 v3.37 逐字相同。
 static func to_screen(view: Rect2, camera: Rect2, world: Vector2, scale_factor: float) -> Vector2:
 	return view.position + (world - camera.position) * scale_factor
+
+
+## 屏幕上的点是否落在战场视图内。
+##
+## 相机拉近后，**屏幕上会存在相机外的世界点**（例如相机上方 40 px 处的伤害数字），
+## 它们的屏幕坐标会落到视图之外。`canvas.draw_*` 没有裁剪参数，所以凡是「按世界点求
+## 屏幕坐标」后再画的东西，都必须先过这道闸——否则伤害数字和弹道会画到标题区 /
+## HUD 上。这是 v3.40 实测到的真实缺陷（旧模型也有，只是当时没注意到）。
+##
+## 留 `PIPE_CAP_RATIO` 级别的余量没有意义：这里不涉及线宽，只判断**中心点**是否在内。
+## 由于被剔除的是中心点位于视图外的图元，边缘处可能少一个半圆——宁可少画，
+## 也不要把它画到 HUD 上。
+static func in_view(view: Rect2, at: Vector2) -> bool:
+	return view.has_point(at)
 
 
 ## 屏幕坐标 → 世界坐标：`to_screen()` 的精确逆变换。
@@ -111,31 +123,57 @@ static func to_world(view: Rect2, camera: Rect2, screen: Vector2, scale_factor: 
 
 
 ## 铺满视图所需的缩放系数。
-## **这是 `zoom == 1.0` 时的比例**；带缩放时调用方传 `fit_scale(view, camera)`，
-## 因为 `camera.size = arena.size / zoom` 会自动把比例抬到 `fit * zoom`。
+## **这是「相机拉到最远」时的比例**；拉近后相机变小，本函数自然返回更大的值，
+## 于是 `camera.size` 自动把比例抬到 `fit_arena * mag`。
 static func fit_scale(view: Rect2, camera: Rect2) -> float:
 	if camera.size.x <= 0.0:
 		return 1.0
 	return view.size.x / camera.size.x
 
-
-## 根据缩放倍数构造相机矩形：以 `focus` 为中心、大小是竞技场的 `1/zoom`。
+## 【v3.40 重做】相机 = 一台真实摄像机，状态是**距离**而不是「地图除以倍数」。
 ##
-## `zoom == 1.0` 时**直接返回 `arena`**（不做任何乘除），这是「默认像素逐字不变」的根源；
-## `focus` 也只在真正缩放时才起作用，避免「没缩放但相机已偏移」。
-## 相机比竞技场大（缩小）时中心不允许偏移：否则一侧会露出远多于另一侧的空白。
-## 相机比竞技场小（放大）时把中心夹到「视野不跑出竞技场」的范围内。
-static func camera_rect(arena: Rect2, focus: Vector2, zoom: float) -> Rect2:
-	if absf(zoom - 1.0) < 0.000001 or zoom <= 0.0:
+## `height` = 相机视野覆盖的世界高度（px）。它是相机的「远近」：数值越大相机越远、
+## 看到越多但每样东西越小；数值越小相机越近、东西越大。
+##
+## 三条硬约束（v3.38 的旧模型违反了中间那条，这就是用户说的「很多问题」）：
+##  1. **最远 = 整张地图**：`height >= arena.size.y` 时**原样返回 `arena`**（零乘除），
+##     于是「相机拉到最远」与 v3.37 的默认画面**逐字节相同**，历史截图基线继续可比。
+##  2. **相机永远不超出地图**：`height` 被夹到 `arena.size.y` 以内，Rect 再夹进竞技场。
+##     旧模型允许 `zoom < 1`（相机比地图还大），于是在完全没有地形的地方画出一圈空白——
+##     实测 0.5x 时相机 4096×2304、**视图 75% 是空的**。相机不该看得到世界之外。
+##  3. **宽高比永不改变**：宽 = 高 × 竞技场宽高比。本项目视图与竞技场宽高比相同，
+##     所以相机在任何距离下都恰好铺满视图，既没有 letterbox 也没有裁切。
+static func camera_at_height(arena: Rect2, focus: Vector2, height: float) -> Rect2:
+	if arena.size.x <= 0.0 or arena.size.y <= 0.0:
 		return arena
-	var half := arena.size * 0.5 / zoom
-	if half.x >= arena.size.x * 0.5 or half.y >= arena.size.y * 0.5:
-		return Rect2(arena.get_center() - half, half * 2.0)
+	## 最远：整张地图。**先返回，不做任何乘除** —— 这是默认像素不变的构造性保证。
+	if height >= arena.size.y:
+		return arena
+	var h := maxf(height, 0.0)
+	var w := h * (arena.size.x / arena.size.y)
+	var half := Vector2(w, h) * 0.5
+	## 焦点只在**真正拉近之后**才有意义；夹取保证相机不跑出竞技场。
 	var centre := Vector2(
 		clampf(focus.x, arena.position.x + half.x, arena.end.x - half.x),
 		clampf(focus.y, arena.position.y + half.y, arena.end.y - half.y))
 	return Rect2(centre - half, half * 2.0)
 
+
+## 距离 ↔ 读数（「相机 x.xx×」）的换算。
+##
+## `1.00×` 就是**最远 / 整图**，往近推数值变大。旧模型把 1.0 叫「标准」、0.5 叫「退远」，
+## 于是「退远」比整图还远、什么也看不到 —— 镜头语言上自相矛盾，这是重做的直接动机。
+static func camera_height_for_mag(arena: Rect2, mag: float) -> float:
+	if arena.size.y <= 0.0:
+		return 0.0
+	## mag < 1 一律当成最远：**没有比「整张地图」更远的视角**。
+	return arena.size.y / maxf(mag, 1.0)
+
+
+static func camera_mag(arena: Rect2, height: float) -> float:
+	if arena.size.y <= 0.0 or height <= 0.0:
+		return 1.0
+	return clampf(arena.size.y / height, 1.0, 999.0)
 
 ## 把 `data/arenas/*.json` 的**格单位**障碍换算成世界像素。
 ##
@@ -314,6 +352,9 @@ static func draw_shots(canvas: CanvasItem, view: Rect2, camera: Rect2, scale_fac
 	for raw_shot in shots:
 		var shot: Dictionary = raw_shot
 		var head := to_screen(view, camera, Vector2(shot["pos"]), scale_factor)
+		## 相机拉近后，相机外的炮弹会落到视图外；不剔除就会画到 HUD 上。
+		if not in_view(view, head):
+			continue
 		var tail := to_screen(view, camera, Vector2(shot["prev"]), scale_factor)
 		var colour := Palette.ACCENT_AMBER if String(shot["shooter"]) == player_tag else Palette.ACCENT_MAGENTA
 		canvas.draw_line(tail, head, Color(colour, 0.7), 1.5)
@@ -355,6 +396,9 @@ static func draw_fx(canvas: CanvasItem, view: Rect2, camera: Rect2, scale_factor
 		var t := clampf(float(entry["left"]) / life, 0.0, 1.0)
 		var colour: Color = entry["colour"]
 		var at := to_screen(view, camera, Vector2(entry["pos"]), scale_factor)
+		## 同上：相机拉近后视图外的动效不得画到 HUD 上（v3.40）。
+		if not in_view(view, at):
+			continue
 		## 全尺寸半径（未乘收缩系数）：中心亮点与专用形状用它，通用圆环再乘 `base + grow·t`。
 		var full_radius := float(entry["radius"]) * scale_factor
 		if special and _draw_impact_shape(canvas, at, full_radius, colour, kind, t):
@@ -401,6 +445,8 @@ static func draw_hit_flash(canvas: CanvasItem, view: Rect2, camera: Rect2, scale
 		return
 	var t := clampf(left / maxf(life, 0.001), 0.0, 1.0)
 	var at := to_screen(view, camera, at_world, scale_factor)
+	if not in_view(view, at):
+		return
 	var radius := 6.0 + 10.0 * (1.0 - t)
 	canvas.draw_circle(at, radius, Color(Palette.ACCENT_AMBER, 0.30 * t))
 	canvas.draw_arc(at, radius, 0.0, TAU, 24, Color(Palette.TEXT_HI, 0.9 * t), 2.0)
@@ -419,6 +465,9 @@ static func draw_muzzle_flash(canvas: CanvasItem, view: Rect2, camera: Rect2, sc
 		return
 	var t := clampf(left / maxf(life, 0.001), 0.0, 1.0)
 	var at := to_screen(view, camera, at_world, scale_factor)
+	## 相机拉近后炮口可能在视图外（例如从屏幕外边缘开火），不剔除就会把锥形光画到 HUD 上。
+	if not in_view(view, at):
+		return
 	var forward := dir.normalized() if dir.length_squared() > 0.000001 else Vector2.RIGHT
 	var side := forward.orthogonal()
 	## 长度随剩余寿命从满收缩到零；最小屏幕长度保证极小缩放下仍可见。
@@ -453,6 +502,8 @@ static func draw_expire_flash(canvas: CanvasItem, view: Rect2, camera: Rect2, sc
 	## 进度 0 → 1（与 t 相反）：半径从大收到小、透明度从有到无。
 	var progress := 1.0 - t
 	var at := to_screen(view, camera, at_world, scale_factor) + Vector2(0.0, -6.0 * progress)
+	if not in_view(view, at):
+		return
 	var radius := maxf(EXPIRE_FLASH_RADIUS * scale_factor * (1.0 - 0.55 * progress), 2.0)
 	## ① 三圈同心描边：由外向内收缩，形成「散掉」而不是「炸开」的感觉。
 	var ring_alpha := 0.85 * t
@@ -492,10 +543,18 @@ static func draw_damage_popups(canvas: CanvasItem, view: Rect2, camera: Rect2, s
 		var rise := DAMAGE_POPUP_RISE * sqrt(progress) * scale_factor
 		var offset := Vector2(0.0, -rise - float(stack) * DAMAGE_POPUP_STACK_STEP)
 		var at := to_screen(view, camera, Vector2(entry["pos"]), scale_factor) + offset
+		## 数字向上飘一段长距离（`DAMAGE_POPUP_RISE` 就达几十 px），相机拉近后极易飘出视图。
+		## 不剔除就会把 `-12` 写到标题区 / HUD 上 —— v3.40 实测到的真实缺陷。
+		##
+		## `draw_string()` 的锚点是**基线**，字形向上延伸约一个字高。只判锚点会让数字的
+		## 上半截整过视图边框 —— v3.40 截图里 `-7` 正是这样压在 `DRIVE_VIEW` 的青色上边框上。
+		## 因此字顶与基线**两个点都要在视图内**。
+		var size := int(roundf(20.0 - 4.0 * progress))
+		if not in_view(view, at) or not in_view(view, at - Vector2(0.0, float(size))):
+			continue
 		var colour: Color = entry["colour"]
 		## 前 70% 保持不透明，后 30% 才淡出：数字要看得清，不能一出来就开始糊。
 		var alpha := 1.0 if progress < 0.7 else clampf((1.0 - progress) / 0.3, 0.0, 1.0)
-		var size := int(roundf(20.0 - 4.0 * progress))
 		## 先画一层暗色底再画本体：霓虹背景下纯色小字容易被地形线淹掉。
 		text_fn.call(text, at + Vector2(1.0, 1.0), size, Color(0.0, 0.0, 0.0, 0.55 * alpha), true)
 		text_fn.call(text, at, size, Color(colour, alpha), true)

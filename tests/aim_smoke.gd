@@ -181,11 +181,12 @@ func _check_coincident_target(body: TankBody, bank: CannonBank) -> void:
 	_check_near(after.y, before.y, "coincident_dir_y")
 
 ## 屏幕坐标 → 世界坐标必须是 `CombatView.to_screen()` 的精确逆变换。
-## v3.38：相机矩形显式传入（zoom==1 时它就是 `arena`，与旧版逐位相同）。
+## v3.40：相机矩形改由 `camera_at_height()` 现算。这里取最远（= 整张地图），
+## 它与 v3.38 的 `zoom == 1` 等价且逐位相同，所以本组断言的数值意义未变。
 func _check_round_trip() -> void:
 	var view := Rect2(320.0, 168.0, 1216.0, 684.0)
 	var arena := Rect2(0.0, 0.0, 2048.0, 1152.0)
-	var camera := CombatView.camera_rect(arena, arena.get_center(), 1.0)
+	var camera := CombatView.camera_at_height(arena, arena.get_center(), arena.size.y)
 	var scale_factor := CombatView.fit_scale(view, camera)
 	for world in [Vector2(0.0, 0.0), Vector2(1024.0, 576.0), Vector2(2047.0, 1151.0)]:
 		var screen := CombatView.to_screen(view, camera, world, scale_factor)

@@ -1,24 +1,35 @@
 extends SceneTree
 
-## v3.38 战斗相机缩放回归（design §11.4.2.18）。
+## v3.40 战斗场景相机推拉回归（design §11.4.2.20）。
 ##
 ## 为什么必须有这个测试：
-## 缩放改的是**一条几何变换**，而这条变换同时被「绘制」与「鼠标瞄准」两条路径使用。
-## 只要它们不同源，玩家就会看到「炮管朝这里、炮弹朝那里」——而这在 headless 探针里
+## 相机改的是**一条几何变换**，而这条变换同时被「绘制」与「鼠标瞄准」两条路径使用。
+## 只要它们不同源，玩家就会看到「炮管朝这里、炮弹朝那里」——这在 headless 探针里
 ## 完全看不出来（探针不画图），在截图上也要凑巧打中才看得出来。
-## 所以这里把「往返一致」钉成逐步断言，并且**逐个 zoom 值**都验一遍。
+##
+## v3.38 的模型是「相机矩形 = 竞技场 ÷ 倍数」，倍数 < 1 时**相机比地图还大**：
+## 实测 0.5× 时相机 4096×2304、四边各溢出 1024/576 世界像素、**视图 75% 是空白**，
+## 整张地图缩成中间 608×342 的小方块。那不是相机，是「把地图在桌上缩放」。
+## v3.40 换成真实相机模型：状态是**距离**（视野覆盖的世界高，px），
+## 远 = 整图恰好铺满视野，近 = 一格 38 屏幕像素。
+##
+## 本测试的**核心断言是「相机永远不超出竞技场」**（`_check_never_exceeds_arena`）——
+## 它直接来自用户要的镜头语言（相机不该看到世界之外），且旧模型会在这里成批失败。
+## 这不是「复算一遍实现」：溢出判据只用到 Rect2 的四个边界，与 `camera_at_height()`
+## 内部的夹取写法无关。配套的 `_check_negative_control` 把旧 0.5× 公式**独立重算**
+## 一遍并断言它必须溢出，用来证明本测试对旧缺陷真的敏感。
 ##
 ## 覆盖：
-##  - `zoom == 1.0` 时 `camera_rect()` **原样返回 arena**（不算任何乘除）——
-##    这是「默认像素与 v3.37 逐字节相同」的构造性保证；
-##  - `camera_rect()` 的尺寸确实是 `arena.size / zoom`；
-##  - 放大时相机比竞技场小、缩小时比竞技场大，且都夹在竞技场内（不露出多余空白）；
-##  - 任意 zoom 下 `to_screen()` → `to_world()` 往返一致（含四个角与中心）；
+##  - 最远端点 `height >= arena.size.y` 时 `camera_at_height()` **原样返回 arena**
+##    （同一个 Rect2、零乘除）—— 这是「默认像素与 v3.37 逐字节相同」的构造性保证；
+##  - 任意焦点 × 任意距离下相机都**完全包含于**竞技场，且尺寸不超过竞技场；
+##  - 宽高比永不改变（宽 = 高 × 竞技场宽高比），相机在任何距离下恰好铺满视图；
+##  - 任意距离下 `to_screen()` → `to_world()` 往返一致（含四角与中心）；
 ##  - 相机中心对应的屏幕点恒为视图中心；
-##  - `fit_scale()` 随 zoom 单调递增，且 `fit_scale(view, camera) == fit_scale(view, arena) * zoom`；
-##  - 滚轮步进：`_camera_zoom_by()` 在上下界处夹住，`Z` 复位回到 1.0；
-##  - 负向对照：故意用「旧版不带相机的 `to_screen`」换算同一个屏幕点，
-##    在 zoom != 1 时必须得到**不同**的世界点——否则本测试对缩放根本不敏感。
+##  - `fit_scale()` 随距离变小而变大，两端点可复算：最远 9.5 px/格、最近 38 px/格；
+##  - 读数换算 `camera_mag()` / `camera_height_for_mag()` 的边界与单调；
+##  - 滚轮步进在上下界处夹住（读数维夹取，不是距离维）；
+##  - 负向对照：旧 0.5× 公式必须溢出竞技场，新模型同一位置必须正好等于竞技场。
 ##
 ## 硬约束：本测试**不调任何绘制函数**（在 `_draw()` 之外调绘制会刷屏上千行
 ## `Drawing is only allowed inside this node's _draw()`，把断言淹掉）。
@@ -32,17 +43,21 @@ const TOL := 0.0001
 
 const VIEW := Rect2(320.0, 168.0, 1216.0, 684.0)
 const ARENA := Rect2(0.0, 0.0, 2048.0, 1152.0)
+## 最远 = 整张地图 = 竞技场高。这个数不是拍的：任何比它更大的距离都等价于它。
+const FAR := 1152.0
+const CENTRE := Vector2(1024.0, 576.0)
 
 var _failures := 0
 var _checks := 0
 
 func _init() -> void:
-	_check_identity_camera()
-	_check_camera_size()
-	_check_camera_clamped()
+	_check_far_identity()
+	_check_never_exceeds_arena()
+	_check_aspect_never_changes()
 	_check_round_trip()
 	_check_centre_maps_to_view_centre()
-	_check_fit_scale_scales()
+	_check_fit_scale_monotonic()
+	_check_mag_bounds()
 	_check_zoom_step_bounds()
 	_check_negative_control()
 	_check_aim_uses_camera()
@@ -68,114 +83,219 @@ func _check_near(actual: float, expected: float, code: String) -> void:
 	if absf(actual - expected) > TOL:
 		_fail("%s actual=%.6f expected=%.6f" % [code, actual, expected])
 
-## `zoom == 1.0` 必须**原样**返回 arena：不是「数值相等」，而是同一个 Rect2。
-## 这一条是整个「默认像素不变」的根 —— 一旦变成返回「算出来的等值矩形」，
+## 最远端点必须**原样**返回 arena：不是「数值相等」，而是同一个 Rect2。
+## 这一条是整个「默认像素不变」的根 —— 一旦改成返回「算出来的等值矩形」，
 ## 浮点乘除就可能让 `to_screen()` 的最后一位变掉，历史截图基线随之失效。
-func _check_identity_camera() -> void:
-	for focus in [ARENA.get_center(), Vector2(0.0, 0.0), Vector2(2048.0, 1152.0), Vector2(500.0, 900.0)]:
-		var camera := CombatView.camera_rect(ARENA, focus, 1.0)
-		_check(camera == ARENA, "identity_camera_%.0f_%.0f" % [focus.x, focus.y])
-	## 退化 zoom（0 或负）也必须回退到 arena，而不是除零。
-	_check(CombatView.camera_rect(ARENA, ARENA.get_center(), 0.0) == ARENA, "identity_camera_zero_zoom")
-	_check(CombatView.camera_rect(ARENA, ARENA.get_center(), -2.0) == ARENA, "identity_camera_negative_zoom")
+## 比对用 `==`（Rect2 逐字段相等），容差在这里是**错误**的做法。
+func _check_far_identity() -> void:
+	for focus in [CENTRE, Vector2(0.0, 0.0), Vector2(2048.0, 1152.0), Vector2(500.0, 900.0)]:
+		_check(CombatView.camera_at_height(ARENA, focus, FAR) == ARENA,
+			"far_identity_%.0f_%.0f" % [focus.x, focus.y])
+	## 比最远更远（包括用户滚到底）也必须落在恒等分支上。
+	_check(CombatView.camera_at_height(ARENA, CENTRE, FAR * 2.0) == ARENA, "far_identity_double")
+	_check(CombatView.camera_at_height(ARENA, CENTRE, 99999.0) == ARENA, "far_identity_huge")
+	## 退化竞技场（未进入战斗页时 arena 是空 Rect2）必须原样回退，而不是除零或崩溃。
+	_check(CombatView.camera_at_height(Rect2(), CENTRE, 500.0) == Rect2(), "far_identity_empty_arena")
+	_check(CombatView.camera_at_height(Rect2(), CENTRE, FAR) == Rect2(), "far_identity_empty_arena_far")
 
-## 相机尺寸就是 `arena.size / zoom`，两个轴都要。
-func _check_camera_size() -> void:
-	for zoom in [0.5, 0.75, 1.5, 2.0, 4.0]:
-		var camera := CombatView.camera_rect(ARENA, ARENA.get_center(), zoom)
-		_check_near(camera.size.x, ARENA.size.x / zoom, "camera_width_z%.2f" % zoom)
-		_check_near(camera.size.y, ARENA.size.y / zoom, "camera_height_z%.2f" % zoom)
+## 【核心断言】任意焦点、任意距离下，相机都不得越出竞技场一步。
+##
+## 这条判据只用到 Rect2 的四个边界，**不引用 `camera_at_height()` 的任何中间量**，
+## 所以它不会像 v3.39 的弧管测试那样与实现同错。旧模型在这里会成批失败
+## （0.5× 时四边各溢出 1024/576）。
+##
+## 距离表里同时放了「刚好比最远小一点点」（`FAR - 0.001`）—— 那是插值吸附之前
+## 最容易踩到边界的一档；也放了 0 与负数这种不该出现的退化输入，
+## 它们至少不能生成比竞技场更大的相机。
+func _check_never_exceeds_arena() -> void:
+	var focuss: Array = [
+		Vector2(0.0, 0.0),
+		Vector2(2048.0, 1152.0),
+		CENTRE,
+		Vector2(500.0, 900.0),
+		Vector2(1024.0, 0.0),
+	]
+	var heights: Array = [
+		FAR * 2.0,
+		FAR * 1.5,
+		99999.0,
+		FAR,
+		FAR - 0.001,
+		FAR * 0.75,
+		FAR * 0.5,
+		FAR * 0.25,
+		FAR * 0.1,
+		1.0,
+		0.0,
+		-50.0,
+	]
+	for focus in focuss:
+		for height in heights:
+			var camera := CombatView.camera_at_height(ARENA, focus, float(height))
+			var tag := "f%.0f_%.0f_h%.3f" % [focus.x, focus.y, float(height)]
+			_check(camera.position.x >= ARENA.position.x - TOL, "inside_left_" + tag)
+			_check(camera.position.y >= ARENA.position.y - TOL, "inside_top_" + tag)
+			_check(camera.end.x <= ARENA.end.x + TOL, "inside_right_" + tag)
+			_check(camera.end.y <= ARENA.end.y + TOL, "inside_bottom_" + tag)
+			_check(camera.size.x <= ARENA.size.x + TOL, "not_wider_" + tag)
+			_check(camera.size.y <= ARENA.size.y + TOL, "not_taller_" + tag)
 
-## 放大时相机在竞技场内；不放大时中心不偏移（不能因为焦点在角落而露白）。
-func _check_camera_clamped() -> void:
-	## 放大 + 焦点在角落：相机必须被夹回竞技场内（完全包含于竞技场）。
-	var corner := CombatView.camera_rect(ARENA, Vector2(0.0, 0.0), 4.0)
-	_check(corner.position.x >= ARENA.position.x - TOL, "clamp_corner_left")
-	_check(corner.position.y >= ARENA.position.y - TOL, "clamp_corner_top")
-	_check(corner.end.x <= ARENA.end.x + TOL, "clamp_corner_right")
-	_check(corner.end.y <= ARENA.end.y + TOL, "clamp_corner_bottom")
-	## 缩小：相机比竞技场大，中心必须与竞技场中心重合（两侧空白一样多）。
-	var wide := CombatView.camera_rect(ARENA, Vector2(10.0, 20.0), 0.5)
-	_check_near(wide.get_center().x, ARENA.get_center().x, "wide_centre_x")
-	_check_near(wide.get_center().y, ARENA.get_center().y, "wide_centre_y")
-	_check(wide.size.x > ARENA.size.x, "wide_is_wider")
+## 宽高比永不改变，且相机恰好铺满视图（既无 letterbox 也无裁切）。
+##
+## 一旦宽高比漂移，`fit_scale()` 只按宽度算，画面在纵向就会错位 —— 地图的
+## 上下边缘会被切掉或者露出空白。本项目视图与竞技场同为 16:9，所以「恒等」是可达的。
+func _check_aspect_never_changes() -> void:
+	var ratio := ARENA.size.x / ARENA.size.y
+	var heights: Array = [FAR * 0.25, FAR * 0.5, FAR * 0.75, 700.0, 1000.0, FAR - 0.001, FAR]
+	for height in heights:
+		var h := float(height)
+		var camera := CombatView.camera_at_height(ARENA, Vector2(300.0, 200.0), h)
+		var scale_factor := CombatView.fit_scale(VIEW, camera)
+		var tag := "h%.3f" % h
+		_check_near(camera.size.y, h, "camera_height_is_distance_" + tag)
+		_check_near(camera.size.x, h * ratio, "camera_width_follows_aspect_" + tag)
+		_check_near(camera.size.x * scale_factor, VIEW.size.x, "covers_view_width_" + tag)
+		_check_near(camera.size.y * scale_factor, VIEW.size.y, "covers_view_height_" + tag)
+	## 退化相机必须回退 1.0，而不是除零。
+	_check_near(CombatView.fit_scale(VIEW, Rect2()), 1.0, "fit_scale_degenerate")
 
-## 任意 zoom 下，世界点 → 屏幕 → 世界必须回到原点。
+## 任意距离下，世界点 → 屏幕 → 世界必须回到原点。
 ## 这是「画出来的炮管」与「真实开火方向」不脱节的形式化条件。
 func _check_round_trip() -> void:
 	var probes: Array = [
 		ARENA.position,
-		ARENA.get_center(),
+		CENTRE,
 		ARENA.end,
 		Vector2(0.0, 1152.0),
 		Vector2(2048.0, 0.0),
 		Vector2(300.0, 700.0),
 	]
-	for zoom in [0.5, 0.75, 1.0, 1.35, 2.0, 3.0, 4.0]:
-		var camera := CombatView.camera_rect(ARENA, Vector2(900.0, 420.0), zoom)
+	var heights: Array = [FAR, FAR * 0.75, FAR * 0.5, FAR * 0.25, 700.0, 900.0]
+	for height in heights:
+		var h := float(height)
+		var camera := CombatView.camera_at_height(ARENA, Vector2(900.0, 420.0), h)
 		var scale_factor := CombatView.fit_scale(VIEW, camera)
 		for world in probes:
 			var screen := CombatView.to_screen(VIEW, camera, world, scale_factor)
 			var back: Vector2 = MainScript._screen_to_world(VIEW, camera, screen, scale_factor)
-			_check_near(back.x, world.x, "round_trip_x_z%.2f_%.0f" % [zoom, world.x])
-			_check_near(back.y, world.y, "round_trip_y_z%.2f_%.0f" % [zoom, world.y])
+			_check_near(back.x, world.x, "round_trip_x_h%.1f_%.0f" % [h, world.x])
+			_check_near(back.y, world.y, "round_trip_y_h%.1f_%.0f" % [h, world.y])
 
-## 相机的中心必须落在这个视图的中心 —— 这是「放大时看到的还是刚才那片区域」的定义。
+## 相机的中心必须落在这个视图的中心 —— 这是「拉近后看到的还是刚才那片区域」的定义。
+## 焦点取竞技场中心：贴边时焦点会被夹住（不越界优先于永远居中），那属于设计取舍，
+## 不能用「必须居中」去断言它。
 func _check_centre_maps_to_view_centre() -> void:
-	for zoom in [0.5, 1.0, 2.0, 4.0]:
-		var camera := CombatView.camera_rect(ARENA, Vector2(1100.0, 640.0), zoom)
+	var heights: Array = [FAR, FAR * 0.5, FAR * 0.25, 400.0]
+	for height in heights:
+		var h := float(height)
+		var camera := CombatView.camera_at_height(ARENA, CENTRE, h)
 		var scale_factor := CombatView.fit_scale(VIEW, camera)
 		var at := CombatView.to_screen(VIEW, camera, camera.get_center(), scale_factor)
-		_check_near(at.x, VIEW.position.x + VIEW.size.x * 0.5, "centre_x_z%.2f" % zoom)
-		_check_near(at.y, VIEW.position.y + VIEW.size.y * 0.5, "centre_y_z%.2f" % zoom)
+		_check_near(at.x, VIEW.position.x + VIEW.size.x * 0.5, "centre_x_h%.1f" % h)
+		_check_near(at.y, VIEW.position.y + VIEW.size.y * 0.5, "centre_y_h%.1f" % h)
+		## 焦点在竞技场中心时相机中心就该等于焦点本身。
+		_check_near(camera.get_center().x, CENTRE.x, "camera_centre_is_focus_x_h%.1f" % h)
+		_check_near(camera.get_center().y, CENTRE.y, "camera_centre_is_focus_y_h%.1f" % h)
 
-## 比例必须随 zoom 线性放大：`fit_scale(view, camera) == fit_scale(view, arena) * zoom`。
-## 这条一旦不成立，炮口闪光的长度、进度条的厚度、格线的间距就会各走各的。
-func _check_fit_scale_scales() -> void:
+## 比例必须随距离变小而变大（推近），而且两端点要能复算成用户可理解的可读度。
+##
+## 最远：`16 × 1216 / 2048 = 9.5` 屏幕像素/格（整图铺满视图）；
+## 最近：`16 × 684 / 288 = 38` 屏幕像素/格（与建造页 32 px 格同等级）。
+## 这两个数是从 `DRIVE_VIEW` / `ARENA` / `CELL_SIZE` / `CAMERA_MAG_MAX` 独立推出的，
+## 不是从实现里抄的。
+func _check_fit_scale_monotonic() -> void:
 	var base := CombatView.fit_scale(VIEW, ARENA)
-	for zoom in [0.5, 0.75, 1.0, 1.5, 2.0, 4.0]:
-		var camera := CombatView.camera_rect(ARENA, ARENA.get_center(), zoom)
-		_check_near(CombatView.fit_scale(VIEW, camera), base * zoom, "fit_scale_z%.2f" % zoom)
-	## 退化相机必须回退 1.0，而不是除零。
-	_check_near(CombatView.fit_scale(VIEW, Rect2()), 1.0, "fit_scale_degenerate")
+	_check_near(16.0 * base, 9.5, "far_cell_px")
+	var near_dist := CombatView.camera_height_for_mag(ARENA, MainScript.CAMERA_MAG_MAX)
+	_check_near(near_dist, 288.0, "near_distance_is_camera_mag_max")
+	var near_camera := CombatView.camera_at_height(ARENA, CENTRE, near_dist)
+	_check_near(16.0 * CombatView.fit_scale(VIEW, near_camera), 38.0, "near_cell_px")
+	## 距离变小 → 比例变大，单调且严格。
+	var previous := -1.0
+	for height in [FAR, FAR * 0.75, FAR * 0.5, FAR * 0.3, FAR * 0.25]:
+		var camera := CombatView.camera_at_height(ARENA, CENTRE, float(height))
+		var scale_factor := CombatView.fit_scale(VIEW, camera)
+		_check(scale_factor > previous, "fit_scale_monotonic_h%.1f" % float(height))
+		previous = scale_factor
+	## 读数与距离互为逆：任一读数折成距离再折回来必须相等。
+	for mag in [1.0, 1.35, 2.0, 2.35, 3.0, 4.0]:
+		var dist := CombatView.camera_height_for_mag(ARENA, float(mag))
+		_check_near(CombatView.camera_mag(ARENA, dist), float(mag), "mag_round_trip_%.2f" % float(mag))
 
-## 滚轮步进与上下界（纯算术，不碰实例）。
+## 读数换算的边界。
+##
+## `mag < 1` 一律当成最远 —— 模型里**不存在**「比整张地图更远的视角」，
+## 这正是 `CAMERA_ZOOM_MIN := 0.5` 被永久删除的原因：它表达的语义已经不可构造。
+func _check_mag_bounds() -> void:
+	_check_near(CombatView.camera_mag(ARENA, FAR), 1.0, "mag_at_far")
+	_check_near(CombatView.camera_mag(ARENA, FAR * 0.5), 2.0, "mag_at_half")
+	_check_near(CombatView.camera_mag(ARENA, FAR * 0.25), 4.0, "mag_at_quarter")
+	_check_near(CombatView.camera_height_for_mag(ARENA, 1.0), FAR, "dist_at_mag_one")
+	_check_near(CombatView.camera_height_for_mag(ARENA, 2.0), FAR * 0.5, "dist_at_mag_two")
+	_check_near(CombatView.camera_height_for_mag(ARENA, 4.0), FAR * 0.25, "dist_at_mag_four")
+	## 比整图更远不存在：0.5 / 0 / 负数一律折成最远。
+	_check_near(CombatView.camera_height_for_mag(ARENA, 0.5), FAR, "dist_mag_below_one")
+	_check_near(CombatView.camera_height_for_mag(ARENA, 0.0), FAR, "dist_mag_zero")
+	_check_near(CombatView.camera_height_for_mag(ARENA, -3.0), FAR, "dist_mag_negative")
+	## 退化输入回退，不除零。
+	_check_near(CombatView.camera_height_for_mag(Rect2(), 2.0), 0.0, "dist_empty_arena")
+	_check_near(CombatView.camera_mag(ARENA, 0.0), 1.0, "mag_zero_height")
+	_check_near(CombatView.camera_mag(Rect2(), 100.0), 1.0, "mag_empty_arena")
+
+## 滚轮步进：夹取发生在**读数维**（不是距离维，距离维的边界是非线性的）。
+## 连续推拉到底必须收敛到两个端点，不能无限逼近。
 func _check_zoom_step_bounds() -> void:
-	var step := MainScript.CAMERA_ZOOM_STEP
-	var low := MainScript.CAMERA_ZOOM_MIN
-	var high := MainScript.CAMERA_ZOOM_MAX
+	var step: float = MainScript.CAMERA_ZOOM_STEP
+	var high: float = MainScript.CAMERA_MAG_MAX
 	_check(step > 1.0, "step_above_one")
-	_check(low < 1.0 and high > 1.0, "range_straddles_one")
-	## 连续放大到底不能超过上界；连续缩小到底不能低于下界。
-	var zoom := 1.0
+	_check_near(high, 4.0, "mag_max_is_four")
+	var mag := 1.0
 	for _i in range(40):
-		zoom = clampf(zoom * step, low, high)
-	_check_near(zoom, high, "zoom_ceiling")
-	zoom = 1.0
+		mag = clampf(mag * step, 1.0, high)
+	_check_near(mag, high, "mag_ceiling")
+	mag = high
 	for _i in range(40):
-		zoom = clampf(zoom / step, low, high)
-	_check_near(zoom, low, "zoom_floor")
-	## 上界必须足以「看清细节」（一格 >= 30 屏幕像素），下界必须足以「看到整张图外带余量」。
-	var base := CombatView.fit_scale(VIEW, ARENA)
-	_check(16.0 * base * high >= 30.0, "ceiling_readable_cell")
-	_check(ARENA.size.x / low > ARENA.size.x, "floor_shows_whole_map")
+		mag = clampf(mag / step, 1.0, high)
+	_check_near(mag, 1.0, "mag_floor")
+	## 从整图到最近应该是 8–12 档：太少则一滚就到底，太多则「滚半天还没拉近」。
+	var bump := 0
+	mag = 1.0
+	while mag < high - 0.0001 and bump < 100:
+		mag = clampf(mag * step, 1.0, high)
+		bump += 1
+	_check(bump >= 8 and bump <= 12, "mag_step_count_sane_actual_%d" % bump)
+	## 最近端点必须真的比最远「看得清」：一格 >= 30 屏幕像素。
+	var nearest := CombatView.camera_height_for_mag(ARENA, high)
+	var nearest_camera := CombatView.camera_at_height(ARENA, CENTRE, nearest)
+	_check(16.0 * CombatView.fit_scale(VIEW, nearest_camera) >= 30.0, "ceiling_readable_cell")
 
-## 负向对照：把「无相机」的旧换算拿来比，zoom != 1 时必须得到不同结果。
-## 如果这条不成立，说明本测试对缩放完全不敏感 —— 那它就是在自证。
+## 负向对照：**独立重算** v3.38 的旧公式（不是调用它，它已被删除），
+## 断言它必须溢出竞技场。如果这条不成立，说明本测试对旧缺陷不敏感 ——
+## 那它就是在替实现背书（v3.39 弧管测试连续四个版本假绿的教训）。
 func _check_negative_control() -> void:
+	var old_zoom := 0.5
+	var old_half: Vector2 = ARENA.size * 0.5 / old_zoom
+	var old_camera := Rect2(ARENA.get_center() - old_half, old_half * 2.0)
+	var overflow_x: float = old_camera.end.x - ARENA.end.x
+	var overflow_y: float = old_camera.end.y - ARENA.end.y
+	_check(overflow_x > 1.0, "negative_old_overflows_right")
+	_check(overflow_y > 1.0, "negative_old_overflows_bottom")
+	_check(ARENA.position.x - old_camera.position.x > 1.0, "negative_old_overflows_left")
+	## 旧相机比竞技场大 —— 这正是「视图 75% 是空白」的来源。
+	_check(old_camera.size.y > ARENA.size.y + 1.0, "negative_old_taller_than_arena")
+	## 同一「读数」在新模型里必须正好是整图（合法的极限），绝不溢出。
+	var new_camera := CombatView.camera_at_height(
+		ARENA, CENTRE, CombatView.camera_height_for_mag(ARENA, old_zoom))
+	_check(new_camera == ARENA, "negative_new_is_identity_at_below_one_mag")
+	## 旧相机与新相机对同一个屏幕点给出**不同**的世界点：本测试对相机模型敏感。
 	var screen := Vector2(700.0, 500.0)
-	var zoom := 2.0
-	var camera := CombatView.camera_rect(ARENA, ARENA.get_center(), zoom)
-	var with_camera: Vector2 = MainScript._screen_to_world(VIEW, camera, screen, CombatView.fit_scale(VIEW, camera))
-	var old_style: Vector2 = MainScript._screen_to_world(VIEW, ARENA, screen, CombatView.fit_scale(VIEW, ARENA))
-	_check(with_camera.distance_to(old_style) > 1.0, "negative_control_detects_zoom")
-	## 反向：zoom == 1 时两者必须**完全相等**（相机就是 arena）。
-	var same_camera := CombatView.camera_rect(ARENA, ARENA.get_center(), 1.0)
-	var a: Vector2 = MainScript._screen_to_world(VIEW, same_camera, screen, CombatView.fit_scale(VIEW, same_camera))
-	var b: Vector2 = MainScript._screen_to_world(VIEW, ARENA, screen, CombatView.fit_scale(VIEW, ARENA))
-	_check(a == b, "negative_control_identity_at_one")
+	var with_old: Vector2 = MainScript._screen_to_world(
+		VIEW, old_camera, screen, CombatView.fit_scale(VIEW, old_camera))
+	var with_new: Vector2 = MainScript._screen_to_world(
+		VIEW, new_camera, screen, CombatView.fit_scale(VIEW, new_camera))
+	_check(with_old.distance_to(with_new) > 1.0, "negative_models_disagree")
 
-## 缩放后「鼠标矄准」仍然打在矄星下的世界点上：
+## 拉近后「鼠标瞄准」仍然打在准星下的世界点上：
 ## 用真实 `TankBody` + `CannonBank`，让炮管朝「某个屏幕点对应的世界点」，
 ## 再验证 `muzzle_dir()` 精确等于「炮管中心 → 那个世界点」。
 ##
@@ -183,7 +303,7 @@ func _check_negative_control() -> void:
 ## 而 `aim_at()` 只读 `heading` / `position` / `world_position_of_cell()`。
 func _check_aim_uses_camera() -> void:
 	var body := TankBody.new()
-	body.position = Vector2(1024.0, 576.0)
+	body.position = CENTRE
 	body.heading = 0.0
 	var bank := CannonBank.new()
 	bank.body = body
@@ -194,24 +314,25 @@ func _check_aim_uses_camera() -> void:
 		"aim_override": false,
 		"aim_world": 0.0,
 	}]
-	for zoom in [0.5, 1.0, 2.5, 4.0]:
-		var camera := CombatView.camera_rect(ARENA, body.position, zoom)
+	for height in [FAR, FAR * 0.5, FAR * 0.25, 700.0]:
+		var h := float(height)
+		var camera := CombatView.camera_at_height(ARENA, body.position, h)
 		var scale_factor := CombatView.fit_scale(VIEW, camera)
-		## 屏幕上一个明显偏离中心的点（用于区分 zoom 的影响）。
+		## 屏幕上一个明显偏离中心的点（用于区分不同距离的影响）。
 		var screen := VIEW.position + Vector2(VIEW.size.x * 0.78, VIEW.size.y * 0.30)
 		var world: Vector2 = MainScript._screen_to_world(VIEW, camera, screen, scale_factor)
 		## 反向确认：把这个世界点画回屏幕必须回到原屏幕点。
 		var back := CombatView.to_screen(VIEW, camera, world, scale_factor)
-		_check_near(back.x, screen.x, "aim_screen_back_x_z%.2f" % zoom)
-		_check_near(back.y, screen.y, "aim_screen_back_y_z%.2f" % zoom)
+		_check_near(back.x, screen.x, "aim_screen_back_x_h%.1f" % h)
+		_check_near(back.y, screen.y, "aim_screen_back_y_h%.1f" % h)
 		## 再让炮管指过去，方向必须等于「炮管中心 → world」。
 		var cannon: Dictionary = bank.cannons[0]
 		var centre: Vector2 = body.world_position_of_cell(Vector2i(cannon["cell"]))
 		var expected := (world - centre).normalized()
 		bank.aim_at(0, world)
 		var got := bank.muzzle_dir(cannon)
-		_check_near(got.x, expected.x, "aim_dir_x_z%.2f" % zoom)
-		_check_near(got.y, expected.y, "aim_dir_y_z%.2f" % zoom)
+		_check_near(got.x, expected.x, "aim_dir_x_h%.1f" % h)
+		_check_near(got.y, expected.y, "aim_dir_y_h%.1f" % h)
 
 ## 接线断言：`_aim_with_mouse()` 必须把 `_battle_view()` 的 **camera** 传下去，
 ## 不能只传 arena。这是 v3.37 那类「两套推导」缺陷的静态版防护 ——
@@ -248,3 +369,13 @@ func _check_aim_wiring() -> void:
 	## 这是一个「只传 arena」的旧版本代码，它必须**不**含 `info.get("camera"`。
 	var bad := "return _aim_player_cannons(info.get(\"view\", Rect2()), info.get(\"arena\", Rect2()), float(info.get(\"scale\", 1.0)), position)"
 	_check(not bad.contains("info.get(\"camera\""), "aim_wiring_negative_control")
+	## 相机必须来自 `_battle_camera()`（现算）而不是缓存的旧矩形。
+	var camera_fn := source.find("func _battle_camera(")
+	_check(camera_fn > 0, "aim_wiring_battle_camera_exists")
+	if camera_fn > 0:
+		var camera_tail := source.substr(camera_fn)
+		var camera_end := camera_tail.find("\nfunc ", 1)
+		if camera_end > 0:
+			camera_tail = camera_tail.substr(0, camera_end)
+		_check(camera_tail.contains("camera_at_height("), "aim_wiring_battle_camera_uses_distance")
+		_check(camera_tail.contains("arena.size.y"), "aim_wiring_battle_camera_uses_arena_height")
