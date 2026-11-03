@@ -889,8 +889,24 @@ effective_turn = turn_assist_1 + 0.7·turn_assist_2 + ...   // 同上
 | `modifier_mk1` | 改进器·基础 | 1 | 1 | +0.6 s | 10 | 50 | 2.5 | 90 cr |
 | `modifier_mk2` | 改进器·进阶 | 2 | 2 | +0.5 s/槽 | 18 | 95 | 5 | 160 cr |
 | `modifier_mk3` | 改进器·高级 | 2 | 3 | +0.4 s/槽 | 26 | 110 | 6 | 240 cr |
+| `modifier_blast` | **爆破模块** | 1 | 1 | +0.7 s | 12 | 55 | 3.0 | 130 cr |
+| `modifier_flame` | **火焰模块** | 1 | 1 | +0.7 s | 11 | 50 | 2.8 | 120 cr |
+| `modifier_power` | **增伤模块** | 1 | 1 | +0.6 s | 10 | 50 | 2.6 | 110 cr |
 
-- 改进槽配置：建造时玩家为每个槽**选择一个升级类型**（数据驱动，见 §14 升级表）。
+**两族改进装置的区别（v3.41）**：
+
+- `modifier_mk1/mk2/mk3` 是**通用容器**：只有 `upgrade_slots`（1/2/3），槽里配什么完全由玩家决定，
+  三档之间只差槽数与加工速度，**没有任何模块级功能**。
+- `modifier_blast/flame/power` 是**功能固定的模块**：定义里带 `intrinsic_upgrades`
+  （分别为 `up_explosive` / `up_burn` / `up_damage`），**固有升级不占槽、永远生效**；
+  它们各自还带 1 个槽，玩家可以再叠一个自己选的升级。
+- 固有升级**不写进 `part["upgrades"]`**：它是模块类型的属性而不是实例状态。
+  若写进 part，蓝图反序列化 / 撤销 / 复制处会多出一条可能漂移的副本。
+  运行期由 `AmmoNetwork._make_part()` 从 `definitions.get_module()` 读进 `part["intrinsic"]`，
+  加工完成时 `payload = 原载荷 + intrinsic + 槽配置`。
+- 为什么要两族并存：用户 2026-10-24 说「改为有实际功能的模块，例如爆破模块、火焰模块、增伤模块」，
+  指的就是希望**模块本身就代表一种功能**（装上就生效、不用再配）；
+  而旧的三档仍然保留作为「自由组合」的高级玩法。
 - **处理时间 = 基础值 × 槽数 × 口径系数**，口径系数 `20mm=0.7, 40mm=0.85, 76mm=1.0, 120mm=1.25, 155mm=1.5`。
 - 同时只能处理 1 发；处理完成后推入输出端口。输入缓存 1 发。
 - **同一发炮弹可被多个改进装置依次加工**，升级效果按"加法叠加、上限封顶"规则合并（§14）。
@@ -3859,7 +3875,135 @@ static func in_view(view: Rect2, at: Vector2) -> bool:
 - **未在 Android 上验证，任何 APK 均不存在。**
 
 
-#### 11.4.3 两个 SETUP 界面
+#### 11.4.2.21 弹药改进模块：从「无效容器」到「有实际功能的模块」（v3.41）
+
+用户原话：「**弹药改进模块目前似乎没有实际效果，将这些模块改为有实际功能的模块，例如爆破模块、火焰模块、增伤模块等等**」。
+
+这句话里有三层要求，缺一条都不算交付：**① 先查清「为什么没效果」**（用户报的是现象，不是诊断）；
+**② 改成真的有功能的模块**（不是只改数据表）；**③ 功能要分化**（他举的三个例子都是「按功能命名」的模块）。
+
+##### 一、两个根因（都有源码 / 实测证据）
+
+**根因 A（真产品缺陷）：生存模式的起始坦克里没有任何改进模块。**
+
+`survival_run.gd` 的 `STARTER_MODULES` 曾经是：
+
+```gdscript
+const STARTER_MODULES := [
+	{"id": "ammo_factory_76", "cell": Vector2i(0, 1), "rot": 0},
+	{"id": "conveyor_straight", "cell": Vector2i(2, 1), "rot": 0},
+	{"id": "cannon_76", "cell": Vector2i(3, 1), "rot": 0},
+	{"id": "cockpit_light", "cell": Vector2i(2, 2), "rot": 0},
+	{"id": "engine_small", "cell": Vector2i(3, 2), "rot": 0},
+]
+```
+
+五件模块里**没有一件带 `upgrade_slots`**。而 `_install_upgrade()` 的逻辑是「按 `module_parts` 顺序找第一件
+还有空槽的改进装置」，找不到就把升级 id 推进 `collected_upgrades` 暂存。于是探针实测：
+
+```
+starter modules = ["ammo_factory_76", "conveyor_straight", "cannon_76", "cockpit_light", "engine_small"]
+starter modifiers=0 total_slots=0
+_install_upgrade("up_damage") -> 没有空槽的改进装置，升级已暂存（up_damage）
+collected_upgrades = ["up_damage"]
+installed_upgrades = []
+```
+
+**玩家一路升到满级也装不进任何升级**。这就是「没有实际效果」的**直接根因** —— 不是引擎失效，
+是玩家根本没有容器。注意：这个问题在 v3.24「升级载荷实体化」时就已经存在，但那一轮只验了
+「载荷能不能随弹药流动」（用自己搭的车），**没有验「玩家的起始车装不装得上」**。
+
+**根因 B（探针缺陷，不是产品缺陷）：上一轮报的 `dmg_delta=0.000` 是弹药 id 写错。**
+
+上一版探针传 `ammo_id = "ammo_76"`，而 `data/ammo/calibers.json` 的真实 id 是 **`cal_76`**。
+`get_ammo("ammo_76")` 返回 `{}` → `base = 0.0` → `apply_hit()` 在**最前面**
+`if base <= 0.0: return result` 就早退了 → `result["damage"]` 恒 0，带不带升级都是 0。
+**那个数字什么也没证明。** 换成真实 id 后实测：
+
+```
+cal_76  + up_damage  base=55.0 mult=0.18 armor=3.0 | raw 55.0->64.9 | final 52.0->61.8 | delta=+9.8
+cal_155 + up_damage  base=240.0 mult=0.18 armor=3.0 | raw 240.0->283.2 | final 237.0->280.2 | delta=+43.2
+```
+
+`_final_damage()` 的护甲是**减法**（`maxf(damage * _damage_floor, damage - armor_eff)`），
+所以「护甲把 +18% 差异削平」这个假设被**证伪**了 —— 它本来就是两个不同的数。
+
+##### 二、修法：两族改进模块并存
+
+**第一族（保留）：通用容器 `modifier_mk1/mk2/mk3`。** 只有 `upgrade_slots`（1/2/3），
+槽里配什么完全由玩家决定。它们是「自由组合」的高级玩法，也是既有测试（`ammo_combo_smoke` 11 处、
+`upgrade_flow_smoke` 4 处）依赖的 id，**不删**。
+
+**第二族（新增）：功能固定的模块。** 定义里带 `intrinsic_upgrades`：
+
+| id | 名称 | 格 | price | mass | hp | armor | PU | 槽 | 处理 | 固有升级 |
+| --- | --- | --- | --- | --- | --- | --- | --- | --- | --- | --- |
+| `modifier_blast` | 爆破模块 | 1 | 130 | 3.0 | 55 | 1 | 12 | 1 | 0.7 s | `up_explosive` |
+| `modifier_flame` | 火焰模块 | 1 | 120 | 2.8 | 50 | 1 | 11 | 1 | 0.7 s | `up_burn` |
+| `modifier_power` | 增伤模块 | 1 | 110 | 2.6 | 50 | 1 | 10 | 1 | 0.6 s | `up_damage` |
+
+设计要点：
+
+- **固有升级不占槽**：装了「爆破模块」就已经在炸了，玩家还能再配一个槽升级。
+- **固有升级不写进 `part["upgrades"]`**：它是模块**类型**的属性，不是实例状态。
+  写进 part 会在蓝图反序列化、撤销、复制处多出一条可能漂移的副本。
+  运行期由 `AmmoNetwork._make_part()` 从 `definitions.get_module()` 读进 `part["intrinsic"]`。
+- 加工完成时：`payload = 原载荷 + intrinsic + 槽配置`（顺序固定，保证确定性）。
+- **旧的三档不删**：它们是「通用容器」这一族的必要成员，且删除会破既有测试。
+
+##### 三、起始坦克改造
+
+```gdscript
+const STARTER_MODULES := [
+	{"id": "ammo_factory_76", "cell": Vector2i(0, 1), "rot": 0},
+	{"id": "conveyor_straight", "cell": Vector2i(2, 1), "rot": 0},
+	{"id": "modifier_power", "cell": Vector2i(3, 1), "rot": 0},   # ← 新增
+	{"id": "cannon_76", "cell": Vector2i(4, 1), "rot": 0},
+	{"id": "cockpit_light", "cell": Vector2i(2, 2), "rot": 0},
+	{"id": "engine_small", "cell": Vector2i(3, 2), "rot": 0},
+]
+```
+
+车体仍是 `6×4`，「不放弹药库」的原理由（殉爆在 6×4 的车里等于自杀）不变。
+把增伤模块插在直管与炮管之间，**开局就有 +18% 伤害**，玩家第一次开火就能看到比白板更高的数字。
+
+##### 四、验证
+
+**端到端探针**（`.me/tmp/main/probe41d.gd`，走真实 `SurvivalRun.build_starter()` + 真实 `AmmoNetwork`）：
+
+```
+starter cannon payloads = ["up_damage"]
+modifier_blast   -> cannon payloads = ["up_explosive"]
+modifier_flame   -> cannon payloads = ["up_burn"]
+modifier_power   -> cannon payloads = ["up_damage"]
+modifier_power slots after player config = ["up_damage"]   # 固有升级不占槽
+PROBE41V3_DONE checks=25 failures=0
+```
+
+**永久回归**（`tests/upgrade_flow_smoke.gd` 新增两段，10,256 → 15,385 B）：
+`_check_function_modules_carry_intrinsic()`（三种模块 × 数据层 + 流程层）与
+`_check_starter_can_install_upgrade()`（起始车有容器 → 装得上且不靠暂存 → 弹药链真的把它带到炮管）。
+
+**负向验证**（`.me/tmp/main/negctl41.py apply/restore`）：同时退回两处修复后立刻
+**`UPGRADE_FAIL count=7`**，其中前 3 条只来自 `ammo_network`、后 4 条只来自 `survival_run` ——
+**两处修复各自都有独立的失败项**，证明断言有真实区分力。`restore` 后回到 `UPGRADE_OK`。
+
+**全量回归**：23 项 smoke 全绿（`s41a.txt` 1,086 B / `73e2a81e`），`physics_smoke` 数值与 v3.40 逐字相同。
+**截图目视**：`v41_surv.png` 的镜像面板显示「增伤模块 加工 100%」；
+`v41_modify.png` 上能看到「增」模块在弹药链中段；6× 放大 `crop41_tank.png` 里
+「76 → 直管 → 增 → 炮管」与青 in / 琥珀 out 箭头一眼可读。
+
+##### 五、已知边界（不得弱化）
+
+- **本次改动尚未经过用户实机确认。** 上一版的弧管与炮管偏移都是用户实机发现的。
+- **截图证明的是「装得上 / 在流水线里被加工 / 箭头可读」**，**不证明**「开火后肉眼能看出伤害数字变大」——
+  那需要真实对局里同口径带 / 不带 `up_damage` 的伤害对比，本轮**没有做**，只有 `probe41b.txt`
+  的数值链（52.0 → 61.8）作间接证据。
+- **改进槽的配置入口仍然只有键盘**（改装页 `Q/E` 选升级、`T` 装槽、`Shift+T` 清空），没有鼠标路径。
+  功能模块的固有升级不需要配槽，所以**这次的修法绕开了这个可用性问题，但没有解决它**。
+- **`processing_multiplier` 仍是死字段**（`upgrades.json` 每条都有，零代码读取）。
+- **未在 Android 上验证，任何 APK 均不存在。**
+
 #### 11.4.3 两个 SETUP 界面
 
 **`EXPEDITION_SETUP`（单人远征）**
@@ -4821,7 +4965,8 @@ M3 的物理验收基准（`M 61.0 u` / `I 104 064 u·px²` / `T 9000` / `v_max 
 | 引擎 | `engine_small` / `medium` / `heavy` | 60 / 120 / 210 cr |
 | 制造 | `ammo_factory_20/40/76/120/155` | 70 / 85 / 140 / 180 / 230 cr |
 | 弹药库 | `ammo_depot_small` / `large` | 50 / 90 cr |
-| 改进 | `modifier_mk1` / `mk2` / `mk3` | 90 / 160 / 240 cr |
+| 改进（通用） | `modifier_mk1` / `mk2` / `mk3` | 90 / 160 / 240 cr |
+| 改进（功能固定，v3.41） | `modifier_blast` / `flame` / `power` | 130 / 120 / 110 cr |
 | 炮管 | `cannon_20/40/76/120/155` | 55 / 75 / 120 / 170 / 220 cr |
 | 护盾 | `shield_cell` / `plate` / `dome` | 90 / 150 / 180 cr |
 | 管路 | `conveyor_*`（全部 6 种） | 6 cr |
@@ -5212,3 +5357,4 @@ M3 的物理验收基准（`M 61.0 u` / `I 104 064 u·px²` / `T 9000` / `v_max 
 | 2026-10-27 | v3.38 | **战斗场景鼠标滚轮缩放**（用户要求：「实现战斗场景可以使用鼠标滚轮缩放，放大可以更清晰看到坦克细节，缩小可以看到更远处的敌人」）。① **相机建模成一块世界矩形，而不是一个缩放标量**：`CombatView` 的 `to_screen` / `fit_scale` 第二个几何参数从 `arena` 改为 `camera`，并新增成对的 `to_world`（精确逆变换）；`fit_scale(view, camera)` 因 `camera.size = arena.size / zoom` 而自动等于 `fit_scale(view, arena) * zoom`，不需要再乘一次 zoom。**目的是让绘制与鼠标反算只有一份推导**（v3.37 的教训）。② **`camera_rect()` 的 identity 分支是默认像素不变的构造性保证**：`zoom == 1.0` 时它**原样 `return arena`**（零乘除），于是 `to_screen()` 的输入与 v3.37 逐字相同。**不要把这一行「优化」成算出等值矩形** —— 乘除可能改动最后一 bit，历史截图基线随之失效。③ **滚轮拦截位置**：战斗页缩放必须在 `_input()` 里、所有分流**之前**截获，并用 `_is_battle_screen()` 限定；因为 `_handle_mouse()` 里滚轮本就有「滚模块列表」语义，而 `_handle_survival_mouse()` 必须把它继续下传（v3.18 修过）。改装页 / 升级页 / 商店页的 `_is_battle_screen()` 为 false，**根本进不到这个分支**。④ **焦点跟随三级优先**：玩家车中心 → 竞技场中心 → `zoom == 1.0` 时**不追焦**。不采用鼠标锚点缩放：实时战斗里光标锚点会让战场持续平移，玩家一边瞄准一边滚轮时敌人位置的屏幕读法每滚一格都变。**`zoom == 1.0` 不追焦是硬约束** —— 否则「从没缩放过」的截图路径也会因焦点漂移改变像素。⑤ **范围 0.5–4.0、步进 1.15、`Z` 复位**；`zoom` 在 `_set_screen()` 里复位 1.0，否则上一页的倍数会带到下一页，也会让同一组 `--capture` 参数拍出不同画面。⑥ **裁剪纪律（本功能最容易漏的一半）**：`canvas.draw_*` 在 Godot 4 里没有任何裁剪参数，缩放后边框与障碍会画到 HUD 上。**Godot 4 的 GDScript 没有 `canvas_item_set_clip_rect`**（实测 `Parse Error`），只能用纯几何裁剪：矩形用 `Rect2.intersection(view)`、圆用「包围盒剔除 + 视图内 `draw_circle` 快路径 + `_clipped_disc()`（48 段多边形 → `Geometry2D.clip_polygons`）」。**网格起点必须从 `to_screen(arena.position)` 推出**，写死 `view.position` 会在相机偏移后与世界格脱开。⑦ **三页各自只算一次 camera** 并逐层下传（逐处重算会在焦点插值那一帧取到两个值）；`_aim_with_mouse()` 必须把 `camera` 传给 `_aim_player_cannons()`，`tests/camera_zoom_smoke.gd` 用**源码审查 + 负向验证**把这条钉死（换成 `arena` 立刻报 `aim_wiring_passes_camera`）。⑧ **不参与缩放的东西**：HUD（画在 `DRIVE_VIEW` 之外的固定设计坐标，本就不走 `to_screen`）、准星（画在屏幕坐标，与 OS 光标逐像素重合，缩放只改变它对应的世界点）。（模块进度条 / 履带纹走车体局部坐标 × `scale_factor`，**自动**跟着放大 —— 这正是「放大看细节」想要的。）⑨ **本轮自己引入、自己拍图发现的两个真实产品缺陷（都必须完整陈述）**：**缺陷 A** 竞技场青色边框溢出到左侧「刚体状态」面板与右 HUD —— 相机改造只把几何改成随相机走、**没有裁剪**；1.0× 时边框与视图重合所以看不见，**只在缩放后出现**；修法 `.intersection(view)`。**缺陷 B** 生存页 2.0× 下右下角大红圆障碍盖住「坦克镜像」面板 —— 缺陷 A 的修法只覆盖矩形，圆既没求交也没裁剪；修法三路（包围盒剔除 / 快路径 / `_clipped_disc`）。**另有 3 处自伤（已修）**：`canvas_item_set_clip_rect` 在 Godot 4 不存在、`File.Edit` 留下重复的 `var origin` 行、`_check()` 的参数名与局部变量同名。（都是「`File.Edit` 返回 succeeded 不证明结构正确」的又一次印证。）⑩ **验证**：`--check-only` `combat_view.gd` / `main.gd` / `tests/camera_zoom_smoke.gd` 均无 `Parse Error`；**23 项 smoke 在同一次批量跑里全绿**（`s38b.txt` 1086 B / `cd86dbb4`），其中 `camera_zoom_smoke => CAMERA_OK checks=149`、`perf_smoke` 被单独排在最后并前置 3 秒静默以避开并发假阳性（`PERF_OK`）。⑪ **被遗漏并本轮补上的不对称**：上一版只有对局页与生存页 HUD 显示缩放倍数，**试驾页没有**；本轮给它补上（键位行距从 30 收到 26 腾出位置），三页现在都有 `滚轮缩放 · Z 复位  x.xx×`。⑫ **像素证据（真实窗口截图，逐张 `Image_View` 亲自看过）**：试驾 2.5× 边框已裁在视图内、坦克格子 / 履带 / 炮管 / 伤害数字明显变大；试驾 0.5× 整张地图缩到中央、四周露背景网格；对局 2.0× 与生存 2.0× 车体细节清楚、红圆不再盖住镜像面板；**新增试驾 1.0× 基线 `1F299B04`**（`zh_base.png` 省略 `--zoom` 与 `zh_1.0.png` `--zoom=1.0` **逐字节相同**）；旧基线 `FF4DDA64` 因 HUD 多一行而**作废**。⑬ **两条环境事实**：`--capture` **必须在真实窗口下跑**，`--headless` 下永远拿不到图（`await RenderingServer.frame_post_draw` 在 headless 不发；**已用 v3.37 基线 `3d4fbb4` 验证同样失败，不是本轮引入**）；`--quit-after` 的单位是**帧数不是秒**。⑭ **新增测试钩子 `--zoom=`**：`--capture` 路径不产生任何滚轮事件，不给钩子就只能拍到 1.0×。**坑**：`_process()` 在 `_capture_frozen` 后立即 return，所以 `_camera_follow()` 不会跑 —— 焦点必须在**冻结前**显式钉一次，否则会拍到「焦点 = 世界原点」的错误视角。**如实声明**：**本次改动尚未经过用户实机确认**（v3.37 的炮管偏移缺陷就是用户实机发现的）；**本轮没有做「v3.38 与真正 v3.37 构建」的字节比对** —— 「默认像素不变」的依据是 `camera_rect()` 的 identity 分支（构造性），「`--zoom=1.0` ≡ 省略 `--zoom`」与「确定性」只是**同构建的佐证**，不是基线比对；相机不能旋转、不能拖拽平移；`zoom` 不进存档、不是设置项；缩小到 0.5 时一格只有 4.75 屏幕像素，「看得到」但不「看得清」；**未在 Android 上验证，任何 APK 均不存在**。 | §11.4.2.18 §17 |
 | 2026-10-27 | v3.39 | **弧管几何修复：弯曲管道无法与相邻管首尾相接**（用户原话：「弯曲的管道绘制有些问题，没法和其他管子对齐，首尾相接」）。① **把「接得上」拆成两条独立判据**：**端点重合**（中心线首点/末点必须**逐字节等于** `PipeView.port_point()`）与**方向连续**（端点切线必须**沿**管轴，`\|dot\| ≈ 1`）。**缺一条都不算接上**——只对上位置会得到 90° 折角，只对上方向会留下半格断口。② **两个实测缺陷**（独立探针 `probe_arc.gd`，非推断）：**缺陷 A** `_arc_half_points()` 四个朝向 `line_head` 比 `port_a` 短 **8.0000 px**、`line_tail` 比 `port_b` 短 **8.0000 px**（16 px 格下正好半格），根因是半径写死 `cell*0.5` 且以**接缝**为圆心直接从端口起弧，而二分之一弧的端口在**外侧格边**、到接缝是一整格；**缺陷 B** `_arc_quarter_points()` 端点 gap=0 但 `tangent_in=(0.998796, 0.049066)` / `dot_axis=-0.0491`，即**切线垂直于轴**，根因是圆心放在**格中心**（`_junction_hub()`）——N 端口半径指向上、E 端口指向右。③ **`conveyor_arc_half` 不可能是 180° 半圆（几何证明）**：两端口在**同一直线**上且方向相反、各距接缝一整格；「180° 半圆（圆心=接缝，半径=一格）」两端点虽然正确，但那里半径向量沿轴 ⇒ **切线垂直于轴**；「直段+半圆+直段」要落在端口上直段必须为 0 ⇒ 退回上一种；「正交台阶+圆角」虽满足两条但形状是方波且横移一格贴包围盒边界。**选定解析曲线 `bulge = offset·sin²(πt)`**：`d(bulge)/dt = offset·2·sin(πt)·cos(πt)·π` 在 `t=0/1` 处为 0 ⇒ **两端切线精确沿轴**；`t=0.5` 处 `bulge = offset` 保证有明确弯曲；`bulge ∈ [0, offset]` 单调有界不越格。④ **两个数值细节都踩过**：`offset` **必须用短边**（`min(bounds.size.x, bounds.size.y) * cell * 0.5`）——用 `maxi`（长边）算成 16 会立刻 `outside_footprint = 8.0000` 越界，因为端口在短边中点、到包围盒边界只有半格；`lift` 方向**必须按端口朝向硬定**（W/E 取 `+y`、N/S 取 `+x`），**不能用点积判正反**——`lift = Vector2(-axis.y, axis.x)` 与轴恒垂直，任何与轴同向的向量点积都为 0。⑤ **四分之一弧圆心必须取格角**：新增 `_corner_between(bounds_position, bounds_size, dir_a, dir_b, cell)`，半径取 `a.distance_to(centre)` = `cell·√0.5 ≈ 11.314`；修后四朝向 `tangent_in_dot = -0.9988` / `tangent_out_dot = 0.9988` / `bulge = 2.3431`（正是 90° 弦高 `r(1−cos45°)`）/ `outside = 0.0000`。两条弧管均**首尾强制钉到端口点**（`points[0] = a` / 末点 = `b`），因为 `atan2 → cos/sin` 往返会留下 1e-15 级误差而「无接缝」要求逐字节相同。⑥ **测试与实现共谋（本轮最重要的教训，比任何一行代码都重要）**：`tests/pipe_geometry_smoke.gd` 从 v3.35 起连续四个版本（v3.35–v3.38）报 `PIPE_GEOMETRY_OK` 而产品是坏的，**不是「测得不够多」而是测试在复述实现**——三处盲区叠加：(a) 第 ③ 条 `absf(t0.dot(side_vector)) <= tol` 断言的是「切线**垂直**于格边」，**把错误行为写成了期望值**；(b) 第 ④ 条 `_arc_centre()` 自己算圆心、半径写死 `CELL * 0.5`，与实现**两边同错 ⇒ 恒过（自证）**；(c) **完全没有「中心线首尾 == `port_point()`」这条断言**，原第 ② 条只比对两个 `port_point()`（两边同一函数、恒等）。**通用规则（已进 `agent_note.md` §8）：探针的期望值必须来自与实现无关的独立推导（几何定义 / 物理定律 / 离散化阶数）或用户可见需求；一旦复用被测算法的中间量，写多少条断言都没有区分力。**⑦ **测试修法**：第 ③ 条方向**翻转**为「必须沿轴」（`absf(dot) < 1.0 - 0.03` 即失败；容差 0.03 由 32 段离散化推得，`\|dot\| ≈ 0.995`，既容得下离散化又能抓到「垂直」这种真错）；**新增** `centre_line_head_not_port` / `centre_line_tail_not_port`；第 ④ 条换成「采样点在占位包围盒内（容差半格）+ 确实有凸起（≥ `CELL*0.1`）」两条与实现无关的断言。断言数 **139 → 163**；原第 ② 条**刻意保留**（它守 `_port_cell()` 与 `_opposite()` 的对称性，只是不能单独依赖）。⑧ **两次负向验证（只跑一遍绿不能证明测试有效）**：`negctl39.py apply`（四分之一弧圆心改回格中心）→ 立刻 **8 条** `arc_start_not_axial` / `arc_end_not_axial`（四朝向 × 2，`dot=-0.0491` / `0.0491`）；`negctl39b.py apply`（二分之一弧首尾各缩回半格并去掉端口钉死）→ 立刻 **8 条** `centre_line_head_not_port … gap=8.0000` / `centre_line_tail_not_port … gap=8.0000`。**失败输出精确对应用户描述的症状**；两次 restore 后均回到 `PIPE_GEOMETRY_OK checks=163 failures=0`。⑨ **独立探针**：`probe_arc2.gd` 56 条断言（首尾==端口点 / 端点切线沿轴 / 采样点在占位内且有凸起 / 邻居直管首尾逐字节相同）→ `ARC_PROBE_OK checks=56 failures=0`，逐朝向 `quarter tangent ±0.9988`、`half tangent ±0.9971`、`gap=0.0000`、`outside=0.0000`、`half bulge=8.0000`。⑩ **死代码清理**：`_append_arc_corner()`（只在「直段+圆角」那版试做里被调用）已确认零引用后删除，同时删掉只服务它的 `CORNER_SEGMENTS` 常量；`scripts/pipe_view.gd` 27,957 B → **26,689 B / 543 LF**，删后 `--check-only` 干净、`PIPE_GEOMETRY checks=163 failures=0` 不变。⑪ **全量回归**：`run_smoke39.ps1`（从 v3.38 版复制，**输出改到 `s39a.txt` 以免覆盖 v3.38 基线**）→ `s39a.txt` 1086 B / `cd86dbb4`，**23 行全部 OK**（含 `perf_smoke => PERF_OK`）。⑫ **视觉证据（真实窗口截图 + `Image_View` 亲眼看过，不是只看探针）**：`arc_final.png` 1920×1080 / `a2a9d5c3`、`crop_final.png` `feaf55cc`、8 倍放大 `zoom_q.png` `5b9117b8`（四分之一弧 `[6,5]` rot90 与 `[8,5]` rot180）/ `zoom_h.png` `78846ef0`（二分之一弧 `[14,6]` rot90 与 `[16,6]` rot0）；目视确认为**两端与邻居相接、无半格断口、无 90° 折角、弧形不越格**；三张中间版本哈希 `5E3EEEF7` / `049EED74` / `A2A9D5C3` 互不相同，证明改动逐版生效。⑬ **文档订正**：§6.7 的 `conveyor_arc_half` 由「180° U 形 / 出入方向相反，横向偏移 1 格」（与 `CONVEYOR_PORTS` 的 `in0 @ W` / `out0 @ E` 共线定义矛盾）就地改为「弧形渐弯（`sin²`）/ 两端切线沿管轴，鼓幅半格」；§11.4.2.16 里「弧端点切线**垂直**于所在格边」与「`_junction_hub` 只是简化、不是圆心错误」两处**被 v3.39 推翻的旧判断**按 append-only 就地加注更正并指向 §11.4.2.19；新增 `#### 11.4.2.19 弧管几何修复（v3.39）` 七节（两条判据 / 缺陷 A / 缺陷 B / 几何证明 / 短边与 lift / 测试共谋 / 负向验证 / 已知边界）。**如实声明**：**本次改动尚未经过用户实机确认**（本轮的弧管缺陷与上一版的炮管偏移都是用户实机发现的）；**探针与 smoke 全绿只证明数值正确，不证明画面正确**，视觉结论来自上述截图的 `Image_View` 目视；**没有做「v3.39 与 v3.38 构建」的像素基线比对**，能证明的是「中间三版截图哈希互不相同」与「几何断言全绿」；**`conveyor_arc_half` 的实际形状是向内鼓的弧形（鼓幅半格 8 px），不是 180° U 形半圆**；**直管 / 三通 / 二合一 / 四通未改动**（探针确认其几何本来正确）；**未在 Android 上验证，任何 APK 均不存在**。 | §6.7 §11.4.2.16 §11.4.2.19 §17 |
 | 2026-10-27 | v3.40 | **相机推拉重做：缩放不是「把地图在桌上缩放」，而是真的相机远近**（用户原话：「重新设计战斗场景缩放的功能，目前的效果存在很多问题，应该按照相机视角，相机远就缩小，相机近就放大」）。① **旧模型的核心错误是语义级的，不是参数不尽相同**：v3.38 的 `camera_rect(arena, focus, zoom)` 返回 `arena.size / zoom` 的矩形，`zoom < 1` 时**相机比地图还大**。独立探针 `probe_cam41.gd` 实测：`zoom=0.50` 时相机 **4096×2304**（竞技场只有 2048×1152）、`pos=(-1024,-576) end=(3072,1728)` **四边各溢出 1024 / 576 世界像素**、`cover=0.250` ⇒ **视图 75% 在画不存在的世界**（`zoom=0.75` 时 43.8%）；截图 `zd_0.5.png` 目视确认地图缩成中间 608×342 的小方块。**那不像相机，像把地图在桌上缩放** —— 这就是用户说的「很多问题」的直接来源。② **换成距离模型**：状态改为一维的**相机距离** `height`（相机视野覆盖的世界高，px）—— **数值大 = 相机远 = 画面缩小；数值小 = 相机近 = 画面放大**，与用户的镜头语言严格一致。新增 `CombatView.camera_at_height(arena, focus, height)`，三条硬约束：**(1) 最远 = 整张地图**（`height >= arena.size.y` 时**原样 `return arena`，零乘除** ⇒ 默认像素与 v3.37 逐字节相同，基线 `zh_1.0.png` = `1F299B04` 继续有效）；**(2) 相机永远不超出地图**（Rect 再夹进竞技场）；**(3) 宽高比永不改变**（宽 = 高 × 竞技场宽高比 ⇒ 任意距离下恰好铺满视图，既无 letterbox 也无裁切）。③ **两个端点可复算**：最远 `arena.size.y` = **1152** ⇒ 一格 `16×1216/2048` = **9.5 屏幕像素**；最近 `1152 / CAMERA_MAG_MAX` = **288** ⇒ 一格 `16×684/288` = **38 屏幕像素**（与建造页 32 px 格同等级）。新增 `camera_height_for_mag()` / `camera_mag()`，读数区间 **[1.00, 4.00]，1.00 = 整图**。④ **删除两个东西，并说清为什么**：`camera_rect()` **整段删除** —— 它与「相机比地图大」共用签名与常量族，留着就等于留着一条**能表达非法视角**的 API；`CAMERA_ZOOM_MIN = 0.5` **永久删除** —— 在距离模型里「比整图还远」这一档**不可构造**（`camera_height_for_mag(arena, 0.5)` 走 `maxf(mag,1.0)` 返回最远），保留常量只会误导后来者。还**踩过并删掉** `CAMERA_CELL_PX`：`16×684/38 = 288 = 1152/4`，它与 `CAMERA_MAG_MAX` 是同一个事实的两种写法（连带删掉引用它的 `_camera_dist_nearest()`）。⑤ **滚轮是推拉（不是阶跃）**：`_camera_zoom_by()` **只改目标距离**；换算路径是「目标距离 → 读数 → 乘除档位 → clamp 到 [1.00, 4.00] → 换回距离」—— **夹取在读数维**，因为距离维的边界是非线性的。每帧用 `1 - exp(-CAMERA_DIST_FOLLOW·delta)`（k=7）插值，约 0.3 s 到位、与帧率无关、不用 `randf`。**两个必要的细节**：`absf` 差 < 1e-3 时**必须直接吸附**（最远分支是 `>=` 的位比较，不吸附就永远停在「差一点点」，`to_screen()` 最后一位会变）；**必须先推距离再算焦点**（距离决定相机多大，相机多大决定焦点能夹到哪里）。⑥ **高倍下的两个真实缺陷（都是截图 / 探针实测，不是推断）**：**(A) 相机外的图元边界照样被画出来** —— 取相机上边界往上 40 世界像素的点，屏幕 y=**73**，而 `DRIVE_VIEW.position.y = 168`（落在视图外 95 px）；`cam40_d2.png` 里 `-6`/`-12` 两个伤害数字出现在**战场视图上方的标题区**。因为 `canvas.draw_*` 在 Godot 4 里**没有任何裁剪参数**（`canvas_item_set_clip_rect` 在 GDScript 里不存在，实测 `Parse Error`），新增 `in_view(view, at)` 并在**七处**加闸：`draw_shots` / `draw_fx` / `draw_hit_flash` / `draw_muzzle_flash` / `draw_expire_flash` / `draw_damage_popups`。**(B) 贴边时焦点被夹**，`zoom=2.0` 且 `focus_x=0` 时 `camera_centre_x=512`（偏移 512 px），车不在画面中心。这一条**本轮判断为设计取舍而非缺陷**：不越界优先于永远居中，两者冲突时前者胜（若用户要求「贴边也居中」，则必须允许越界，会重新引入空白）。⑦ **修正了 (A) 的修法本身**：`draw_string()` 的锚点是**基线**、字形向上延伸约一个字高，只判锚点时数字上半截仍会越界 —— 截图 `c40_d_far.png` 里 `-7` 正是压在 `DRIVE_VIEW` 的青色上边框上（4 倍裁切 `crop_far_top.png` 确认）；改为**基线与字顶两个点都要在视图内**后 `c40_d_far2.png` 里彻底不再越界。⑧ **测试与负向验证**：`tests/camera_zoom_smoke.gd` 整份重写（250 行 → **380 行 / 19,966 B**），11 组检查、**545 条断言**，核心是 `_check_never_exceeds_arena`（5 focus × 13 height，判据只用到 `Rect2` 四个边界，**不引用 `camera_at_height()` 的中间量** —— §11.4.2.19 第六节教训的直接应用）。负向：`negctl40.py apply` 删掉最远保护 → **62 条失败**（`far_identity_double`/`far_identity_huge` + 60 条 `inside_*`/`not_wider_*`/`not_taller_*`），`restore` 后回到 `CAMERA_OK checks=545` 且输出逐字节相同。**陷阱：距离表必须包含「超过最远」的非法输入**（`FAR*2`/`FAR*1.5`/`99999`）—— 第一版只到 `FAR`，去掉保护后核心断言一条都没失败，因为夹取公式在 `height == FAR` 时恰好也得到 `arena`。⑨ **另修两处下游引用**：`tests/aim_smoke.gd` 也引用了已删的 `camera_rect()`，导致 `AIM_OK` 消失、runner 记成 `NO_OK_LINE`（改为 `camera_at_height(arena, centre, arena.size.y)`，与旧 `zoom==1` 逐位等价）；另 `combat_view.gd` 曾因 `draw_muzzle_flash()` 里 `var forward` **写了两遍**而整文件 `Parse Error`（连带 `main.gd`/测试全部 preload 失败），已删重复行。⑩ **接口不兼容变更**：`--zoom=` 从「倍数 0.5–4.0」改为「**读数 1.00–4.00，1.00 = 整图**」，旧命令 `--zoom=0.5` 现在等价于 `1.0`；且必须**延迟应用**（它可能排在 `--screen=` 之前，那时竞技场还是空 `Rect2`）。反向顺序已实测：`--zoom=1.6 --screen=drive` 与 `--screen=drive --zoom=1.6` 的两张截图 `diff_png.py` 判定 **`IDENTICAL 1920x1080`**。⑪ **视觉证据（真实窗口截图 + `Image_View` 亲眼看过，不是只看断言）**：`c40_d_far2.png`（`f93cc99ebb60a37c`，1.00× 整图、零空白、读数 `相机 1.00×（整图）`）、`c40_d_mid2.png`（1.60×）、`c40_d_near.png`（`e0c417580e4c6172`，4.00× 近端、一格约 38 px、坦克可读）、`c40_m_mid.png`（`87f2e79d89f37711`，对局页 1.60×、镜头居中跟玩家车）、`c40_s_mid.png`（`0d1b3ef4cb70d5ff`，生存页 1.60×）、`c40_rev.png`（`5507b102d460884f`，反向参数顺序）。⑫ **全量回归**：新写 `run_smoke40.ps1`（从 v3.39 版复制，**输出改到 `s40a.txt` 以免覆盖 `s39a.txt`**）→ `s40a.txt` 1086 B / `5eef08b3`，**23 行全部 OK**，与 `s39a.txt` 的差异**只有** `camera_zoom_smoke => checks=149 → 545`。**如实声明**：**本次改动尚未经过用户实机确认**（上一版的弧管缺陷与再上一版的炮管偏移都是用户实机发现的）；**断言与 smoke 全绿只证明数值正确，不证明画面正确**，视觉结论来自上述 6 张截图的 `Image_View` 目视；**没有做「v3.40 与 v3.39 构建」的像素基线比对**，「最远 = 整图与 v3.37 逐字节相同」是**构造性论证**（零乘除）而非实测比对；**旧截图 `zd_0.5.png` / `zd_2.5.png` / `zm_2.0.png` / `zs_2.0.png` / `cam40_d2.png` / `cam40_d4.png` 全是旧模型下拍的，只能当「旧观感」证据，不能当新基线**；**「贴边不居中」是设计取舍，未与用户确认是否可接受**；**未在 Android 上验证，任何 APK 均不存在**。 | §11.4.2.18 §11.4.2.20 §17 |
+| 2026-10-24 | v3.41 | **弹药改进模块：从「无效容器」到「有实际功能的模块」**（用户原话：「弹药改进模块目前似乎没有实际效果，将这些模块改为有实际功能的模块，例如爆破模块、火焰模块、增伤模块等等」）。① **先查清「为什么没效果」，再动手**——用户报的是现象不是诊断。两个根因，一真一假：**根因 A（真产品缺陷）** 生存模式的 `survival_run.STARTER_MODULES` 里**五件模块没有一件带 `upgrade_slots`**，而 `_install_upgrade()` 是「按 `module_parts` 顺序找第一件还有空槽的改进装置」，找不到就把 id 推进 `collected_upgrades` 暂存。探针实测 `starter modifiers=0 total_slots=0`、`_install_upgrade("up_damage")` 返回「没有空槽的改进装置，升级已暂存」、`installed_upgrades=[]` —— **玩家升到满级也装不进任何升级**。这就是「没有实际效果」的直接根因，不是引擎失效，是玩家根本没有容器。（这个问题在 v3.24「升级载荷实体化」时就已存在，但那一轮只验了「载荷能不能随弹药流动」——用自己搭的车，**没验玩家的起始车装不装得上**。）**根因 B（探针缺陷，不是产品缺陷）** 上一轮报的 `dmg_delta=0.000` 是**弹药 id 写错**：探针传 `ammo_76`，而 `calibers.json` 的真实 id 是 **`cal_76`**，`get_ammo()` 返回 `{}` → `base=0.0` → `apply_hit()` 在最前面 `if base <= 0.0: return result` 就早退 → `result["damage"]` 恒 0。**那个数字什么也没证明。** 换成真实 id 实测 `cal_76 + up_damage` 从 **52.0 → 61.8（+9.8）**、`cal_155 + up_damage` 从 **237.0 → 280.2（+43.2）**；`_final_damage()` 的护甲是**减法**（`maxf(damage * 0.15, damage - armor_eff)`），所以「护甲把 +18% 差异削平」这个假设被**证伪**。② **修法：两族改进模块并存**。第一族**保留**通用的 `modifier_mk1/mk2/mk3`（只差 `upgrade_slots` 1/2/3 与 `processing_time_s`，槽里配什么由玩家决定，是「自由组合」的高级玩法，也是既有测试依赖的 id，不删）。第二族**新增**三件**功能固定的模块**，定义里带 `intrinsic_upgrades`：`modifier_blast`（爆破模块，1 格，130 cr，`up_explosive`）、`modifier_flame`（火焰模块，1 格，120 cr，`up_burn`）、`modifier_power`（增伤模块，1 格，110 cr，`up_damage`）；三者各带 1 个槽，固有升级**不占槽、永远生效**。③ **一个刻意的实现选择：固有升级不写进 `part["upgrades"]`**。它是模块**类型**的属性而不是实例状态，写进 part 会在蓝图反序列化、撤销、复制处多出一条可能漂移的副本。运行期由 `AmmoNetwork._make_part()` 从 `definitions.get_module()` 读进 `part["intrinsic"]`，加工完成时 `payload = 原载荷 + intrinsic + 槽配置`（顺序固定，保证确定性）。④ **起始坦克改造**：`STARTER_MODULES` 变成 `factory_76(0,1) → 直管(2,1) → modifier_power(3,1) → cannon_76(4,1)`，车体仍是 `6×4`、「不放弹药库」的原理由（殉爆在 6×4 的车里等于自杀）不变。开局就有 **+18% 伤害**，玩家第一次开火就能看到比白板更高的数字。⑤ **验证（数值层 + 玩家路径层 + 像素层三层都有证据）**。**端到端探针**（走真实 `SurvivalRun.build_starter()` + 真实 `AmmoNetwork`）：`starter cannon payloads = ["up_damage"]`、`modifier_blast/flame/power → cannon payloads = ["up_explosive"]/["up_burn"]/["up_damage"]`、`modifier_power slots after player config = ["up_damage"]`（固有升级不占槽）、**`PROBE41V3_DONE checks=25 failures=0`**。**永久回归**（`tests/upgrade_flow_smoke.gd` 10,256 → **15,385 B**）新增两段：`_check_function_modules_carry_intrinsic()`（三种模块 × 数据层声明 + 流程层真的流到炮管）与`_check_starter_can_install_upgrade()`（起始车有容器 → 装得上且**不靠暂存** → 弹药链真的把它带到炮管）。**负向验证**（`.me/tmp/main/negctl41.py` apply/restore）同时退回两处修复 → 立刻 **`UPGRADE_FAIL count=7`**，其中前 3 条只来自 `ammo_network`、后 4 条只来自 `survival_run` —— **两处修复各自都有独立的失败项**，证明断言有真实区分力；`restore` 后回到 `UPGRADE_OK`。**全量回归**：**23 项 smoke 全绿**（`s41a.txt` 1,086 B / `73e2a81e`），`physics_smoke` 数值与 v3.40 基线**逐字相同**（mass=61.0 / inertia=104064 / v_max=192.1 / turn180_s=1.70 / spin_stop_s=0.43）。**真实窗口截图 + `Image_View` 亲自看过**：`v41_surv.png`（1920×1080 / 202,833 B）的镜像面板「部件状态」里出现 **增伤模块 加工 100%**；`v41_modify.png`（270,554 B）上能看到「增」模块位于弹药链中段、`体积 7×4`、`结构合法，可以部署。`；6× 放大 `crop41_tank.png`（1320×780）里 **「76 → 直管 → 增 → 炮管」与青 in / 琥珀 out 箭头一眼可读**。两次 capture 均含 `WINDOW_MODE mode=2 size=(1842, 1057)` 与 `CAPTURE_OK`、**无 `SCRIPT ERROR`**。⑥ **一处自伤（已修）**：收尾时想追加本行，`File.Edit` 误把 v3.40 那一整行**截断成了一个标题**；立即用 `git show HEAD:docs/design.md` 取出原始行按字符数（4,653）逐字节写回并校验 `LAST_IS_V340 True`，然后才追加本行。**这是「`File.Edit` 范围算错会静默破坏历史行」的又一次印证，append-only 的变更表绝对不能用手写长行。****如实声明**：**本次改动尚未经过用户实机确认**（上一版的弧管与炮管偏移都是用户实机发现的）；**截图证明的是「装得上 / 在流水线里被加工 / 箭头可读」，不证明「开火后肉眼能看出伤害数字变大」**——那需要真实对局里同口径带/不带 `up_damage` 的伤害对比，本轮**没有做**，只有 `probe41b.txt` 的数值链（52.0 → 61.8）作间接证据；**改进槽的配置入口仍然只有键盘**（改装页 `Q/E` 选升级、`T` 装槽、`Shift+T` 清空），无鼠标路径，本次修法**绕开了这个可用性问题但没有解决它**；**`processing_multiplier` 仍是死字段**（`upgrades.json` 每条都有，零代码读取）；`data_smoke modules=45 → 48` 是新增三件模块的预期结果；**未在 Android 上验证，任何 APK 均不存在**。 | §6.4 §11.4.2.21 §17 |

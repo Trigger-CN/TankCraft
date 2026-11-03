@@ -228,12 +228,21 @@ func bind_player(tank_builder: GridBuilder) -> void:
 ## 弹药链沿 y=1 从车头走到车尾，驾驶舱与引擎分居 y=2 左右，重心居中。
 ##
 ## 弹药链端口规则（`ammo_network.gd:28-34`）：factory 只出 E、直管 W→E、炮管只进 W，
-## 所以三件必须横向逐格相邻；炮管是 2 格宽，起点必须紧贴直管右侧那一格。
+## 所以这几件必须横向逐格相邻；炮管是 2 格宽，起点必须紧贴上一件右侧那一格。
+##
+## **v3.41：弹药链里必须有改进模块**。在此之前 `STARTER_MODULES` 里没有任何带
+## `upgrade_slots` 的模块，于是 `_install_upgrade()` 永远找不到容器，每张升级卡都只能
+## 进 `collected_upgrades` 暂存 —— 玩家一路升到满级也看不到任何效果。
+## 现在起始车带一件「增伤模块」（`modifier_power`，自带 `up_damage`），
+## 局内拿到的升级卡就有地方装，装完当波就能看到伤害数字变大。
+##
+## 布局（x=0..5）：factory(0,1 fp2 → 0,1/1,1) → 直管(2,1) → 增伤模块(3,1) → cannon_76(4,1 fp2 → 4,1/5,1)；
+## 驾驶舱(2,2)、引擎(3,2)；两条履带分列 y=0 / y=3 的 x=2..3。
 ##
 ## 为什么**不放弹药库**：`ammo_depot_small` 被摧毁时会按 `capacity_slots`（8 格）殉爆
 ## `6 × 8 = 48` 伤害、半径 2.5 格——在 6×4 的车里这等于把一颗雷埋在自己驾驶舱边上。
 ## 实测（probe_roster2）：带弹药库的版本殉爆连锁 13 次，step 2185（36.4 s）就被自己炸死。
-## 而且工厂 1.5 s 造一发已经快过炮管 1.1 s 的装填，本来就不需要缓冲。
+## 而且工厂 1.1 s 造一发已经快过炮管 1.1 s 的装填，本来就不需要缓冲。
 ##
 ## 驾驶舱放在车体**中部**而不是尾部：驾驶舱一爆 run 立即结束（design §3.3），
 ## 放在边缘会让流弹轻易从侧面掏进去；实测把驾驶舱放到 (5,1) 的**试验布局**后，
@@ -246,7 +255,8 @@ const STARTER_MOBILITY := [
 const STARTER_MODULES := [
 	{"id": "ammo_factory_76", "cell": Vector2i(0, 1), "rot": 0},
 	{"id": "conveyor_straight", "cell": Vector2i(2, 1), "rot": 0},
-	{"id": "cannon_76", "cell": Vector2i(3, 1), "rot": 0},
+	{"id": "modifier_power", "cell": Vector2i(3, 1), "rot": 0},
+	{"id": "cannon_76", "cell": Vector2i(4, 1), "rot": 0},
 	{"id": "cockpit_light", "cell": Vector2i(2, 2), "rot": 0},
 	{"id": "engine_small", "cell": Vector2i(3, 2), "rot": 0},
 ]

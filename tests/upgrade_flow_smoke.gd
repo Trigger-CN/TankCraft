@@ -14,6 +14,8 @@ extends SceneTree
 const ModuleDefs := preload("res://scripts/module_defs.gd")
 const GridBuilder := preload("res://scripts/grid_builder.gd")
 const AmmoNetwork := preload("res://scripts/ammo_network.gd")
+## v3.41：起始坦克的验收必须走真实 `SurvivalRun`，不能再自己摆一台车。
+const SurvivalRun := preload("res://scripts/survival_run.gd")
 
 var definitions: ModuleDefs
 var failures := 0
@@ -27,6 +29,8 @@ func _init() -> void:
 	_check_ui_ports_cover_all_roles()
 	_check_configure_modifier_validation()
 	_check_payload_flows_into_cannon()
+	_check_function_modules_carry_intrinsic()
+	_check_starter_can_install_upgrade()
 	if failures > 0:
 		printerr("UPGRADE_FAIL count=%d" % failures)
 		quit(1)
@@ -233,3 +237,105 @@ func _check_payload_flows_into_cannon() -> void:
 			found_modifier = true
 			_expect((state.get("upgrades", []) as Array) == ["up_damage"], "flow_module_state_slots_%s" % str(state.get("upgrades", [])))
 	_expect(found_modifier, "flow_module_state_found")
+	_expect(found_modifier, "flow_module_state_found")
+
+# ─── 验收 4（v3.41）：功能分化模块携带固有升级 ──────────────────
+
+## 用户 2026-10-24：「弹药改进模块目前似乎没有实际效果，将这些模块改为有实际功能的模块，
+## 例如爆破模块、火焰模块、增伤模块等等」。
+##
+## 之前三档改进器（mk1/mk2/mk3）**只差槽数与加工速度**，没有任何模块级功能差异，
+## 玩家看到的只是「同一个改进器，三个更贵更快的版本」。
+## v3.41 新增三种功能固定的模块（定义里带 `intrinsic_upgrades`），
+## 本节断言它们的固有升级真的随弹药流到炮管 —— 否则就只是数据表多了一个字段。
+func _check_function_modules_carry_intrinsic() -> void:
+	## (模块 id, 它携带的固有升级)。表一定要同时包含全部三种：
+	## 只验一种的话，另外两种的 `intrinsic_upgrades` 写错也不会被发现。
+	var cases := [
+		["modifier_blast", "up_explosive"],
+		["modifier_flame", "up_burn"],
+		["modifier_power", "up_damage"],
+	]
+	for raw in cases:
+		var module_id := String(raw[0])
+		var expected := String(raw[1])
+		## 数据层：模块定义里真的声明了这个固有升级。
+		var def: Dictionary = definitions.get_module(module_id)
+		_expect((def.get("intrinsic_upgrades", []) as Array) == [expected], "intrinsic_declared_%s" % module_id)
+		_expect(def.has("upgrade_slots"), "intrinsic_has_slots_%s" % module_id)
+		## 流程层：工厂 → 直管 → 模块 → 炮管，炮管拿到的载荷里必须有它。
+		var builder := _make_builder([
+			{"id": "ammo_factory_20", "cell": Vector2i(4, 4)},
+			{"id": "conveyor_straight", "cell": Vector2i(5, 4)},
+			{"id": module_id, "cell": Vector2i(6, 4)},
+			{"id": "cannon_20", "cell": Vector2i(7, 4)},
+		])
+		if builder == null:
+			_expect(false, "intrinsic_builder_%s" % module_id)
+			continue
+		var network := AmmoNetwork.new()
+		network.setup(definitions)
+		network.rebuild(builder)
+		var cannon_index := -1
+		for part in network.parts:
+			if String(part["role"]) == AmmoNetwork.ROLE_CANNON:
+				cannon_index = int(part["index"])
+		_expect(cannon_index >= 0, "intrinsic_cannon_found_%s" % module_id)
+		if cannon_index < 0:
+			continue
+		var payload: Array = []
+		for _step in range(20 * 20):
+			network.tick_once()
+			payload = network.loaded_upgrades(cannon_index)
+			if not payload.is_empty():
+				break
+		_expect(payload.has(expected), "intrinsic_reaches_cannon_%s_%s" % [module_id, str(payload)])
+
+# ─── 验收 5（v3.41）：起始坦克能真的装上升级 ──────────────────────
+
+## 这是用户「没有实际效果」的直接根因：`STARTER_MODULES` 里曾经**一件带
+## `upgrade_slots` 的模块都没有**，`_install_upgrade()` 永远找不到容器，
+## 每张升级卡都只能进 `collected_upgrades` 暂存 —— 玩家升到满级也看不到任何变化。
+##
+## 本节直接走真实 `SurvivalRun.build_starter()`，断言：
+##   ① 起始车至少有一件改进模块；
+##   ② `_install_upgrade()` 真的把它写进 `part["upgrades"]`（而不是暂存）；
+##   ③ 起始车的弹药链真的能把它带到炮管（否则装了也白装）。
+func _check_starter_can_install_upgrade() -> void:
+	var run_state := SurvivalRun.new()
+	_expect(run_state.setup(definitions, "arena_standard", 7), "starter_setup")
+	var builder := GridBuilder.new()
+	_expect(builder.setup(definitions), "starter_builder_setup")
+	var reason: String = SurvivalRun.build_starter(builder)
+	_expect(reason.is_empty(), "starter_built_%s" % reason)
+	if not reason.is_empty():
+		return
+	run_state.bind_player(builder)
+	## ① 有容器。
+	var modifier_found := false
+	for part in builder.module_parts:
+		if definitions.get_module(String(part.get("id", ""))).has("upgrade_slots"):
+			modifier_found = true
+	_expect(modifier_found, "starter_has_modifier")
+	## ② 装得上，而且不靠暂存。
+	var note := run_state._install_upgrade("up_damage")
+	_expect(run_state.installed_upgrades().has("up_damage"), "starter_installed_%s" % note)
+	_expect(run_state.collected_upgrades.is_empty(), "starter_not_pended_%s" % str(run_state.collected_upgrades))
+	## ③ 装上升级后，弹药链真的把它带到炮管。
+	var network := AmmoNetwork.new()
+	network.setup(definitions)
+	network.rebuild(builder)
+	var cannon_index := -1
+	for part in network.parts:
+		if String(part["role"]) == AmmoNetwork.ROLE_CANNON:
+			cannon_index = int(part["index"])
+	_expect(cannon_index >= 0, "starter_cannon_found")
+	if cannon_index < 0:
+		return
+	var payload: Array = []
+	for _step in range(20 * 30):
+		network.tick_once()
+		payload = network.loaded_upgrades(cannon_index)
+		if not payload.is_empty():
+			break
+	_expect(payload.has("up_damage"), "starter_payload_reaches_cannon_%s" % str(payload))

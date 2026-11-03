@@ -560,6 +560,12 @@ func _make_part(index: int, module_id: String, def: Dictionary, role: String, ro
 		"buffer_slots": maxi(int(def.get("buffer_slots", 1)), 1),
 		"capacity_slots": int(def.get("capacity_slots", 0)),
 		"upgrade_slots": maxi(int(def.get("upgrade_slots", 1)), 1),
+		## v3.41：**模块自身携带的升级**（爆破/火焰/增伤模块的立身之本）。
+		## 与 `upgrades`（玩家在槽里配的）分开存：固有升级**不占槽**，
+		## 所以 `set_modifier_upgrades()` / `configure_modifier()` 的槽数校验不受它影响。
+		## 直接读模块定义而不写进 `part`：它是模块类型的属性、不是每件实例的状态，
+		## 存进 part 反而会在蓝图反序列化、撤销、复制等处多出一条可能漂移的副本。
+		"intrinsic": (def.get("intrinsic_upgrades", []) as Array).duplicate(),
 		"processing_time_s": float(def.get("processing_time_s", 0.5)),
 		"reload_s": float(def.get("reload_s", 0.0)),
 		"bank_index": -1,
@@ -1083,9 +1089,11 @@ func _module_advance(index: int, dt: float) -> void:
 		if not work.is_empty():
 			state["work_remaining"] = float(state["work_remaining"]) - dt
 			if float(state["work_remaining"]) <= 0.0:
-				## 加工完成：把这件改进器**槽里配置的升级**追加进这笔载荷（v3.24）。
-				## 这里不去重 —— 同一升级可以占多个槽来叠层，最终由 `_upgrade_profile()` 按 stack_limit 封顶。
+				## 加工完成：把这件改进器**模块自带的升级**与**槽里配置的升级**都追加进这笔载荷。
+				## 固有升级（`intrinsic`，v3.41）是爆破/火焰/增伤模块的立身之本：不占槽、永远生效。
+				## 这里不去重 —— 同一升级可以多个来源叠加，最终由 `_upgrade_profile()` 按 stack_limit 封顶。
 				var payload: Array = (work.get("upgrades", []) as Array).duplicate()
+				payload.append_array((part.get("intrinsic", []) as Array).duplicate())
 				payload.append_array((part["upgrades"] as Array).duplicate())
 				(state["output"] as Array).append({"ammo_id": String(work["ammo_id"]), "upgrades": payload})
 				state["work"] = {}
