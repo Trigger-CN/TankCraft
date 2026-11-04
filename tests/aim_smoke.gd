@@ -9,7 +9,8 @@ extends SceneTree
 ##  - `aim_all_at()` 让多门炮指向同一点，返回值与真正改变方向的炮管数一致；
 ##  - `aim_at()` 对非法下标返回 false **且不改状态**；
 ##  - 目标与炮管中心重合时保持原方向（`atan2(0,0)` 的防护）；
-##  - `CombatView.to_screen()` → `main._screen_to_world()` 往返一致。
+##  - `CombatView.to_screen()` → `main._screen_to_world()` 往返一致；
+##  - `CombatView.pixel_of()` 的缩放倒数与退化回退。
 ##
 ## 硬约束：本测试**不调任何绘制函数**（在 `_draw()` 之外调绘制会刷屏上千行
 ## `Drawing is only allowed inside this node's _draw()`，把断言淹掉）。
@@ -197,3 +198,8 @@ func _check_round_trip() -> void:
 	var zero: Vector2 = MainScript._screen_to_world(view, camera, Vector2(0.0, 0.0), 0.0)
 	_check_near(zero.x, camera.position.x, "round_trip_zero_scale_x")
 	_check_near(zero.y, camera.position.y, "round_trip_zero_scale_y")
+	## v3.42：`pixel_of()` 必须是缩放的精确倒数；退化与零输入回退 1.0，不除零。
+	_check_near(CombatView.pixel_of(scale_factor), 1.0 / scale_factor, "pixel_is_inverse")
+	_check_near(CombatView.pixel_of(1.0), 1.0, "pixel_at_one")
+	_check_near(CombatView.pixel_of(0.0), 1.0, "pixel_zero_input")
+	_check_near(CombatView.pixel_of(-2.0), 1.0, "pixel_negative_input")

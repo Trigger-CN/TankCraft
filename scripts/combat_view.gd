@@ -14,6 +14,13 @@ extends RefCounted
 ## - 绘制函数一律接收 `canvas: CanvasItem` 并用 `canvas.draw_*`。Godot 允许在 `_draw()`
 ##   周期内从别处调用这些方法，因此不必新增 Node2D（单场景架构下新增节点还要额外管理
 ##   z 序与生命周期）。
+## - **全部坐标系都是纯世界坐标（v3.42）**：不乘缩放、不做投影、**不做裁剪**。
+##   调用方把这些函数画在 `BattleViewport` 里的世界节点上，由 `SubViewport` 的边界
+##   天然剪掉溢出部分。缩放/平移由引擎 `Camera2D` 负责，线宽与最小尺寸由调用方传入
+##   的 `pixel = pixel_of(缩放)` 换算成世界单位。
+##   历史上这里曾有 `to_screen()` / `in_view()` / `_clipped_disc()` 一整套手写投影与
+##   逐图元裁剪，它的固有缺陷是「每一处绘制都必须记得裁剪，漏一处就溢出」——
+##   实测在 2.0× / 4.0× 下圆形障碍会画到状态栏、矩形障碍会压到右侧 HUD。
 ## - `draw_string` 需要页面层的双字体，所以文本绘制以 `text_fn: Callable` 注入，
 ##   签名与 `main.gd` 的 `_draw_text(text, position, size, color, mono)` 一致。
 ## - 不使用 `randf` / `randi`；任何脉动相位由调用方用 `sin(_time * …)` 提供。
@@ -84,31 +91,21 @@ const FX_STYLE_DRIVE := {
 	"centre_alpha": 0.5,
 }
 
-## 世界坐标 → 屏幕坐标（v3.38 引入相机矩形，v3.40 相机改为距离模型）。
+## 世界坐标 → 屏幕坐标。
 ##
-## 三页原本各有一份逐字相同的副本（`_drive_to_screen` / `_match_to_screen` /
-## `_survival_to_screen`），差别只在读哪个会话对象。每个页面**必须传自己的竞技场**，
-## 复用别的页面的竞技场会静默算出错误比例（M6 已踩过一次）。
+## v3.42：战场绘制已经搬进 `SubViewport` + `Camera2D`，缩放与平移交给引擎；
+## 本函数只剩**鼠标/准星一侧**的用途——把一个世界点换算成主视口里的设计坐标。
+##
+## 它必须与引擎相机的映射**逐字一致**，否则玩家看到的炮管指向与真实弹道会分成
+## 两套推导（v3.37 的教训）。`BattleViewport` 的相机正是用
+## `position = camera.get_center()`、`zoom = view.size.x / camera.size.x` 设的，
+## 所以下面的式子就是那条引擎变换的展开。
 ##
 ## 参数 `camera` 是「**相机当前看到的那一块世界矩形**」。相机拉近时它比竞技场小，且
 ## **永远不超出竞技场**（v3.40）；拉到最远时它就是 `arena` 本身 ——
 ## 于是本式退化成 `view.position + (world - arena.position) * scale`，与 v3.37 逐字相同。
 static func to_screen(view: Rect2, camera: Rect2, world: Vector2, scale_factor: float) -> Vector2:
 	return view.position + (world - camera.position) * scale_factor
-
-
-## 屏幕上的点是否落在战场视图内。
-##
-## 相机拉近后，**屏幕上会存在相机外的世界点**（例如相机上方 40 px 处的伤害数字），
-## 它们的屏幕坐标会落到视图之外。`canvas.draw_*` 没有裁剪参数，所以凡是「按世界点求
-## 屏幕坐标」后再画的东西，都必须先过这道闸——否则伤害数字和弹道会画到标题区 /
-## HUD 上。这是 v3.40 实测到的真实缺陷（旧模型也有，只是当时没注意到）。
-##
-## 留 `PIPE_CAP_RATIO` 级别的余量没有意义：这里不涉及线宽，只判断**中心点**是否在内。
-## 由于被剔除的是中心点位于视图外的图元，边缘处可能少一个半圆——宁可少画，
-## 也不要把它画到 HUD 上。
-static func in_view(view: Rect2, at: Vector2) -> bool:
-	return view.has_point(at)
 
 
 ## 屏幕坐标 → 世界坐标：`to_screen()` 的精确逆变换。
@@ -125,10 +122,24 @@ static func to_world(view: Rect2, camera: Rect2, screen: Vector2, scale_factor: 
 ## 铺满视图所需的缩放系数。
 ## **这是「相机拉到最远」时的比例**；拉近后相机变小，本函数自然返回更大的值，
 ## 于是 `camera.size` 自动把比例抬到 `fit_arena * mag`。
+##
+## v3.42：它同时是**引擎相机的 zoom** —— `BattleViewport.apply()` 直接拿它设相机，
+## 所以「画出来的比例」与「鼠标反算的比例」从构造上就是同一个数。
 static func fit_scale(view: Rect2, camera: Rect2) -> float:
 	if camera.size.x <= 0.0:
 		return 1.0
 	return view.size.x / camera.size.x
+
+
+## 缩放系数的倒数：**一个屏幕像素折合多少世界单位**。
+##
+## 世界坐标绘制里的线宽 / 最小尺寸都必须乘它：一条 `w` 世界单位的线在屏幕上只有
+## `w × 缩放` 像素，不换算的话拉到最远时 2 px 的边框会瘦成 1.2 px。
+## 单独成一个函数是为了让所有调用点用同一个来源，而不是各自写 `1.0 / scale`。
+static func pixel_of(scale_factor: float) -> float:
+	if scale_factor <= 0.0001:
+		return 1.0
+	return 1.0 / scale_factor
 
 ## 【v3.40 重做】相机 = 一台真实摄像机，状态是**距离**而不是「地图除以倍数」。
 ##
@@ -199,111 +210,51 @@ static func scale_obstacles(raw_obstacles: Array, cell_px: float) -> Array:
 	return result
 
 
-## 竞技场底板 + 网格线 + 边界 + 固定障碍。
+## 竞技场底板 + 网格线 + 边界 + 固定障碍（**纯世界坐标**，v3.42）。
 ##
 ## `obstacles` 统一为**已是世界像素**的条目（见 `scale_obstacles()`）：
 ##   `{shape: "rect", rect: Rect2}` 或 `{shape: "circle", center: Vector2, radius: float}`
 ##
-## `camera` 是「正好铺满视图的那一块世界矩形」（见 `to_screen()`）：zoom==1 时就是 `arena`，
-## 此时边框与网格起点**精确等于** `view.position`，像素与 v3.37 逐字相同。
+## **本函数不做任何裁剪，也不接收 `view` / `camera` / 缩放。**
+## 它画在 `SubViewport` 里的世界节点上，溢出视窗的部分由**视窗边界天然剪掉** ——
+## 这正是用户要的「相机和视窗设置好就行」：裁剪不该是每一处绘制都记得调用的东西。
 ##
-## `grid_step_px` 是网格**线间距**（屏幕像素），0 表示不画网格——对局页与生存页传缺省值，
+## v3.38 / v3.40 的写法是「手写投影 + 逐图元裁剪」：矩形用 `Rect2.intersection()`、
+## 圆用 `_clipped_disc()`（48 段多边形 + `Geometry2D.clip_polygons` 近似）。
+## 实测在 2.0× / 4.0× 下仍有圆形障碍画到状态栏、矩形障碍压到右侧 HUD ——
+## 因为那条路线要求**每一处绘制都记得裁剪**，漏一处就溢出。
+##
+## `pixel` = `pixel_of(缩放)`，只用于线宽与最小尺寸的换算。
+##
+## `grid_step` 是网格**世界单位**间距（0 表示不画网格）：对局页与生存页传缺省值，
 ## 因此它们的像素不受网格分支影响；试驾页传「4 格宽」的间距，每第 4 根线加亮。
-## **网格必须从「相机原点对应的屏幕坐标」起算而不是 `view.position`**：
-## 一旦相机偏移（缩放后），从 `view.position` 起算的网格就会与真实世界格脱开。
-##
-## **绘制必须裁剪到 `view` 内。** `canvas.draw_*` 没有任何裁剪参数，而缩放后
-## 竞技场的屏幕矩形会溢出视图区：v3.38 首个缩放截图 `zd_2.5.png` 里，青色边框直接
-## 画到了左侧 HUD「刚体状态」面板上。1.0x 时 `arena.size * scale == view.size`、
-## 边框恰好与视图重合，所以这个缺陷**只在缩放后才看得见**。
-##
-## 裁剪用 `Rect2.intersection()` 做**几何**裁剪，不用渲染层的 clip：
-## Godot 4 没在 GDScript 里暴露 `canvas_item_set_clip_rect`（实测 `Parse Error: Static
-## function not found`），而 `Rect2.intersection()` 在本项目的轴对齐矩形上精确、无依赖、
-## 也不会影响后续绘制。
-static func draw_arena(canvas: CanvasItem, view: Rect2, arena: Rect2, camera: Rect2, scale_factor: float, obstacles: Array, border_colour: Color, grid_step_px: float = 0.0) -> void:
-	canvas.draw_rect(view, Color(Palette.BG_BASE, 0.94), true)
-	var origin := to_screen(view, camera, arena.position, scale_factor)
-	if grid_step_px > 0.0:
-		var x := origin.x
+static func draw_arena(canvas: CanvasItem, arena: Rect2, obstacles: Array, border_colour: Color, pixel: float = 1.0, grid_step: float = 0.0) -> void:
+	canvas.draw_rect(arena, Color(Palette.BG_BASE, 0.94), true)
+	if grid_step > 0.0:
+		var x := arena.position.x
 		var column := 0
-		while x <= view.end.x:
-			canvas.draw_line(Vector2(x, view.position.y), Vector2(x, view.end.y), Color(Palette.GRID_LINE, 0.55 if column % 4 == 0 else 0.26), 1.0)
-			x += grid_step_px
+		while x <= arena.end.x:
+			canvas.draw_line(Vector2(x, arena.position.y), Vector2(x, arena.end.y), Color(Palette.GRID_LINE, 0.55 if column % 4 == 0 else 0.26), pixel)
+			x += grid_step
 			column += 1
-		var y := origin.y
+		var y := arena.position.y
 		var row := 0
-		while y <= view.end.y:
-			canvas.draw_line(Vector2(view.position.x, y), Vector2(view.end.x, y), Color(Palette.GRID_LINE, 0.55 if row % 4 == 0 else 0.26), 1.0)
-			y += grid_step_px
+		while y <= arena.end.y:
+			canvas.draw_line(Vector2(arena.position.x, y), Vector2(arena.end.x, y), Color(Palette.GRID_LINE, 0.55 if row % 4 == 0 else 0.26), pixel)
+			y += grid_step
 			row += 1
-	## 边框：从相机原点起算，宽高仍是竞技场的缩放尺寸（不是视图尺寸）。
-	## zoom==1 时 `origin == view.position`、`arena.size * scale == view.size`，与旧式逐字相同；
-	## 缩放时必须与视图求交，否则会画到 HUD 上。
-	var border := Rect2(origin, arena.size * scale_factor).intersection(view)
-	if border.size.x > 0.0 and border.size.y > 0.0:
-		canvas.draw_rect(border, border_colour, false, 2.0)
+	canvas.draw_rect(arena, border_colour, false, 2.0 * pixel)
 	for raw_obstacle in obstacles:
 		var obstacle: Dictionary = raw_obstacle
 		if String(obstacle.get("shape", "rect")) == "rect":
 			var rect: Rect2 = obstacle["rect"]
-			## 障碍同样走相机变换（不能写 `view.position + …`，否则相机一偏移障碍就留在原地），
-			## 并与视图求交（与边框同理：缩放后障碍会跑出视图区）。
-			var screen_rect := Rect2(to_screen(view, camera, rect.position, scale_factor), rect.size * scale_factor).intersection(view)
-			if screen_rect.size.x > 0.0 and screen_rect.size.y > 0.0:
-				canvas.draw_rect(screen_rect, Color(Palette.ACCENT_RED, 0.16), true)
-				canvas.draw_rect(screen_rect, Palette.ACCENT_RED, false, 1.5)
+			canvas.draw_rect(rect, Color(Palette.ACCENT_RED, 0.16), true)
+			canvas.draw_rect(rect, Palette.ACCENT_RED, false, 1.5 * pixel)
 		else:
-			var centre := to_screen(view, camera, Vector2(obstacle["center"]), scale_factor)
-			var radius := float(obstacle["radius"]) * scale_factor
-			## 圆障碍：屏幕包围盒与视图无交集就整个略过。
-			var bounds := Rect2(centre - Vector2(radius, radius), Vector2(radius, radius) * 2.0)
-			if not bounds.intersects(view):
-				continue
-			## **圆也必须裁剪到视图内**：v3.38 的生存页 2.0x 截图 `zs_2.0.png` 里，
-			## 右下角的大红圆直接盖到了右侧的坦克镜像面板上。
-			## `draw_circle` 无法裁，所以按「包围盒完全在视图内 → 直接画圆；否则用多边形裁剪」
-			## 两条路处理：绝大多数情况下（含 zoom==1）都走前者，像素与旧版逐字相同。
-			if view.encloses(bounds):
-				canvas.draw_circle(centre, radius, Color(Palette.ACCENT_RED, 0.16))
-				canvas.draw_arc(centre, radius, 0.0, TAU, 48, Palette.ACCENT_RED, 1.5)
-			else:
-				_clipped_disc(canvas, view, centre, radius)
-
-
-## 把圆裁到 `view` 内再画。
-##
-## `draw_circle` / `draw_arc` 没有裁剪参数，而缩放后障碍会溢出到 HUD 上。
-## 做法：把圆采样成多边形（48 段，与 `draw_arc` 同段数），用 `Geometry2D.clip_polygons()`
-## 裁到视图中，再分别画填充与边线。`, 只在「包围盒超出了视图」时才走这里 ——
-## 正常缩放与 zoom==1 时全部走 `draw_circle` 快路径，像素与旧版逐字相同。
-##
-## 采样点数 48 与 `draw_arc(…, 48, …)` 一致，避免裁剪后边线与旧画面出现可见差异。
-const DISC_SEGMENTS := 48
-
-static func _clipped_disc(canvas: CanvasItem, view: Rect2, centre: Vector2, radius: float) -> void:
-	if radius <= 0.0:
-		return
-	var disc := PackedVector2Array()
-	for index in range(DISC_SEGMENTS):
-		var angle := TAU * float(index) / float(DISC_SEGMENTS)
-		disc.append(centre + Vector2(cos(angle), sin(angle)) * radius)
-	var clip_rect := PackedVector2Array([
-		view.position,
-		Vector2(view.end.x, view.position.y),
-		view.end,
-		Vector2(view.position.x, view.end.y),
-	])
-	for raw_piece in Geometry2D.clip_polygons(disc, clip_rect):
-		var piece: PackedVector2Array = raw_piece
-		if piece.size() < 3:
-			continue
-		canvas.draw_colored_polygon(piece, Color(Palette.ACCENT_RED, 0.16))
-		## 边线：闭合折线。裁剪产生的切口也会被描边，在霓虹风格下看起来就是
-		## 「这块地形被视图边切断了」——比直接画到 HUD 上正确得多。
-		var closed := piece.duplicate()
-		closed.append(piece[0])
-		canvas.draw_polyline(closed, Palette.ACCENT_RED, 1.5)
+			var centre := Vector2(obstacle["center"])
+			var radius := float(obstacle["radius"])
+			canvas.draw_circle(centre, radius, Color(Palette.ACCENT_RED, 0.16))
+			canvas.draw_arc(centre, radius, 0.0, TAU, 48, Palette.ACCENT_RED, 1.5 * pixel)
 
 
 ## 地图中立物：可摧毁的房屋（琥珀方块 + 血条）与可碾过的残骸（青色小方块）。
@@ -312,53 +263,44 @@ static func _clipped_disc(canvas: CanvasItem, view: Rect2, centre: Vector2, radi
 ## `debris` 每项 `{cell: Vector2i, taken: bool}`。
 ## 传空数组即完全不画——对局页没有这两种东西，直接传 `[]`，不需要额外的模式布尔量。
 ##
-## 与 `draw_arena()` 一样必须**裁剪到 `view`**：房屋/残骸的屏幕矩形同样会随缩放溢出视图区。
-## 用 `Rect2.intersection()` 几何裁剪（理由见 `draw_arena()`，Godot 4 无 clip_rect）。
-static func draw_neutrals(canvas: CanvasItem, view: Rect2, arena: Rect2, camera: Rect2, scale_factor: float, houses: Array, debris: Array, cell_px: float) -> void:
+## v3.42：纯世界坐标、不裁剪（理由见 `draw_arena()`）。`pixel` 只用于线宽换算。
+static func draw_neutrals(canvas: CanvasItem, houses: Array, debris: Array, cell_px: float, pixel: float = 1.0) -> void:
 	for raw_house in houses:
 		var house: Dictionary = raw_house
 		if not bool(house.get("alive", true)):
 			continue
 		var house_rect: Rect2 = house["rect"]
-		var screen_house := Rect2(to_screen(view, camera, house_rect.position, scale_factor), house_rect.size * scale_factor)
-		var visible_house := screen_house.intersection(view)
-		if visible_house.size.x <= 0.0 or visible_house.size.y <= 0.0:
-			continue
-		canvas.draw_rect(visible_house, Color(Palette.ACCENT_AMBER, 0.14), true)
-		canvas.draw_rect(visible_house, Palette.ACCENT_AMBER, false, 1.5)
+		canvas.draw_rect(house_rect, Color(Palette.ACCENT_AMBER, 0.14), true)
+		canvas.draw_rect(house_rect, Palette.ACCENT_AMBER, false, 1.5 * pixel)
 		var ratio := clampf(float(house["hp"]) / maxf(float(house["hp_max"]), 0.001), 0.0, 1.0)
-		## 血条也跟着用裁剪后的矩形：否则它会横向画出视图之外。
-		canvas.draw_rect(Rect2(visible_house.position + Vector2(0.0, -6.0), Vector2(visible_house.size.x, 3.0)), Color(Palette.WIRE, 0.4), true)
-		canvas.draw_rect(Rect2(visible_house.position + Vector2(0.0, -6.0), Vector2(visible_house.size.x * ratio, 3.0)), Palette.ACCENT_AMBER, true)
+		## 血条同样用世界坐标：`draw_rect` 的粗细也是世界单位，所以高度要乘 `pixel`。
+		var bar := Rect2(house_rect.position + Vector2(0.0, -6.0 * pixel), Vector2(house_rect.size.x, 3.0 * pixel))
+		canvas.draw_rect(bar, Color(Palette.WIRE, 0.4), true)
+		canvas.draw_rect(Rect2(bar.position, Vector2(bar.size.x * ratio, bar.size.y)), Palette.ACCENT_AMBER, true)
 	for raw_debris in debris:
 		var item: Dictionary = raw_debris
 		if bool(item.get("taken", false)):
 			continue
 		var centre_world := (Vector2(Vector2i(item["cell"])) + Vector2(0.5, 0.5)) * cell_px
-		var at := to_screen(view, camera, centre_world, scale_factor)
-		var half := cell_px * 0.35 * scale_factor
-		var box := Rect2(at - Vector2(half, half), Vector2(half, half) * 2.0).intersection(view)
-		if box.size.x <= 0.0 or box.size.y <= 0.0:
-			continue
+		var half := cell_px * 0.35
+		var box := Rect2(centre_world - Vector2(half, half), Vector2(half, half) * 2.0)
 		canvas.draw_rect(box, Color(Palette.ACCENT_LIME, 0.30), true)
-		canvas.draw_rect(box, Palette.ACCENT_LIME, false, 1.0)
+		canvas.draw_rect(box, Palette.ACCENT_LIME, false, 1.0 * pixel)
 
 
-## 在途炮弹：拖尾线段 + 弹头圆点。
+## 在途炮弹：拖尾线段 + 弹头圆点（纯世界坐标，v3.42）。
 ##
 ## 颜色按射手分：玩家弹药琥珀、其余品红——这是「谁在打我」的唯一即时线索。
 ## `player_tag` 由调用方给出，因为多阵营模式下「玩家」不是一个全局常量。
-static func draw_shots(canvas: CanvasItem, view: Rect2, camera: Rect2, scale_factor: float, shots: Array, player_tag: String) -> void:
+## `pixel` 只用于「弹头半径不小于 2 屏幕像素」这一个下限。
+static func draw_shots(canvas: CanvasItem, shots: Array, player_tag: String, pixel: float = 1.0) -> void:
 	for raw_shot in shots:
 		var shot: Dictionary = raw_shot
-		var head := to_screen(view, camera, Vector2(shot["pos"]), scale_factor)
-		## 相机拉近后，相机外的炮弹会落到视图外；不剔除就会画到 HUD 上。
-		if not in_view(view, head):
-			continue
-		var tail := to_screen(view, camera, Vector2(shot["prev"]), scale_factor)
+		var head := Vector2(shot["pos"])
+		var tail := Vector2(shot["prev"])
 		var colour := Palette.ACCENT_AMBER if String(shot["shooter"]) == player_tag else Palette.ACCENT_MAGENTA
-		canvas.draw_line(tail, head, Color(colour, 0.7), 1.5)
-		canvas.draw_circle(head, maxf(float(shot["radius"]) * scale_factor, 2.0), colour)
+		canvas.draw_line(tail, head, Color(colour, 0.7), 1.5 * pixel)
+		canvas.draw_circle(head, maxf(float(shot["radius"]), 2.0 * pixel), colour)
 
 
 ## 瞬时动效圆环。
@@ -371,13 +313,17 @@ static func draw_shots(canvas: CanvasItem, view: Rect2, camera: Rect2, scale_fac
 ##   `alpha_scale`                  描边 alpha 倍率
 ##   `special`                      是否画 `debris` / `shield_hit` / `detach` / `core` 专用形状
 ##   `centre_dot` / `centre_alpha`  通用圆环中心的亮点半径系数与 alpha（0 = 不画）
+##   `centre_dot` / `centre_alpha`  通用圆环中心的亮点半径系数与 alpha（0 = 不画）
 ## 缺省用 `FX_STYLE_SURVIVAL`，对局页传 `FX_STYLE_MATCH`，试驾页传 `FX_STYLE_DRIVE`。
-static func draw_fx(canvas: CanvasItem, view: Rect2, camera: Rect2, scale_factor: float, entries: Array, style: Dictionary = FX_STYLE_SURVIVAL) -> void:
+##
+## v3.42：纯世界坐标、不裁剪。半径与线宽都是**世界单位**，`pixel` 只用来把
+## 「屏幕上至少几 px」的下限换算成世界单位（`style` 里的 `min_radius` / 线宽）。
+static func draw_fx(canvas: CanvasItem, entries: Array, style: Dictionary = FX_STYLE_SURVIVAL, pixel: float = 1.0) -> void:
 	var radius_base := float(style.get("radius_base", 0.6))
 	var radius_grow := float(style.get("radius_grow", 0.4))
-	var min_radius := float(style.get("min_radius", 2.0))
+	var min_radius := float(style.get("min_radius", 2.0)) * pixel
 	var arc_points := int(style.get("arc_points", 20))
-	var arc_width := float(style.get("arc_width", 1.5))
+	var arc_width := float(style.get("arc_width", 1.5)) * pixel
 	var fill_scale := float(style.get("fill_scale", 0.5))
 	var alpha_scale := float(style.get("alpha_scale", 0.75))
 	var special := bool(style.get("special", false))
@@ -395,13 +341,10 @@ static func draw_fx(canvas: CanvasItem, view: Rect2, camera: Rect2, scale_factor
 			continue
 		var t := clampf(float(entry["left"]) / life, 0.0, 1.0)
 		var colour: Color = entry["colour"]
-		var at := to_screen(view, camera, Vector2(entry["pos"]), scale_factor)
-		## 同上：相机拉近后视图外的动效不得画到 HUD 上（v3.40）。
-		if not in_view(view, at):
-			continue
+		var at := Vector2(entry["pos"])
 		## 全尺寸半径（未乘收缩系数）：中心亮点与专用形状用它，通用圆环再乘 `base + grow·t`。
-		var full_radius := float(entry["radius"]) * scale_factor
-		if special and _draw_impact_shape(canvas, at, full_radius, colour, kind, t):
+		var full_radius := float(entry["radius"])
+		if special and _draw_impact_shape(canvas, at, full_radius, colour, kind, t, pixel):
 			continue
 		var radius := maxf(full_radius * (radius_base + radius_grow * t), min_radius)
 		var alpha := alpha_scale * t
@@ -409,7 +352,7 @@ static func draw_fx(canvas: CanvasItem, view: Rect2, camera: Rect2, scale_factor
 			canvas.draw_circle(at, radius, Color(colour, alpha * fill_scale))
 		canvas.draw_arc(at, radius, 0.0, TAU, arc_points, Color(colour, alpha), arc_width)
 		if centre_dot > 0.0:
-			canvas.draw_circle(at, maxf(full_radius * centre_dot * t, 1.0), Color(colour, centre_alpha * t))
+			canvas.draw_circle(at, maxf(full_radius * centre_dot * t, pixel), Color(colour, centre_alpha * t))
 
 
 ## `special` 打开时才走的四种专用形状（v3.33 从试驾页 `_draw_drive_fx()` 搬进来）。
@@ -418,38 +361,36 @@ static func draw_fx(canvas: CanvasItem, view: Rect2, camera: Rect2, scale_factor
 ## 就会变——而抽取的目的是「消除分叉」而不是「重做另两页」。所以这四种形状必须由风格开关
 ## 显式启用，缺省时它们与抽取前一样走通用圆环分支。
 ## 返回是否已画出，`false` 表示调用方继续走通用分支。
-static func _draw_impact_shape(canvas: CanvasItem, at: Vector2, radius: float, colour: Color, kind: String, t: float) -> bool:
+## `pixel` 只用于「屏幕上的最小尺寸」换算（v3.42 改为世界坐标）。
+static func _draw_impact_shape(canvas: CanvasItem, at: Vector2, radius: float, colour: Color, kind: String, t: float, pixel: float = 1.0) -> bool:
 	var grow := 1.0 - t
 	match kind:
 		"debris":
 			## 残骸碎片：实心小点，随寿命缩小。
-			canvas.draw_circle(at, maxf(radius * t, 1.0), Color(colour, 0.7 * t))
+			canvas.draw_circle(at, maxf(radius * t, pixel), Color(colour, 0.7 * t))
 			return true
 		"shield_hit":
 			## 护盾受击：固定半径的短促圆环，不收缩——护盾不会「散掉」，只会闪一下。
-			canvas.draw_arc(at, maxf(radius, 2.0), 0.0, TAU, 12, Color(colour, t), 2.0)
+			canvas.draw_arc(at, maxf(radius, 2.0 * pixel), 0.0, TAU, 12, Color(colour, t), 2.0 * pixel)
 			return true
 		"detach", "core":
 			## 整块脱落 / 驾驶舱被毁：双同心圆向外扩散，比通用圆环更「重」。
-			canvas.draw_arc(at, radius * (0.35 + 0.65 * grow), 0.0, TAU, 32, Color(colour, 0.85 * t), 3.0)
-			canvas.draw_arc(at, radius * (0.15 + 0.4 * grow), 0.0, TAU, 24, Color(colour, 0.55 * t), 2.0)
+			canvas.draw_arc(at, radius * (0.35 + 0.65 * grow), 0.0, TAU, 32, Color(colour, 0.85 * t), 3.0 * pixel)
+			canvas.draw_arc(at, radius * (0.15 + 0.4 * grow), 0.0, TAU, 24, Color(colour, 0.55 * t), 2.0 * pixel)
 			return true
 	return false
 
-## 最近一次命中点的高亮圈：即便命中发生在缩放后只有几像素的敌车上也能看见。
-##
 ## 状态（命中点与剩余时间）留在页面层——组件只负责按当前剩余时间画出来，因此两个战斗
 ## 模式各自持有自己的闪光，不会互相覆盖。
-static func draw_hit_flash(canvas: CanvasItem, view: Rect2, camera: Rect2, scale_factor: float, at_world: Vector2, left: float, life: float = HIT_FLASH_TIME) -> void:
+##
+## v3.42：纯世界坐标、不裁剪。半径与线宽乘 `pixel` 保持屏幕上的观感恒定。
+static func draw_hit_flash(canvas: CanvasItem, at_world: Vector2, left: float, life: float = HIT_FLASH_TIME, pixel: float = 1.0) -> void:
 	if left <= 0.0:
 		return
 	var t := clampf(left / maxf(life, 0.001), 0.0, 1.0)
-	var at := to_screen(view, camera, at_world, scale_factor)
-	if not in_view(view, at):
-		return
-	var radius := 6.0 + 10.0 * (1.0 - t)
-	canvas.draw_circle(at, radius, Color(Palette.ACCENT_AMBER, 0.30 * t))
-	canvas.draw_arc(at, radius, 0.0, TAU, 24, Color(Palette.TEXT_HI, 0.9 * t), 2.0)
+	var radius := (6.0 + 10.0 * (1.0 - t)) * pixel
+	canvas.draw_circle(at_world, radius, Color(Palette.ACCENT_AMBER, 0.30 * t))
+	canvas.draw_arc(at_world, radius, 0.0, TAU, 24, Color(Palette.TEXT_HI, 0.9 * t), 2.0 * pixel)
 
 
 ## 炮口闪光（v3.23）：发射瞬间从炮口沿炮管方向射出的一道锥形光 + 一圈冲击环。
@@ -460,31 +401,30 @@ static func draw_hit_flash(canvas: CanvasItem, view: Rect2, camera: Rect2, scale
 ##
 ## 长度随寿命收缩、亮度随寿命淡出；全程无随机，同一模拟两次跑出同一像素。
 ## `life` 由调用方传入剩余时间，页面层负责在固定步长里递减。
-static func draw_muzzle_flash(canvas: CanvasItem, view: Rect2, camera: Rect2, scale_factor: float, at_world: Vector2, dir: Vector2, left: float, colour: Color, life: float = MUZZLE_FLASH_TIME) -> void:
+##
+## v3.42：纯世界坐标、不裁剪。所有长度乘 `pixel`（世界单位 / 屏幕像素），
+## 保持任何缩放下屏幕观感恒定。
+static func draw_muzzle_flash(canvas: CanvasItem, at_world: Vector2, dir: Vector2, left: float, colour: Color, life: float = MUZZLE_FLASH_TIME, pixel: float = 1.0) -> void:
 	if left <= 0.0:
 		return
 	var t := clampf(left / maxf(life, 0.001), 0.0, 1.0)
-	var at := to_screen(view, camera, at_world, scale_factor)
-	## 相机拉近后炮口可能在视图外（例如从屏幕外边缘开火），不剔除就会把锥形光画到 HUD 上。
-	if not in_view(view, at):
-		return
 	var forward := dir.normalized() if dir.length_squared() > 0.000001 else Vector2.RIGHT
 	var side := forward.orthogonal()
 	## 长度随剩余寿命从满收缩到零；最小屏幕长度保证极小缩放下仍可见。
-	var length := maxf(MUZZLE_FLASH_LEN * t * scale_factor, MUZZLE_FLASH_MIN_LEN)
+	var length := maxf(MUZZLE_FLASH_LEN * t, MUZZLE_FLASH_MIN_LEN) * pixel
 	var half := length * 0.32
 	## ① 锥形光：炮口 → 两侧张开的宽口，用两个三角形拼出一个尖头向外的光锥。
-	var tip := at + forward * length
+	var tip := at_world + forward * length
 	canvas.draw_colored_polygon(PackedVector2Array([
-		at,
+		at_world,
 		tip + side * half,
 		tip - side * half,
 	]), Color(colour, 0.55 * t))
 	## ② 中心亮芯：一条细长亮线，保证光锥在小尺寸下也有可读的「指向」。
-	canvas.draw_line(at, tip, Color(Palette.TEXT_HI, 0.85 * t), maxf(1.5 * scale_factor, 1.0))
+	canvas.draw_line(at_world, tip, Color(Palette.TEXT_HI, 0.85 * t), 1.5 * pixel)
 	## ③ 炮口冲击环：以炮口为中心的短促圆环，让「刚刚开火」这件事在静止画面里也成立。
-	var ring := 4.0 + 8.0 * (1.0 - t)
-	canvas.draw_arc(at, ring, 0.0, TAU, 20, Color(colour, 0.75 * t), 1.5)
+	var ring := (4.0 + 8.0 * (1.0 - t)) * pixel
+	canvas.draw_arc(at_world, ring, 0.0, TAU, 20, Color(colour, 0.75 * t), 1.5 * pixel)
 
 
 ## 射程耗尽消散（v3.23）：炮弹未命中、飞满射程后原地消失的特效。
@@ -495,39 +435,41 @@ static func draw_muzzle_flash(canvas: CanvasItem, view: Rect2, camera: Rect2, sc
 ## 二者形状、时长、运动方向全不同，不看颜色也能分辨。
 ##
 ## `rise` 让消散点向上漂几像素：射程尽头通常在空旷处，纯原地消失容易被弹道残影混淆。
-static func draw_expire_flash(canvas: CanvasItem, view: Rect2, camera: Rect2, scale_factor: float, at_world: Vector2, left: float, colour: Color, life: float = EXPIRE_FLASH_TIME) -> void:
+##
+## v3.42：纯世界坐标、不裁剪，尺寸乘 `pixel` 保持屏幕观感恒定。
+static func draw_expire_flash(canvas: CanvasItem, at_world: Vector2, left: float, colour: Color, life: float = EXPIRE_FLASH_TIME, pixel: float = 1.0) -> void:
 	if left <= 0.0:
 		return
 	var t := clampf(left / maxf(life, 0.001), 0.0, 1.0)
 	## 进度 0 → 1（与 t 相反）：半径从大收到小、透明度从有到无。
 	var progress := 1.0 - t
-	var at := to_screen(view, camera, at_world, scale_factor) + Vector2(0.0, -6.0 * progress)
-	if not in_view(view, at):
-		return
-	var radius := maxf(EXPIRE_FLASH_RADIUS * scale_factor * (1.0 - 0.55 * progress), 2.0)
+	var at := at_world + Vector2(0.0, -6.0 * progress * pixel)
+	var radius := maxf(EXPIRE_FLASH_RADIUS * (1.0 - 0.55 * progress), 2.0 * pixel) * pixel
 	## ① 三圈同心描边：由外向内收缩，形成「散掉」而不是「炸开」的感觉。
 	var ring_alpha := 0.85 * t
 	for ring_index in range(3):
 		var ring := radius * (1.0 - 0.22 * float(ring_index))
-		canvas.draw_arc(at, ring, 0.0, TAU, 18, Color(colour, ring_alpha / (1.0 + float(ring_index))), 1.5)
+		canvas.draw_arc(at, ring, 0.0, TAU, 18, Color(colour, ring_alpha / (1.0 + float(ring_index))), 1.5 * pixel)
 	## ② 四根向外短刻线：固定角度（45° 起点、90° 步进），无随机。
 	var spoke := radius * 1.25
 	for spoke_index in range(4):
 		var angle := PI * 0.25 + PI * 0.5 * float(spoke_index)
 		var outer := at + Vector2(cos(angle), sin(angle)) * spoke
 		var inner := at + Vector2(cos(angle), sin(angle)) * radius
-		canvas.draw_line(inner, outer, Color(colour, 0.6 * t), 1.5)
+		canvas.draw_line(inner, outer, Color(colour, 0.6 * t), 1.5 * pixel)
 	## ③ 中心一点微光：只在最初 40% 寿命里存在，避免结束时留下一个亮点。
 	if t > 0.6:
-		canvas.draw_circle(at, maxf(2.0 * scale_factor, 1.5), Color(colour, 0.35 * t))
+		canvas.draw_circle(at, maxf(2.0 * pixel, 1.5 * pixel), Color(colour, 0.35 * t))
 
 
-## 伤害悬浮数字：从命中点向上飘升并淡出。
-##
-## `progress = 1 - left/life` 从 0 走到 1；上升距离先快后慢（`sqrt`），像真的被击飞。
-## 同一帧多条数字按 `stack * DAMAGE_POPUP_STACK_STEP` 垂直错开，避免完全重叠。
 ## **不用随机偏移**：否则同一模拟两次跑出不同像素，截图逐字节比对就失效了。
-static func draw_damage_popups(canvas: CanvasItem, view: Rect2, camera: Rect2, scale_factor: float, entries: Array, text_fn: Callable) -> void:
+##
+## v3.42：纯世界坐标、不裁剪 —— 溢出视窗的数字由**视窗边界天然剪掉**。
+## `pixel` 把上升距离、错开步长、字号换算成世界单位，观感与缩放无关。
+##
+## 字号本身就是「世界单位」：引擎相机缩放会把它按比例放大，所以这里**不**再乘 `pixel`
+## 之外的额外缩放——`pixel` 只是把 `20 px` 字号还原成它在屏幕上应有的视觉大小。
+static func draw_damage_popups(canvas: CanvasItem, entries: Array, text_fn: Callable, pixel: float = 1.0) -> void:
 	var stack := 0
 	for raw_entry in entries:
 		var entry: Dictionary = raw_entry
@@ -540,23 +482,15 @@ static func draw_damage_popups(canvas: CanvasItem, view: Rect2, camera: Rect2, s
 		if life <= 0.0:
 			continue
 		var progress := clampf(1.0 - float(entry["left"]) / life, 0.0, 1.0)
-		var rise := DAMAGE_POPUP_RISE * sqrt(progress) * scale_factor
-		var offset := Vector2(0.0, -rise - float(stack) * DAMAGE_POPUP_STACK_STEP)
-		var at := to_screen(view, camera, Vector2(entry["pos"]), scale_factor) + offset
-		## 数字向上飘一段长距离（`DAMAGE_POPUP_RISE` 就达几十 px），相机拉近后极易飘出视图。
-		## 不剔除就会把 `-12` 写到标题区 / HUD 上 —— v3.40 实测到的真实缺陷。
-		##
-		## `draw_string()` 的锚点是**基线**，字形向上延伸约一个字高。只判锚点会让数字的
-		## 上半截整过视图边框 —— v3.40 截图里 `-7` 正是这样压在 `DRIVE_VIEW` 的青色上边框上。
-		## 因此字顶与基线**两个点都要在视图内**。
-		var size := int(roundf(20.0 - 4.0 * progress))
-		if not in_view(view, at) or not in_view(view, at - Vector2(0.0, float(size))):
-			continue
+		var rise := DAMAGE_POPUP_RISE * sqrt(progress) * pixel
+		var offset := Vector2(0.0, -rise - float(stack) * DAMAGE_POPUP_STACK_STEP * pixel)
+		var at := Vector2(entry["pos"]) + offset
+		var size := int(roundf((20.0 - 4.0 * progress) * pixel))
 		var colour: Color = entry["colour"]
 		## 前 70% 保持不透明，后 30% 才淡出：数字要看得清，不能一出来就开始糊。
 		var alpha := 1.0 if progress < 0.7 else clampf((1.0 - progress) / 0.3, 0.0, 1.0)
 		## 先画一层暗色底再画本体：霓虹背景下纯色小字容易被地形线淹掉。
-		text_fn.call(text, at + Vector2(1.0, 1.0), size, Color(0.0, 0.0, 0.0, 0.55 * alpha), true)
+		text_fn.call(text, at + Vector2(1.0, 1.0) * pixel, size, Color(0.0, 0.0, 0.0, 0.55 * alpha), true)
 		text_fn.call(text, at, size, Color(colour, alpha), true)
 		stack += 1
 

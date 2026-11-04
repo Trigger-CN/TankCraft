@@ -22,6 +22,9 @@ const CombatView := preload("res://scripts/combat_view.gd")
 const PipeView := preload("res://scripts/pipe_view.gd")
 ## v3.37：炮管几何与绘制（建造/改装页与三个战斗页共用同一份，全静态）。
 const CannonView := preload("res://scripts/cannon_view.gd")
+## v3.42：战斗场地的引擎相机与视窗（`SubViewport` + `Camera2D`）。
+## 三个战斗页的战场绘制全部搬进它的世界节点，**裁剪由视窗边界天然保证**。
+const BattleViewport := preload("res://scripts/battle_viewport.gd")
 
 ## M2 正式建造编辑器入口。
 ## 菜单、输入与绘制留在单一场景；建造状态和规则由 GridBuilder 负责。
@@ -160,6 +163,9 @@ var _status_message := ""
 var _status_error := false
 var _capture_target := ""
 var _capture_wait_frames := 30
+## v3.42：SubViewport 的离屏纹理是**帧末**才渲染的；等帧时必须让相机 / 世界节点 /
+## 主画布三者在同几帧里都过一遍，否则取到的图会用旧相机或旧内容。
+## 30 帧对这条链路仍然够用（实机验证过同一命令两次逐字节相同）。
 ## 截图期间冻结模拟与 `_time`。
 ## 起因：`_capture_next_frame()` 要等 30 帧才取图，而 `_process()` 在这 30 帧里
 ## 仍按真实 delta 推进 `_*_simulate()` 并累加 `_time`——预热步数虽然是固定的，
@@ -220,6 +226,10 @@ var _camera_dist_target := -1.0
 ## **拉到整图时这两个值对像素零影响**（`camera_at_height()` 直接返回 `arena`）。
 var _camera_focus := Vector2.ZERO
 var _camera_focus_ready := false
+## v3.42：战斗场地的引擎相机与视窗。挂在 `Main` 下面（普通 `Node`，不产生视觉输出），
+## `Main._draw()` 在画战场的位置把它的离屏纹理 blit 上去 —— 因此战场与 HUD
+## 仍处在同一张画布上，绘制顺序一个字节都不用改。
+var _battle_viewport: BattleViewport
 ## 调试辅助：打开后车体按**模块种类**上色（试驾页 v3.33 之前的旧配色）。
 ## 默认关：三页统一走「驾驶舱琥珀 / 其余队伍色 + 血量分档」这一条唯一规则。
 ## 否则同一个模块在三个页面上是三种颜色，玩家学到的「红 = 快坏了」在试驾页不成立。
@@ -293,6 +303,11 @@ func _ready() -> void:
 	bank = CannonBank.new()
 	field = ProjectileField.new()
 	_load_fonts()
+	## v3.42：战场视窗与引擎相机。挂在 `Main` 下面（普通 `Node`，无视觉输出），
+	## 纹理由 `_paint_battle_world()` 在 `Main._draw()` 里 blit。
+	_battle_viewport = BattleViewport.new()
+	_battle_viewport.configure(DRIVE_VIEW, Callable(self, "_draw_battle_world"))
+	add_child(_battle_viewport)
 	## 用户要求启动即最大化。`project.godot` 里已写 `window/size/mode=2`（MAXIMIZED），
 	## 但项目配置只在启动时读一次且可被覆盖；这里再显式确认一次并打印实际结果，
 	## 不靠“配置写了就算做到了”。
@@ -465,6 +480,10 @@ func _set_screen(next_screen: String) -> void:
 	_camera_dist_target = -1.0
 	_camera_focus_ready = false
 	_camera_focus = Vector2.ZERO
+	## v3.42：只有三个战斗页需要离屏纹理实时重画，其它页关掉待机渲染。
+	var active_battle := next_screen == SCREEN_DRIVE or next_screen == SCREEN_MATCH or next_screen == SCREEN_SURVIVAL
+	if _battle_viewport != null:
+		_battle_viewport.set_active(active_battle)
 
 func _menu_index_at(position: Vector2) -> int:
 	for index in range(MENU_ITEM_COUNT):
@@ -2207,33 +2226,105 @@ func _match_to_screen(world: Vector2, scale_factor: float) -> Vector2:
 ## `CombatView`，与生存页同一份实现。页面只负责组装参数与画自己的 HUD。
 ##
 ## 绘制顺序跟着统一后的规矩：动效在弹道**之下**、命中闪光与伤害数字在最上层。
-## 旧版对局页把弹道画在动效之下，所以接通后层级会变——这是有意的，不是回归。
+##
+## **v3.42：战场画在 `_battle_viewport` 的世界节点里（纯世界坐标），不再自己投影。**
+## 这里只做三件事：喂相机、让世界节点重画、把离屏纹理 blit 到 `DRIVE_VIEW`。
+## 裁剪由 `SubViewport` 边界天然保证——任何溢出战场的图元都被自动剪掉，
+## 不需要任何一处绘制记得裁剪（这正是 v3.38/v3.40 修不完的那类缺陷）。
+## HUD 与准星仍画在 `Main` 上，且**在 blit 之后**，所以照旧盖在战场之上。
 func _draw_match() -> void:
 	if match_session == null:
 		return
-	var duel: Duel = match_session.duel
-	var scale_factor := _match_scale()
-	## v3.38：本函数内所有绘制共用**同一个相机矩形**（只算一次）。
-	## 逐处重算会在缩放且焦点在插值中的那一帧拿到两个不同值，画面会抽一下。
-	var camera := _battle_camera(duel.arena)
-	CombatView.draw_arena(self, DRIVE_VIEW, duel.arena, camera, scale_factor, duel.obstacles, Palette.ACCENT_CYAN)
-	## 中立物（房屋 / 残骸）是对局模式没有的，传空数组即可——
-	## 这就是「同一份实现按模式配置」而不是「两套分支」的意思。
-	CombatView.draw_neutrals(self, DRIVE_VIEW, duel.arena, camera, scale_factor, [], [], float(definitions.global_number("cell_size", 16.0)))
-	for tag in [Duel.TAG_ENEMY, Duel.TAG_PLAYER]:
-		_draw_match_hull(String(tag), scale_factor, camera)
-	CombatView.draw_fx(self, DRIVE_VIEW, camera, scale_factor, _match_fx.entries, CombatView.FX_STYLE_MATCH)
-	## 消散画在弹道**之下**：残余弹道残影不应该被遮住，而且消散本身没有实体。
-	_draw_timed_expires(_match_expires, camera, scale_factor)
-	CombatView.draw_shots(self, DRIVE_VIEW, camera, scale_factor, duel.field.shots, Duel.TAG_PLAYER)
-	## 炮口闪光画在弹道**之上**：它是「刚刚发出这一发」的因果提示，必须盖在拖尾上。
-	_draw_timed_muzzles(_match_muzzles, camera, scale_factor)
-	CombatView.draw_hit_flash(self, DRIVE_VIEW, camera, scale_factor, _match_hit_flash_at, _match_hit_flash_left)
-	CombatView.draw_damage_popups(self, DRIVE_VIEW, camera, scale_factor, _match_fx.entries, _draw_text)
+	_paint_battle_world(match_session.duel.arena)
 	_draw_match_hud()
 	## v3.25：准星画在最后——它必须盖在弹道 / 炮口闪光 / 命中闪光 / HUD 之上，
 	## 否则鼠标压在特效上时准星会被遮住，玩家会以为鼠标丢了。
 	_draw_aim_reticle()
+
+## 把战场交给世界节点，然后 blit 回主画布。**三个战斗页共用的唯一入口。**
+##
+## 顺序必须是「先 apply 相机 → 再 refresh → 再 blit」：
+## `SubViewport` 的渲染发生在帧末，本帧 `_draw()` 拿到的纹理是**上一帧**的内容。
+## 所以相机的插值在视觉上晚一帧——这也是为什么 `_camera_follow()` 必须在
+## 推进模拟之后立刻调用（见 `_process()`）。
+func _paint_battle_world(arena: Rect2) -> void:
+	if _battle_viewport == null:
+		return
+	_battle_viewport.apply(_battle_camera(arena))
+	_battle_viewport.refresh()
+	_battle_viewport.blit(self)
+
+## 世界节点的实际绘制：**纯世界坐标，不乘缩放、不做投影、不做裁剪**。
+##
+## `canvas` 是 `BattleViewport.BattleWorld`（一个 `Node2D`），所以 `draw_*` 与文字
+## 都在同一张离屏画布上。线宽与「屏幕最小尺寸」一律乘 `pixel`（世界单位/屏幕像素）。
+##
+## 按 `_screen` 分流——三个战斗页的**内容不同、顺序相同**：
+##   竞技场 → 中立物 → 车体 → 动效 → 消散 → 弹道 → 炮口闪光 → 命中闪光 → 伤害数字。
+func _draw_battle_world(canvas: CanvasItem) -> void:
+	var pixel := _battle_viewport.pixel() if _battle_viewport != null else 1.0
+	if _screen == SCREEN_MATCH and match_session != null:
+		var duel: Duel = match_session.duel
+		CombatView.draw_arena(canvas, duel.arena, duel.obstacles, Palette.ACCENT_CYAN, pixel)
+		## 中立物（房屋 / 残骸）是对局模式没有的，传空数组即可——
+		## 这就是「同一份实现按模式配置」而不是「两套分支」的意思。
+		CombatView.draw_neutrals(canvas, [], [], float(definitions.global_number("cell_size", 16.0)), pixel)
+		for tag in [Duel.TAG_ENEMY, Duel.TAG_PLAYER]:
+			_draw_match_hull(canvas, String(tag), pixel)
+		CombatView.draw_fx(canvas, _match_fx.entries, CombatView.FX_STYLE_MATCH, pixel)
+		## 消散画在弹道**之下**：残余弹道残影不应该被遮住，而且消散本身没有实体。
+		_draw_timed_expires(canvas, _match_expires, pixel)
+		CombatView.draw_shots(canvas, duel.field.shots, Duel.TAG_PLAYER, pixel)
+		## 炮口闪光画在弹道**之上**：它是「刚刚发出这一发」的因果提示，必须盖在拖尾上。
+		_draw_timed_muzzles(canvas, _match_muzzles, pixel)
+		CombatView.draw_hit_flash(canvas, _match_hit_flash_at, _match_hit_flash_left, CombatView.HIT_FLASH_TIME, pixel)
+		CombatView.draw_damage_popups(canvas, _match_fx.entries, _world_text(canvas), pixel)
+		return
+	if _screen == SCREEN_SURVIVAL and survival != null and survival.duel != null:
+		var run_duel: Duel = survival.duel
+		var cell_px := float(definitions.global_number("cell_size", 16.0))
+		## 竞技场固定障碍直接读数据，避免与 duel.obstacles 里的房屋条目重复绘制。
+		var obstacles := CombatView.scale_obstacles(definitions.get_arena(DRIVE_ARENA_ID).get("obstacles", []), cell_px)
+		CombatView.draw_arena(canvas, run_duel.arena, obstacles, Palette.ACCENT_CYAN, pixel)
+		## 房屋与残骸是生存模式的专属中立物；同一函数传空数组就是「没有」。
+		CombatView.draw_neutrals(canvas, survival.houses, survival.debris, cell_px, pixel)
+		## 坦克：逐部件按血量上色（完好队伍色 / 中度琥珀 / 濒危红）。
+		for raw_tag in run_duel.alive_tags():
+			_draw_survival_hull(canvas, String(raw_tag), pixel)
+		CombatView.draw_fx(canvas, _survival_fx.entries, CombatView.FX_STYLE_SURVIVAL, pixel)
+		## 消散画在弹道之下（与对局页同一层级）；炮口闪光画在弹道之上。
+		_draw_timed_expires(canvas, _survival_expires, pixel)
+		CombatView.draw_shots(canvas, run_duel.field.shots, Duel.TAG_PLAYER, pixel)
+		_draw_timed_muzzles(canvas, _survival_muzzles, pixel)
+		## 命中闪光画在炮弹之上，确保不会被格线淹掉。
+		CombatView.draw_hit_flash(canvas, _hit_flash_at, _hit_flash_left, CombatView.HIT_FLASH_TIME, pixel)
+		## 伤害数字画在最后：必须盖在炮弹、命中闪光与所有地形之上。
+		CombatView.draw_damage_popups(canvas, _survival_fx.entries, _world_text(canvas), pixel)
+		return
+	if _screen == SCREEN_DRIVE and tank != null:
+		_draw_drive_field(canvas, pixel)
+		_draw_drive_hull(canvas, pixel)
+		_draw_drive_broken_links(canvas, pixel)
+		_draw_drive_fx(canvas, pixel)
+		_draw_timed_expires(canvas, _drive_expires, pixel)
+		_draw_drive_shots(canvas, pixel)
+		_draw_timed_muzzles(canvas, _drive_muzzles, pixel)
+		## 命中闪光画在炮弹之上，确保不会被格线淹掉。
+		CombatView.draw_hit_flash(canvas, _drive_hit_flash_at, _drive_hit_flash_left, CombatView.HIT_FLASH_TIME, pixel)
+		## 伤害数字画在最后：必须盖在炮弹、命中闪光与所有地形之上。
+		CombatView.draw_damage_popups(canvas, _drive_fx.entries, _world_text(canvas), pixel)
+
+## 伤害数字的文字回调：`CombatView` 要求 `(text, position, size, colour, mono)`，
+## 而 `draw_string` 必须在持有画布的节点上调用 —— 所以绑定到 `BattleWorld`。
+func _world_text(canvas: CanvasItem) -> Callable:
+	return Callable(self, "_draw_text_on").bind(canvas)
+
+## 在指定画布上画文字。签名与 `_draw_text()` 一致，只是换了一个绘制目标。
+func _draw_text_on(text: String, position: Vector2, size: int, color: Color, mono: bool, canvas: CanvasItem) -> void:
+	var font: SystemFont = _font_mono if mono else _font_regular
+	if font == null:
+		return
+	canvas.draw_string(font, position, text, HORIZONTAL_ALIGNMENT_LEFT, -1.0, size, color)
 
 ## 炮口闪光与消散的绘制包装：两个页面共用同一个循环形状，只有相机与缩放不同。
 ##
@@ -2242,15 +2333,15 @@ func _draw_match() -> void:
 ##
 ## v3.38：第二个参数从 `arena` 改成 `camera` —— 相机矩形已经含了缩放焦点，
 ## 传错了就会让光效与炮弹在缩放后分开（两者必须用同一个相机）。
-func _draw_timed_muzzles(entries: Array, camera: Rect2, scale_factor: float) -> void:
+func _draw_timed_muzzles(canvas: CanvasItem, entries: Array, pixel: float) -> void:
 	for raw_entry in entries:
 		var entry: Dictionary = raw_entry
-		CombatView.draw_muzzle_flash(self, DRIVE_VIEW, camera, scale_factor, Vector2(entry["pos"]), Vector2(entry["dir"]), float(entry["left"]), Color(entry["colour"]))
+		CombatView.draw_muzzle_flash(canvas, Vector2(entry["pos"]), Vector2(entry["dir"]), float(entry["left"]), Color(entry["colour"]), CombatView.MUZZLE_FLASH_TIME, pixel)
 
-func _draw_timed_expires(entries: Array, camera: Rect2, scale_factor: float) -> void:
+func _draw_timed_expires(canvas: CanvasItem, entries: Array, pixel: float) -> void:
 	for raw_entry in entries:
 		var entry: Dictionary = raw_entry
-		CombatView.draw_expire_flash(self, DRIVE_VIEW, camera, scale_factor, Vector2(entry["pos"]), float(entry["left"]), Color(entry["colour"]))
+		CombatView.draw_expire_flash(canvas, Vector2(entry["pos"]), float(entry["left"]), Color(entry["colour"]), CombatView.EXPIRE_FLASH_TIME, pixel)
 
 ## 坦克绘制的唯一实现：试驾 / 对局 / 生存三页原本各有一份逐行同构的副本，
 ## 差异只在「每部件颜色」「填充透明度」「部件格偏移」「额外的格装饰」。
@@ -2277,13 +2368,13 @@ func _draw_timed_expires(entries: Array, camera: Rect2, scale_factor: float) -> 
 ##   `effects["parts"]` : part_key → {fill, fill_colour, bar, bar_colour, outline, outline_colour}
 ##   `effects["links"]` : [{from: Vector2i, to: Vector2i, colour: Color}] 局部格坐标连线（维修）
 ## **缺省 `{}` 时一个绘制分支都不会走，像素与旧版逐字节相同**——这是截图基线可比的前提。
-func _draw_hull_shared(hull: TankBody, origin: Vector2, heading: float, scale_factor: float, colour_fn: Callable, alpha_fn: Callable = Callable(), offset_fn: Callable = Callable(), cell_hook: Callable = Callable(), effects: Dictionary = {}, pipe_hook: Callable = Callable(), pipe_cells: Dictionary = {}, cannon_hook: Callable = Callable()) -> void:
+func _draw_hull_shared(canvas: CanvasItem, hull: TankBody, origin: Vector2, heading: float, pixel: float, colour_fn: Callable, alpha_fn: Callable = Callable(), offset_fn: Callable = Callable(), cell_hook: Callable = Callable(), effects: Dictionary = {}, pipe_hook: Callable = Callable(), pipe_cells: Dictionary = {}, cannon_hook: Callable = Callable()) -> void:
 	if hull == null or hull.parts.is_empty():
 		return
 	var cell: float = hull.cell_size()
 	var effect_parts: Dictionary = effects.get("parts", {})
 	var effect_links: Array = effects.get("links", [])
-	draw_set_transform(origin, heading, Vector2(scale_factor, scale_factor))
+	canvas.draw_set_transform(origin, heading, Vector2.ONE)
 	for part in hull.parts:
 		var colour: Color = colour_fn.call(part)
 		var alpha := 0.22
@@ -2309,14 +2400,14 @@ func _draw_hull_shared(hull: TankBody, origin: Vector2, heading: float, scale_fa
 				## 否则平台层逐格的方框会横跨在管身上，把一根连续的管切成一段一段 ——
 				## 那在 32× 裁切里与「接缝」完全分不出来。缺省 `{}` 时不走这个分支。
 				var under_pipe := pipe_cells.has(cell_value)
-				draw_rect(box, Color(colour, alpha * (0.45 if under_pipe else 1.0)), true)
+				canvas.draw_rect(box, Color(colour, alpha * (0.45 if under_pipe else 1.0)), true)
 				if not under_pipe:
-					draw_rect(box, colour, false, maxf(1.0 / scale_factor, 1.0))
+					canvas.draw_rect(box, colour, false, maxf(pixel, 1.0))
 				if cell_hook.is_valid():
 					cell_hook.call(box, colour, part)
 		var part_key := String(part.get("key", ""))
 		if effect_parts.has(part_key):
-			_draw_part_effect(part, effect_parts[part_key], cell, -hull.centroid_local + part_offset, scale_factor)
+			_draw_part_effect(canvas, part, effect_parts[part_key], cell, -hull.centroid_local + part_offset, pixel)
 	## 维修连线：从维修装置首格指向「下一次真正会被修的那一件」首格。
 	## 画在格之后、变换复位之前，所以自动随车体旋转与缩放。
 	if not effect_links.is_empty():
@@ -2326,8 +2417,8 @@ func _draw_hull_shared(hull: TankBody, origin: Vector2, heading: float, scale_fa
 			var link_from: Vector2 = (Vector2(Vector2i(link["from"])) + Vector2(0.5, 0.5)) * cell - hull.centroid_local
 			var link_to: Vector2 = (Vector2(Vector2i(link["to"])) + Vector2(0.5, 0.5)) * cell - hull.centroid_local
 			var link_colour: Color = link.get("colour", Palette.ACCENT_LIME)
-			draw_line(link_from, link_to, Color(link_colour, 0.30 + 0.45 * link_pulse), maxf(1.0 / scale_factor, 1.0))
-	draw_set_transform(Vector2.ZERO, 0.0, Vector2.ONE)
+			canvas.draw_line(link_from, link_to, Color(link_colour, 0.30 + 0.45 * link_pulse), maxf(pixel, 1.0))
+	canvas.draw_set_transform(Vector2.ZERO, 0.0, Vector2.ONE)
 
 ## 战斗页共用：在某张网的传送带上画管道与在途弹药。
 ##
@@ -2339,7 +2430,7 @@ func _draw_hull_shared(hull: TankBody, origin: Vector2, heading: float, scale_fa
 ## 没有弹药网络那套 `specs`/`index`；端口必须重新按 `module_id + rot` 经
 ## `AmmoNetwork.ui_ports()` 推导（与仿真同一条函数），在途弹药则用**格数组做键**
 ## 去匹配 —— 两边的 `cells` 都是同一个 `part_cells()` 的结果，格集合一一对应。
-func _network_pipe_hook(net: AmmoNetwork, cell: float, scale_factor: float) -> Callable:
+func _network_pipe_hook(canvas: CanvasItem, net: AmmoNetwork, cell: float, pixel: float) -> Callable:
 	if net == null:
 		return Callable()
 	## 占位表与在途弹药每帧只算一次，所有部件共用同一份快照。
@@ -2386,7 +2477,9 @@ func _network_pipe_hook(net: AmmoNetwork, cell: float, scale_factor: float) -> C
 		var alpha := 0.55 + 0.35 * (0.5 + 0.5 * sin(_time * 9.0)) if hot else 0.85
 		var connected := PipeView.connected_sides(cells, specs, occupancy)
 		var seed := float(cells_key.hash() % 97) / 97.0
-		PipeView.draw_pipe(self, module_id, cells, specs, cell, tint, alpha, scale_factor,
+		## 线宽下限用 `1.0 / pixel` 表达：`PipeView` 内部是 `PIPE_WALL_MIN_PX / scale_factor`，
+		## 传「一屏幕像素对应的世界单位」就得到「至少 1 屏幕像素」。
+		PipeView.draw_pipe(canvas, module_id, cells, specs, cell, tint, alpha, 1.0 / maxf(pixel, 0.0001),
 			connected, 0.5 + 0.5 * sin(phase + seed), part_offset)
 		if flying.has(cells_key):
 			var round_state: Dictionary = flying[cells_key]
@@ -2400,7 +2493,7 @@ func _network_pipe_hook(net: AmmoNetwork, cell: float, scale_factor: float) -> C
 			## 两者都应是红色 —— 玩家看到红色就知道这条管线在堵，而不用区分是哪一种。
 			if bool(round_state["congested"]) or bool(round_state.get("exit_blocked", false)):
 				round_colour = Palette.ACCENT_RED
-			PipeView.draw_round(self, path, cell, t, round_colour, 1.0, scale_factor)
+			PipeView.draw_round(canvas, path, cell, t, round_colour, 1.0, 1.0 / maxf(pixel, 0.0001))
 		return true
 
 ## 格数组的稳定键：排序后拼串。两边的 `cells` 都来自同一个 `part_cells()`，
@@ -2437,7 +2530,7 @@ static func _cannon_key(module_id: String, first_cell: Vector2i) -> String:
 ## 否则高角速度下炮口会与炮口闪光错开几个像素。
 ##
 ## 返回 `false` 表示「这不是炮管」，交给 `_draw_hull_shared()` 照旧画方格。
-func _battle_cannon_hook(bank: CannonBank, hull: TankBody, cell: float, scale_factor: float, drawn_heading: float) -> Callable:
+func _battle_cannon_hook(canvas: CanvasItem, bank: CannonBank, hull: TankBody, cell: float, pixel: float, drawn_heading: float) -> Callable:
 	if bank == null or hull == null or bank.cannons.is_empty():
 		return Callable()
 	var aims: Dictionary = {}
@@ -2457,8 +2550,8 @@ func _battle_cannon_hook(bank: CannonBank, hull: TankBody, cell: float, scale_fa
 		## 调用方 `_draw_hull_shared()` 传进来的就是 `-hull.centroid_local + offset_fn(part)`；
 		## 这里若再减一次，炮管就会多平移一个质心 —— 实测直接把炮管甩到车身之外（v3.37 修）。
 		## 管道钩子同样直接把这个值转给 `PipeView`，两边口径必须一致。
-		CannonView.draw_cannon(self, cells, float(aims[key]), cell, colour, CANNON_BATTLE_ALPHA,
-			scale_factor, part_offset)
+		CannonView.draw_cannon(canvas, cells, float(aims[key]), cell, colour, CANNON_BATTLE_ALPHA,
+			1.0 / maxf(pixel, 0.0001), part_offset)
 		return true
 
 ## 逐模块特效的常量。
@@ -2574,7 +2667,7 @@ func _hull_cell_index(hull: TankBody) -> Dictionary:
 ## 调用时车体变换已设好（原点 + 朝向 + 缩放），所以这里一律用**局部格坐标**，
 ## 随车体一起旋转与缩放，不需要再算一次世界坐标。
 ## `base` = `-centroid_local + offset`，把格坐标换算到车体局部系。
-func _draw_part_effect(part: Dictionary, effect: Dictionary, cell: float, base: Vector2, scale_factor: float) -> void:
+func _draw_part_effect(canvas: CanvasItem, part: Dictionary, effect: Dictionary, cell: float, base: Vector2, pixel: float) -> void:
 	var low := Vector2(INF, INF)
 	var high := Vector2(-INF, -INF)
 	for raw_cell in part["cells"]:
@@ -2585,43 +2678,42 @@ func _draw_part_effect(part: Dictionary, effect: Dictionary, cell: float, base: 
 		return
 	var box := Rect2(low * cell + base, (high - low + Vector2.ONE) * cell)
 	var pulse := 0.5 + 0.5 * sin(_time * MODULE_PULSE_SPEED)
-	var line_width := maxf(1.0 / scale_factor, 1.0)
+	var line_width := maxf(pixel, 1.0)
 	## ① 覆盖填充：护盾生效时整块格泛绿，强度随剩余护盾血量。
 	if float(effect.get("fill", -1.0)) >= 0.0:
 		var fill_colour: Color = effect.get("fill_colour", Palette.ACCENT_LIME)
 		var fill_ratio := clampf(float(effect["fill"]), 0.0, 1.0)
-		draw_rect(box, Color(fill_colour, 0.10 + 0.22 * fill_ratio), true)
+		canvas.draw_rect(box, Color(fill_colour, 0.10 + 0.22 * fill_ratio), true)
 	## ② 脉冲描边：护盾生效是绿，充能中是红。
 	if float(effect.get("outline", 0.0)) > 0.0:
 		var outline_colour: Color = effect.get("outline_colour", Palette.ACCENT_LIME)
 		var strength := float(effect["outline"]) * (0.55 + 0.45 * pulse)
-		draw_rect(box, Color(outline_colour, strength), false, line_width * 1.6)
+		canvas.draw_rect(box, Color(outline_colour, strength), false, line_width * 1.6)
 	## ③ 底部进度条：制造 / 存量 / 加工 / 装填 / 充能 / 维修共用这一条。
 	if float(effect.get("bar", -1.0)) >= 0.0:
 		var bar_colour: Color = effect.get("bar_colour", Palette.ACCENT_AMBER)
-		var bar_height := maxf(MODULE_BAR_LOCAL_HEIGHT, MODULE_BAR_MIN_SCREEN / maxf(scale_factor, 0.001))
+		var bar_height := maxf(MODULE_BAR_LOCAL_HEIGHT, MODULE_BAR_MIN_SCREEN * pixel)
 		var bar := Rect2(Vector2(box.position.x + 0.5, box.end.y - bar_height - 0.5), Vector2(maxf(box.size.x - 1.0, 1.0), bar_height))
-		draw_rect(bar, Color(Palette.BG_BASE, 0.85), true)
-		draw_rect(Rect2(bar.position, Vector2(bar.size.x * clampf(float(effect["bar"]), 0.0, 1.0), bar.size.y)), bar_colour, true)
-		draw_rect(bar, Color(bar_colour, 0.55), false, maxf(0.5, line_width * 0.5))
+		canvas.draw_rect(bar, Color(Palette.BG_BASE, 0.85), true)
+		canvas.draw_rect(Rect2(bar.position, Vector2(bar.size.x * clampf(float(effect["bar"]), 0.0, 1.0), bar.size.y)), bar_colour, true)
+		canvas.draw_rect(bar, Color(bar_colour, 0.55), false, maxf(0.5, line_width * 0.5))
 
 ## 对局页车体：坐标走 `CombatView.to_screen`，颜色走血量分档，特效走 `_hull_effects`。
 ## v3.38：`camera` 由 `_draw_match()` 算好传进来，与同帧其他绘制严格同源。
-func _draw_match_hull(tag: String, scale_factor: float, camera: Rect2) -> void:
+func _draw_match_hull(canvas: CanvasItem, tag: String, pixel: float) -> void:
 	var duel: Duel = match_session.duel
 	var hull: TankBody = duel.tank_of(tag)
 	if hull == null or hull.parts.is_empty():
 		return
 	var base := Palette.ACCENT_CYAN if tag == Duel.TAG_PLAYER else Palette.ACCENT_MAGENTA
-	var origin := CombatView.to_screen(DRIVE_VIEW, camera, hull.position, scale_factor)
 	var effects := _hull_effects(hull, duel.damage_of(tag), duel.network_of(tag))
 	## v3.35：管道层。钩子只看格坐标，质心平移由 `_draw_hull_shared` 自己算好传进来，
 	## 所以这里不用关心车体在哪。
 	var cell: float = hull.cell_size()
-	var pipe_hook := _network_pipe_hook(duel.network_of(tag), cell, scale_factor)
+	var pipe_hook := _network_pipe_hook(canvas, duel.network_of(tag), cell, pixel)
 	## v3.37：炮管层。对局页的车体朝向就是 `hull.heading`，没有额外的视觉倾斜。
-	var cannon_hook := _battle_cannon_hook(duel.bank_of(tag), hull, cell, scale_factor, hull.heading)
-	_draw_hull_shared(hull, origin, hull.heading, scale_factor, _match_part_colour.bind(base), CombatView.hull_damage_alpha, Callable(), Callable(), effects, pipe_hook, _pipe_covered_cells, cannon_hook)
+	var cannon_hook := _battle_cannon_hook(canvas, duel.bank_of(tag), hull, cell, pixel, hull.heading)
+	_draw_hull_shared(canvas, hull, hull.position, hull.heading, pixel, _match_part_colour.bind(base), CombatView.hull_damage_alpha, Callable(), Callable(), effects, pipe_hook, _pipe_covered_cells, cannon_hook)
 
 
 ## 对局页每部件颜色：驾驶舱恒为琥珀，其余按队伍色，再统一过血量分档。
@@ -2964,19 +3056,7 @@ func _draw_aim_reticle() -> void:
 	draw_line(pointer - Vector2(0.0, AIM_RETICLE_CROSS), pointer + Vector2(0.0, AIM_RETICLE_CROSS), Color(colour, 0.55), 1.0)
 
 func _draw_drive() -> void:
-	## v3.38：本函数内所有绘制共用**同一个相机矩形**（只算一次），理由与 `_draw_match()` 相同。
-	var camera := _battle_camera(_drive_arena)
-	_draw_drive_field(camera)
-	_draw_drive_hull(camera)
-	_draw_drive_broken_links()
-	_draw_drive_fx(camera)
-	_draw_timed_expires(_drive_expires, camera, _drive_scale())
-	_draw_drive_shots(camera)
-	_draw_timed_muzzles(_drive_muzzles, camera, _drive_scale())
-	## 命中闪光画在炮弹之上，确保不会被格线淹掉。
-	CombatView.draw_hit_flash(self, DRIVE_VIEW, camera, _drive_scale(), _drive_hit_flash_at, _drive_hit_flash_left)
-	## 伤害数字画在最后：必须盖在炮弹、命中闪光与所有地形之上。
-	CombatView.draw_damage_popups(self, DRIVE_VIEW, camera, _drive_scale(), _drive_fx.entries, _draw_text)
+	_paint_battle_world(_drive_arena)
 	_draw_drive_hud()
 	## v3.25：准星必须最后画，盖住车体 / 弹道 / HUD。
 	_draw_aim_reticle()
@@ -2984,17 +3064,15 @@ func _draw_drive() -> void:
 ## 试驾页的竞技场：直接走 `CombatView.draw_arena`，只多传一个网格间距。
 ## 网格间距是「4 格宽」的屏幕像素（旧实现里 `cell_step` 就是 `cell_size·scale·4`），
 ## `draw_arena` 的 `grid_step_px = 0` 缺省值保证另两页不会因此多画一根线。
-func _draw_drive_field(camera: Rect2) -> void:
+func _draw_drive_field(canvas: CanvasItem, pixel: float) -> void:
 	if tank == null:
 		return
-	var scale_factor := _drive_scale()
-	CombatView.draw_arena(self, DRIVE_VIEW, _drive_arena, camera, scale_factor, _drive_obstacles, Palette.ACCENT_CYAN, tank.cell_size() * scale_factor * 4.0)
+	CombatView.draw_arena(canvas, _drive_arena, _drive_obstacles, Palette.ACCENT_CYAN, pixel, tank.cell_size() * 4.0)
 
 ## 整机绕质心旋转；design §5.5 的转向倾斜与加速滞后均为纯视觉量。
-func _draw_drive_hull(camera: Rect2) -> void:
+func _draw_drive_hull(canvas: CanvasItem, pixel: float) -> void:
 	if tank == null or tank.parts.is_empty():
 		return
-	var scale_factor := _drive_scale()
 	var tilt := 0.0
 	if _motion_enabled:
 		tilt = clampf(tank.angular_velocity * deg_to_rad(0.7), -deg_to_rad(2.0), deg_to_rad(2.0))
@@ -3007,14 +3085,12 @@ func _draw_drive_hull(camera: Rect2) -> void:
 	## 两层叠在一起时每格都被方框描边，管子就被人为切成一小段一小段 —— 那正是
 	## 「看得见接缝」的直接原因（16× 裁切里一目了然）。现在管道件走钩子、非管道件走方格，
 	## 与对局页 / 生存页同一条路径。
-	var pipe_hook := _network_pipe_hook(network, tank.cell_size(), scale_factor)
+	var pipe_hook := _network_pipe_hook(canvas, network, tank.cell_size(), pixel)
 	## v3.37：炮管层。注意传的是**画出来**的朝向（含转向倾斜 `tilt`），
 	## 而不是 `tank.heading` —— 炮管要与车体一起倾，否则炮口会与炮口闪光错开。
 	var drawn_heading := tank.heading + tilt
-	var cannon_hook := _battle_cannon_hook(bank, tank, tank.cell_size(), scale_factor, drawn_heading)
-	## v3.38：坐标走**同一个相机**——`_drive_to_screen()` 会自己取 `_battle_camera()`，
-	## 但这里已经有一份了，重算一次不保证逐位相同（相机焦点在插值中）。
-	_draw_hull_shared(tank, CombatView.to_screen(DRIVE_VIEW, camera, tank.position, scale_factor), drawn_heading, scale_factor, _drive_part_color, CombatView.hull_damage_alpha, _drive_part_offset, _drive_cell_hook, effects, pipe_hook, _pipe_covered_cells, cannon_hook)
+	var cannon_hook := _battle_cannon_hook(canvas, bank, tank, tank.cell_size(), pixel, drawn_heading)
+	_draw_hull_shared(canvas, tank, tank.position, drawn_heading, pixel, _drive_part_color, CombatView.hull_damage_alpha, _drive_part_offset, _drive_cell_hook, effects, pipe_hook, _pipe_covered_cells, cannon_hook)
 
 ## 加速时行进机构整体向后拖一点（纯视觉量，design §5.5）。
 ## 只在试驾页启用：`_motion_enabled` 与油门都是试驾页的状态。
@@ -3024,23 +3100,23 @@ func _drive_part_offset(part: Dictionary) -> Vector2:
 ## 只在行进机构格上叠履带纹。
 func _drive_cell_hook(box: Rect2, colour: Color, part: Dictionary) -> void:
 	if String(part["kind"]) == TankBody.KIND_MOBILITY:
-		CombatView.track_marks(self, box, colour, _drive_track_phase)
+		CombatView.track_marks(_battle_viewport.world, box, colour, _drive_track_phase)
 
 ## 弹道走 `CombatView.draw_shots`：颜色按 `shooter` 判，试驾页的发射方 tag 恒为 "player"。
 ## 旧实现写死琥珀色——一旦以后有敌人的弹道进入试驾页，就分不出谁在打谁。
-func _draw_drive_shots(camera: Rect2) -> void:
+func _draw_drive_shots(canvas: CanvasItem, pixel: float) -> void:
 	if field == null:
 		return
-	CombatView.draw_shots(self, DRIVE_VIEW, camera, _drive_scale(), field.shots, "player")
+	CombatView.draw_shots(canvas, field.shots, "player", pixel)
 
 ## M5 战斗动效：残骸、爆炸环、护盾、脱落撕裂与驾驶舱被毁；全部由 left/life 倒数驱动。
 ## v3.33：形状与推进全部走 `CombatView.draw_fx` + `FX_STYLE_DRIVE`。
 ## 残骸 / 护盾受击 / 脱落 / 驾驶舱这四种专用形状随 `FX_STYLE_DRIVE["special"]` 开关走，
 ## 另两页不开这个开关，所以它们的动效仍然是通用圆环——像素不变。
-func _draw_drive_fx(camera: Rect2) -> void:
+func _draw_drive_fx(canvas: CanvasItem, pixel: float) -> void:
 	if _drive_fx.is_empty():
 		return
-	CombatView.draw_fx(self, DRIVE_VIEW, camera, _drive_scale(), _drive_fx.entries, CombatView.FX_STYLE_DRIVE)
+	CombatView.draw_fx(canvas, _drive_fx.entries, CombatView.FX_STYLE_DRIVE, pixel)
 
 ## 试驾页的伤害悬浮数字：逻辑全在 `CombatView.push_damage()`（三页同一份）。
 func _drive_push_damage(at: Vector2, amount: float, colour: Color, mode: String) -> void:
@@ -3051,7 +3127,7 @@ func _drive_push_damage(at: Vector2, amount: float, colour: Color, mode: String)
 ## v3.36 之前这一小段夹在 `_draw_drive_conveyors()` 里，因为那个函数要自己建变换。
 ## 现在管道与在途弹药全部走 `_draw_hull_shared()` 的 `pipe_hook`（与另两页同一条路径），
 ## 断链图标与管道无关，所以在这里单独留一个函数，由 `_draw_drive()` 直接调用。
-func _draw_drive_broken_links() -> void:
+func _draw_drive_broken_links(canvas: CanvasItem, pixel: float) -> void:
 	if network == null or tank == null or tank.parts.is_empty():
 		return
 	var cell: float = tank.cell_size()
@@ -3059,17 +3135,17 @@ func _draw_drive_broken_links() -> void:
 		if bool(entry["reachable"]):
 			continue
 		var source_cell := Vector2i((network.parts[int(entry["part"])]["cells"] as Array)[0])
-		_draw_drive_broken_link(_drive_local_to_screen(Vector2(source_cell) + Vector2(0.5, 0.5), cell))
+		_draw_drive_broken_link(canvas, _drive_local_to_screen(Vector2(source_cell) + Vector2(0.5, 0.5), cell), pixel)
 
-## 部件局部格中心 → 屏幕坐标（绕质心旋转后投影）。
+## 部件局部格中心 → **世界坐标**（绕质心旋转；v3.42 起不再乘缩放）。
 func _drive_local_to_screen(local_cell: Vector2, cell: float) -> Vector2:
 	var local := local_cell * cell - tank.centroid_local
-	return _drive_to_screen(tank.position + local.rotated(tank.heading))
+	return tank.position + local.rotated(tank.heading)
 
 ## 断链图标：红圈加斜杠，标在不可达的源模块上（design §7.5）。
-func _draw_drive_broken_link(screen: Vector2) -> void:
-	draw_arc(screen, 14.0, 0.0, TAU, 20, Palette.ACCENT_RED, 2.0)
-	draw_line(screen + Vector2(-9.0, -9.0), screen + Vector2(9.0, 9.0), Palette.ACCENT_RED, 2.0)
+func _draw_drive_broken_link(canvas: CanvasItem, at: Vector2, pixel: float) -> void:
+	canvas.draw_arc(at, 14.0 * pixel, 0.0, TAU, 20, Palette.ACCENT_RED, 2.0 * pixel)
+	canvas.draw_line(at + Vector2(-9.0, -9.0) * pixel, at + Vector2(9.0, 9.0) * pixel, Palette.ACCENT_RED, 2.0 * pixel)
 
 ## 试驾页每部件颜色：与对局页 / 生存页**同一条规则**——驾驶舱琥珀、其余队伍色
 ## （试驾页的队伍色是青色，与竞技场边框同色），再统一过血量分档。
@@ -3417,6 +3493,11 @@ func _handle_capture_request() -> void:
 	if _capture_cursor.is_finite():
 		_mouse_position = _capture_cursor
 		_aim_with_mouse(_capture_cursor)
+	## v3.42：相机状态钉住后立刻把战场画一遍，让 `SubViewport` 的纹理在等待的那
+	## 30 帧里以最终相机渲染；否则取图时用的是旧相机的内容，画面会跳一次。
+	if _battle_viewport != null and capture_arena.size.y > 0.0:
+		_battle_viewport.apply(_battle_camera(capture_arena))
+		_battle_viewport.refresh()
 	_screen_opacity = 1.0
 	_focus_rail_alpha = 1.0
 	_capture_frozen = true
@@ -3862,29 +3943,11 @@ func _draw_survival() -> void:
 ## 中立物），并把障碍从格单位换算成像素。**逐项参数、颜色、系数、绘制顺序都与
 ## 抽取前一一对应**，所以幸存页的像素不应该有任何变化。
 func _draw_survival_arena() -> void:
-	var duel: Duel = survival.duel
-	var scale_factor := _survival_scale()
-	var cell_px := float(definitions.global_number("cell_size", 16.0))
-	## v3.38：本函数内所有绘制共用**同一个相机矩形**（与另两页同一纪律）。
-	var camera := _battle_camera(duel.arena)
-	## 竞技场固定障碍直接读数据，避免与 duel.obstacles 里的房屋条目重复绘制。
-	## 数据文件用**格单位**，进组件前统一换算成像素（对局页的 obstacles 已是像素）。
-	var obstacles := CombatView.scale_obstacles(definitions.get_arena(DRIVE_ARENA_ID).get("obstacles", []), cell_px)
-	CombatView.draw_arena(self, DRIVE_VIEW, duel.arena, camera, scale_factor, obstacles, Palette.ACCENT_CYAN)
-	## 房屋与残骸是生存模式的专属中立物；同一函数传空数组就是「没有」。
-	CombatView.draw_neutrals(self, DRIVE_VIEW, duel.arena, camera, scale_factor, survival.houses, survival.debris, cell_px)
-	## 坦克：逐部件按血量上色（完好队伍色 / 中度琥珀 / 濒危红）。
-	for raw_tag in duel.alive_tags():
-		_draw_survival_hull(String(raw_tag), scale_factor, camera)
-	CombatView.draw_fx(self, DRIVE_VIEW, camera, scale_factor, _survival_fx.entries, CombatView.FX_STYLE_SURVIVAL)
-	## 消散画在弹道之下（与对局页同一层级）；炮口闪光画在弹道之上。
-	_draw_timed_expires(_survival_expires, camera, scale_factor)
-	CombatView.draw_shots(self, DRIVE_VIEW, camera, scale_factor, duel.field.shots, Duel.TAG_PLAYER)
-	_draw_timed_muzzles(_survival_muzzles, camera, scale_factor)
-	## 命中闪光画在炮弹之上，确保不会被格线淹掉。
-	CombatView.draw_hit_flash(self, DRIVE_VIEW, camera, scale_factor, _hit_flash_at, _hit_flash_left)
-	## 伤害数字画在最后：必须盖在炮弹、命中闪光与所有地形之上。
-	CombatView.draw_damage_popups(self, DRIVE_VIEW, camera, scale_factor, _survival_fx.entries, _draw_text)
+	_paint_battle_world(survival.duel.arena)
+	_draw_survival_hud()
+	## v3.25：准星最后画。`_draw_aim_reticle()` 内部用 `_is_battle_screen()` 限定
+	## 只在 `STAGE_BATTLE` 显示，所以升级页 / 商店页不会在战场上冒出一个环。
+	_draw_aim_reticle()
 
 ## 逐部件按**血量比例**上色：完好是队伍色、中度损伤转琥珀、濒危转红、已毁不留格。
 ## 分档阈值与透明度曲线已收归 `CombatView`，对局页用**同一个函数**——这才是复用的实质。
@@ -3904,16 +3967,15 @@ func _survival_part_colour(part: Dictionary, tag: String) -> Color:
 func _survival_hull_alpha(part: Dictionary) -> float:
 	return CombatView.hull_damage_alpha(part)
 
-func _draw_survival_hull(tag: String, scale_factor: float, camera: Rect2) -> void:
+func _draw_survival_hull(canvas: CanvasItem, tag: String, pixel: float) -> void:
 	var hull: TankBody = survival.duel.tank_of(tag)
 	if hull == null or hull.parts.is_empty():
 		return
-	var origin := CombatView.to_screen(DRIVE_VIEW, camera, hull.position, scale_factor)
 	var effects := _hull_effects(hull, survival.duel.damage_of(tag), survival.duel.network_of(tag))
 	var cell: float = hull.cell_size()
-	var pipe_hook := _network_pipe_hook(survival.duel.network_of(tag), cell, scale_factor)
-	var cannon_hook := _battle_cannon_hook(survival.duel.bank_of(tag), hull, cell, scale_factor, hull.heading)
-	_draw_hull_shared(hull, origin, hull.heading, scale_factor, _survival_part_colour.bind(tag), _survival_hull_alpha, Callable(), Callable(), effects, pipe_hook, _pipe_covered_cells, cannon_hook)
+	var pipe_hook := _network_pipe_hook(canvas, survival.duel.network_of(tag), cell, pixel)
+	var cannon_hook := _battle_cannon_hook(canvas, survival.duel.bank_of(tag), hull, cell, pixel, hull.heading)
+	_draw_hull_shared(canvas, hull, hull.position, hull.heading, pixel, _survival_part_colour.bind(tag), _survival_hull_alpha, Callable(), Callable(), effects, pipe_hook, _pipe_covered_cells, cannon_hook)
 
 
 func _draw_survival_hud() -> void:

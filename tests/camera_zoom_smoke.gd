@@ -38,6 +38,8 @@ const CombatView := preload("res://scripts/combat_view.gd")
 const MainScript := preload("res://scripts/main.gd")
 const TankBody := preload("res://scripts/tank_body.gd")
 const CannonBank := preload("res://scripts/cannon_bank.gd")
+## v3.42：战场渲染容器（`SubViewport` + `Camera2D`）。
+const BattleViewport := preload("res://scripts/battle_viewport.gd")
 
 const TOL := 0.0001
 
@@ -59,9 +61,10 @@ func _init() -> void:
 	_check_fit_scale_monotonic()
 	_check_mag_bounds()
 	_check_zoom_step_bounds()
-	_check_negative_control()
 	_check_aim_uses_camera()
 	_check_aim_wiring()
+	_check_battle_viewport_geometry()
+	_check_battle_viewport_wiring()
 
 	if _failures == 0:
 		print("CAMERA_OK checks=%d" % _checks)
@@ -379,3 +382,76 @@ func _check_aim_wiring() -> void:
 			camera_tail = camera_tail.substr(0, camera_end)
 		_check(camera_tail.contains("camera_at_height("), "aim_wiring_battle_camera_uses_distance")
 		_check(camera_tail.contains("arena.size.y"), "aim_wiring_battle_camera_uses_arena_height")
+
+## v3.42：引擎相机的几何断言（**不画图**，只算数）。
+##
+## `BattleViewport.apply()` 做的是两行换算：`camera.position = 相机中心`、
+## `zoom = view宽 / 相机宽`。这两行必须满足：
+##  - 相机中心对应的屏幕点是视窗中心；
+##  - 相机矩形恰好铺满视窗（宽高都等于 `view.size / zoom`）；
+##  - `zoom` 与 `fit_scale()` 逐字相等 —— 鼠标逆变换（解析式）与引擎相机（矩阵式）
+##    必须从构造上就是同一个数，否则「画出来的炮管」与「真实开火方向」会分成两套推导。
+##
+## 判据只用到 `apply()` 之后读回的 `position` / `zoom`，**不引用 `apply()` 内部的中间量**，
+## 所以它不会与实现同错（v3.39 假绿的教训）。
+func _check_battle_viewport_geometry() -> void:
+	var bvp := BattleViewport.new()
+	bvp.configure(VIEW, Callable())
+	## 探针环境里没有 `main`，`configure()` 只是建节点不挂树 —— `SubViewport` 的
+	## canvas 变换在离树状态下不可靠，所以本测试只验证**换算本身**，不渲染。
+	var heights: Array = [FAR, FAR * 0.75, FAR * 0.5, FAR * 0.25, 700.0, 400.0]
+	for height in heights:
+		var h := float(height)
+		var camera := CombatView.camera_at_height(ARENA, CENTRE, h)
+		var scale_factor := CombatView.fit_scale(VIEW, camera)
+		bvp.apply(camera)
+		var tag := "h%.3f" % h
+		_check_near(bvp.camera.position.x, camera.get_center().x, "bvp_camera_centre_x_" + tag)
+		_check_near(bvp.camera.position.y, camera.get_center().y, "bvp_camera_centre_y_" + tag)
+		_check_near(bvp.camera.zoom.x, scale_factor, "bvp_zoom_is_fit_scale_x_" + tag)
+		_check_near(bvp.camera.zoom.y, scale_factor, "bvp_zoom_is_fit_scale_y_" + tag)
+		_check_near(bvp.scale_factor(), scale_factor, "bvp_scale_factor_" + tag)
+		_check_near(bvp.pixel(), 1.0 / scale_factor, "bvp_pixel_" + tag)
+		## 相机矩形的尺寸折回视窗：必须恰好铺满（既无 letterbox 也无裁切）。
+		_check_near(camera.size.x * bvp.camera.zoom.x, VIEW.size.x, "bvp_covers_width_" + tag)
+		_check_near(camera.size.y * bvp.camera.zoom.y, VIEW.size.y, "bvp_covers_height_" + tag)
+	## 退化输入不得改写相机：未初始化（arena 空）时保持上一次的值。
+	## 最后一次有效 apply 是 `h = 400`（本表最小），所以 zoom 应仍是它的 fit_scale。
+	var last_camera := CombatView.camera_at_height(ARENA, CENTRE, 400.0)
+	bvp.apply(Rect2())
+	_check_near(bvp.camera.zoom.x, CombatView.fit_scale(VIEW, last_camera), "bvp_degenerate_keeps_camera")
+	bvp.free()
+
+## v3.42：接线断言 —— `_paint_battle_world()` 必须**先 apply 相机再 blit**，
+## 且 `_draw_battle_world()` 必须存在。这是 v3.37「两套推导」缺陷的静态防护。
+func _check_battle_viewport_wiring() -> void:
+	var file := FileAccess.open("res://scripts/main.gd", FileAccess.READ)
+	if file == null:
+		_fail("bvp_wiring_cannot_open_main")
+		return
+	var source := file.get_as_text()
+	file.close()
+	var start := source.find("func _paint_battle_world(")
+	if start < 0:
+		_fail("bvp_wiring_missing_paint")
+		return
+	var tail := source.substr(start)
+	var next_func := tail.find("\nfunc ", 1)
+	if next_func > 0:
+		tail = tail.substr(0, next_func)
+	var code_lines: Array = []
+	for line in tail.split("\n"):
+		var trimmed := line.strip_edges()
+		if trimmed.is_empty() or trimmed.begins_with("#"):
+			continue
+		code_lines.append(trimmed)
+	var body_code := "\n".join(code_lines)
+	_check(body_code.contains(".apply("), "bvp_wiring_applies_camera")
+	_check(body_code.contains(".blit("), "bvp_wiring_blits")
+	_check(body_code.contains("_battle_camera("), "bvp_wiring_uses_battle_camera")
+	## apply 必须出现在 blit 之前（先定相机再取纹理，顺序反了就是用旧相机贴图）。
+	_check(body_code.find(".apply(") < body_code.find(".blit("), "bvp_wiring_apply_before_blit")
+	_check(source.contains("func _draw_battle_world("), "bvp_wiring_world_painter_exists")
+	## 内置反向对照：确认 `.blit(` 这个匹配模式真的有区分力。
+	var bad := "_battle_viewport.refresh()"
+	_check(not bad.contains(".blit("), "bvp_wiring_negative_control")
