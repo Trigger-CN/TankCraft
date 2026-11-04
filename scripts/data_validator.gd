@@ -58,6 +58,8 @@ func validate_globals(path: String, data: Variant) -> PackedStringArray:
 		_require_number_range(path, "$.survival.debris_credit_share", survival_data, "debris_credit_share", 0.0, 1.0, errors)
 		for key in ["debris_drop_chance", "house_drop_chance", "enemy_drop_chance"]:
 			_require_number_range(path, "$.survival.%s" % key, survival_data, key, 0.0, 1.0, errors)
+		for key in ["house_drop_pity", "enemy_drop_pity"]:
+			_require_positive_int(path, "$.survival.%s" % key, survival_data, key, errors)
 		_validate_number_array(path, "$.survival.shop_rarity_weight", survival_data, "shop_rarity_weight", errors)
 	if menu_data is Dictionary:
 		_require_number_range(path, "$.menu.ui_scale_min", menu_data, "ui_scale_min", 0.1, 4.0, errors)

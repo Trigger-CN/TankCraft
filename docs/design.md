@@ -390,7 +390,12 @@ BOOT → MAIN_MENU → EXPEDITION_SETUP → BUILD_PHASE → DEPLOY_PHASE
 | 物件 | 交互方式 | 产出 |
 | --- | --- | --- |
 | **坦克残骸** | **碾过**（玩家坦克与残骸格重叠）即拾取，不需要开火 | `credit` 或 `experience`（随机二选一，`DEBRIS_CREDIT_*` / `DEBRIS_XP_*`），并按 `DEBRIS_DROP_CHANCE` 概率掉落一件配件进 `inventory` |
-| **房屋** | **撞击**（玩家坦克撞上）或**炮击**（弹丸命中）摧毁。房屋有独立 HP 与护甲，不是坦克部件 | 摧毁时给 `credit` + `experience`，并按 `HOUSE_DROP_CHANCE` 概率掉落配件 |
+| **房屋** | **撞击**（玩家坦克撞上）或**炮击**（弹丸命中）摧毁。房屋有独立 HP 与护甲，不是坦克部件 | 摧毁时给 `credit` + `experience`，并按 `HOUSE_DROP_CHANCE` 概率掉落配件（含 `HOUSE_DROP_PITY` 保底） |
+
+> **【v3.43 补充】掉落必须有可见反馈。** 上面两行的产出从实现之初就存在，但事件里不带金额与模块 id，
+> 页面层无从显示，因此实际体验是「击毁敌人 / 拆了房子却什么都看不到」。v3.43 把 `credit` / `xp` / `module`
+> 写进事件、在页面上画绿色「+N cr」漂浮数字并写出掉落的模块名，同时下调 `house_hp` 并给两条掉落线
+> 加保底。细节见 §11.4.2.23。
 
 - 房屋被摧毁后**留下残骸格**，残骸可再被碾过拾取一次（二次收益，量小于直接摧毁）。
 - 残骸与房屋都是**静态物件**，不参与坦克刚体的质量/惯量解算，也不属于任何一方的 `TankBody`。它们由竞技场数据定义（§9.2）。
@@ -4102,6 +4107,83 @@ v3.40 加的七处 `in_view()` 与双点伤害数字判定没能挡住它——�
 - **`--zoom=` 语义与 v3.40 相同**（读数 1.00–4.00，1.00 = 整图），无进一步变更。
 - **未在 Android 上验证，任何 APK 均不存在。**
 
+- **未在 Android 上验证，任何 APK 均不存在。**
+
+#### 11.4.2.23 敌人击杀与房屋摧毁的掉落反馈（v3.43）
+
+**用户原话**：「完善生存模式的机制，敌人击杀也掉落模块和金钱，房屋生命值过高，房屋摧毁也会掉落金币和模块」。
+
+##### 一、先核事实：机制都在，坏的是「玩家看不见」
+
+读码结论（`survival_run.gd` / `main.gd`）：
+
+| 诉求 | 改之前的事实 |
+| --- | --- |
+| 敌人击杀掉模块与金钱 | **本来就有**：普通敌人 `credit_per_kill = 40`、`xp_per_kill = 25`，`enemy_drop_chance = 0.25` 掉它蓝图里已有的一件；Boss 320 cr / 200 xp / **必掉 3 件** |
+| 房屋摧毁掉金币与模块 | **本来就有**：`credit_per_house = 55`、`xp_per_house = 12`、`house_drop_chance = 0.30` 掉一件，另留残骸可碾一次得 18 cr |
+| 房屋生命值过高 | **成立**：`house_hp = 260` + `house_armor = 5`，按 `max(dmg·0.15, dmg − armor)` 算，`cal_76`（55）每发扣 50 → **6 发**；`cal_40`（20）每发扣 17 → **16 发**；每波只 4 栋、波时限 45 s |
+
+**真正的产品缺陷是反馈链断了**：`main.gd::_survival_step()` 的 `if/elif` 链里**根本没有 `enemy_defeated` 分支**——事件被 `_reap_enemies()` 产生、随后被直接丢弃。于是击杀时既没有漂浮数字也没有文案，金钱只是左侧 HUD「金钱 %d cr」静默跳一下；`house_destroyed` 也只有一句没数字的「房屋被摧毁」。
+
+> 这与 v3.20 修掉的「打上去没反应」同源：函数算对了、事件也发了，但页面层没接。**机制存在 ≠ 可感知**。
+
+##### 二、修法（三件事，都不改架构）
+
+**① 事件带出收益**：`enemy_defeated` / `house_destroyed` 两个事件都补 `credit`、`xp`、`module` 三个字段。`module` 是真空串 ≠ 没掉，非空则必定已进 `inventory`。
+
+**② 页面层接上**：`_survival_step()` 新增 `enemy_defeated` 分支，`house_destroyed` 分支重写。两者都写 `_survival_event` 文案（`击毁 enemy_1 +40 cr · 掉落 增伤模块`）并推一条绿色漂浮数字。
+
+漂浮数字**不复用** `CombatView.push_damage()`：那个函数的符号语义写死了 `dealt → +N`、`received`/`shield` → `-N`，而金钱没有正负之分。改为直接 `_survival_fx.push("damage", …, "+%d cr")` —— 绘制端只认 `kind == "damage"` 才当文字画，`mode` 单独标成 `"credit"` 参与限流。
+
+**③ 保底（pity）与数值下调**：
+
+| 键 | 旧 | 新 |
+| --- | --- | --- |
+| `house_hp` | 260.0 | **120.0**（`cal_76` 3 发、`cal_40` 7 发） |
+| `house_armor` | 5.0 | **3.0** |
+| `house_drop_chance` | 0.30 | **0.70** |
+| `enemy_drop_chance` | 0.25 | **0.35** |
+| `house_drop_pity` | — | **3**（新增） |
+| `enemy_drop_pity` | — | **4**（新增） |
+
+纯概率时代 0.25 / 0.30 会让「连着四五个敌人都没掉」频繁出现，而当时又没有任何提示——这才是「敌人不掉模块」这个合理抱怨的另一半。pity 把「运气差」封顶在可接受长度内。
+
+##### 三、`_roll_drop(chance, stream)` 的四个约束
+
+```gdscript
+func _roll_drop(chance: float, stream: String) -> bool:
+    if dry >= pity:            # 保底：必掉，**不抽随机数**
+        return true
+    if _next_unit() < chance:  # 概率：抽一次
+        return true
+    dry += 1                   # 失败：累加干次数
+    return false
+```
+
+1. **两条 stream（`"house"` / `"enemy"`）的干次数必须独立**：否则拆房会顺手抵掉敌人的保底，玩家会觉得「刚掉过又掉不出来了」。
+2. **保底分支不抽随机数**：保底只改变分支走向，不改变 `_next_unit()` 的调用次数，因此**同一 seed 的序列长度仍只取决于调用次数**，确定性不破。
+3. **干次数跨波保留**，只有 `close_run()` 清零 —— 否则每波切换都把「运气欠账」一笔勾销。
+4. **Boss 不走 pity**：`boss_drop_count` 本来就是必掉，「保险柜」不需要再保底。
+
+##### 四、验证
+
+- `tests/survival_smoke.gd` 新增两条验收（`_check_house_reward_feedback` / `_check_enemy_drop_reward`），全部用 data 值做期望：
+  - 事件 `credit` / `xp` 字段与 `credit_per_house` / `xp_per_house` / `credit_per_kill` / `xp_per_kill` 逐值相等；
+  - `module` 非空 ⇒ 必定已进 `inventory`；
+  - **保底阶梯**：对纯函数 `_roll_drop(0.0, stream)` 连调，前 `pity−1` 次必然 false、第 `pity` 次必然 true，且返回 true 后干次数归零；
+  - **两 stream 隔离**：把 `enemy` 的干次数压满后，`house` 的第一次判定仍必须失败；
+  - **真实路径**：真拆一栋、真杀一台，走的是 `_damage_house()` / `_reap_enemies()` 本身而不是复制一份逻辑。
+- 全量 23 项 smoke 全绿（`s43_all.txt`）。
+- **负向验证**（`negctl43.py`，备份文件而非 `git checkout`）：把 `_roll_drop()` 的保底分支改成 `pass` → `house_reward_pity_fails_5_of_3` / `enemy_reward_pity_fails_6_of_4` / `*_forces_drop` / `*_resets` 共 6 条精确失败；写回备份后 `NEGCTL43_PASS`。
+
+##### 五、已知边界
+
+- **本次改动尚未经过用户实机确认。**
+- 探针 `probe43.gd` 验证的是「事件字段与数值正确」，**不**证明「玩家在屏幕上真的看到了那个 +N」。后者只能由实机试玩判定。
+- 「房屋 120 HP 是否合适」是**根据弹药伤害与波时限算出的估计**，不是实测手感；若仍偏硬/偏软，只需改 `data/globals.json` 的 `house_hp`，不动代码。
+- 残骸二次收益（`house_debris_credit = 18`）与 `debris_drop_chance = 0.15` 本轮**未调整**。
+
+#### 11.4.3 两个 SETUP 界面
 #### 11.4.3 两个 SETUP 界面
 
 **`EXPEDITION_SETUP`（单人远征）**
@@ -5135,8 +5217,8 @@ M3 的物理验收基准（`M 61.0 u` / `I 104 064 u·px²` / `T 9000` / `v_max 
 | `DEBRIS_XP_MIN` / `DEBRIS_XP_MAX` | 4 / 12 | 碾过残骸得到的经验区间 |
 | `DEBRIS_CREDIT_SHARE` | 0.5 | 残骸产出中金钱占的比例（余下为经验），用显式 LCG 判定 |
 | `SURVIVAL_CREDIT_PER_HOUSE` | 55 | 摧毁一栋房屋 |
-| `HOUSE_HP` | 260 | 房屋生命值 |
-| `HOUSE_ARMOR` | 5 | 房屋护甲 |
+| `HOUSE_HP` | 120 | 房屋生命值（**v3.43 从 260 下调**，理由见 §11.4.2.23） |
+| `HOUSE_ARMOR` | 3 | 房屋护甲（**v3.43 从 5 下调**） |
 | `HOUSE_DEBRIS_CREDIT` | 18 | 房屋残骸被碾过的二次收益 |
 | `SURVIVAL_PROPS_HOUSES` / `SURVIVAL_PROPS_DEBRIS` | 4 / 6 | 每波生成的房屋 / 残骸数量 |
 
@@ -5145,8 +5227,10 @@ M3 的物理验收基准（`M 61.0 u` / `I 104 064 u·px²` / `T 9000` / `v_max 
 | 常量 | 值 | 说明 |
 | --- | --- | --- |
 | `DEBRIS_DROP_CHANCE` | 0.15 | 碾过残骸掉落一件配件的概率 |
-| `HOUSE_DROP_CHANCE` | 0.30 | 摧毁房屋掉落一件配件的概率 |
-| `SURVIVAL_ENEMY_DROP_CHANCE` | 0.25 | 击毁普通敌人时掉落**它自己已装有的某个配件**的概率 |
+| `HOUSE_DROP_CHANCE` | 0.70 | 摧毁房屋掉落一件配件的概率（**v3.43 从 0.30 上调**） |
+| `SURVIVAL_ENEMY_DROP_CHANCE` | 0.35 | 击毁普通敌人时掉落**它自己已装有的某个配件**的概率（**v3.43 从 0.25 上调**） |
+| `HOUSE_DROP_PITY` | 3 | **v3.43 新增**：连续拆掉这么多栋都没掉模块时，下一栋必掉 |
+| `ENEMY_DROP_PITY` | 4 | **v3.43 新增**：连续击杀这么多台普通敌人都没掉模块时，下一台必掉 |
 | `BOSS_CREDIT_REWARD` | 320 | 击毁 Boss 的金钱 |
 | `BOSS_XP_REWARD` | 200 | 击毁 Boss 的经验 |
 | `BOSS_DROP_COUNT` | 3 | 击毁 Boss **必定**掉落的配件数 |
@@ -5456,3 +5540,4 @@ M3 的物理验收基准（`M 61.0 u` / `I 104 064 u·px²` / `T 9000` / `v_max 
 | 2026-10-27 | v3.39 | **弧管几何修复：弯曲管道无法与相邻管首尾相接**（用户原话：「弯曲的管道绘制有些问题，没法和其他管子对齐，首尾相接」）。① **把「接得上」拆成两条独立判据**：**端点重合**（中心线首点/末点必须**逐字节等于** `PipeView.port_point()`）与**方向连续**（端点切线必须**沿**管轴，`\|dot\| ≈ 1`）。**缺一条都不算接上**——只对上位置会得到 90° 折角，只对上方向会留下半格断口。② **两个实测缺陷**（独立探针 `probe_arc.gd`，非推断）：**缺陷 A** `_arc_half_points()` 四个朝向 `line_head` 比 `port_a` 短 **8.0000 px**、`line_tail` 比 `port_b` 短 **8.0000 px**（16 px 格下正好半格），根因是半径写死 `cell*0.5` 且以**接缝**为圆心直接从端口起弧，而二分之一弧的端口在**外侧格边**、到接缝是一整格；**缺陷 B** `_arc_quarter_points()` 端点 gap=0 但 `tangent_in=(0.998796, 0.049066)` / `dot_axis=-0.0491`，即**切线垂直于轴**，根因是圆心放在**格中心**（`_junction_hub()`）——N 端口半径指向上、E 端口指向右。③ **`conveyor_arc_half` 不可能是 180° 半圆（几何证明）**：两端口在**同一直线**上且方向相反、各距接缝一整格；「180° 半圆（圆心=接缝，半径=一格）」两端点虽然正确，但那里半径向量沿轴 ⇒ **切线垂直于轴**；「直段+半圆+直段」要落在端口上直段必须为 0 ⇒ 退回上一种；「正交台阶+圆角」虽满足两条但形状是方波且横移一格贴包围盒边界。**选定解析曲线 `bulge = offset·sin²(πt)`**：`d(bulge)/dt = offset·2·sin(πt)·cos(πt)·π` 在 `t=0/1` 处为 0 ⇒ **两端切线精确沿轴**；`t=0.5` 处 `bulge = offset` 保证有明确弯曲；`bulge ∈ [0, offset]` 单调有界不越格。④ **两个数值细节都踩过**：`offset` **必须用短边**（`min(bounds.size.x, bounds.size.y) * cell * 0.5`）——用 `maxi`（长边）算成 16 会立刻 `outside_footprint = 8.0000` 越界，因为端口在短边中点、到包围盒边界只有半格；`lift` 方向**必须按端口朝向硬定**（W/E 取 `+y`、N/S 取 `+x`），**不能用点积判正反**——`lift = Vector2(-axis.y, axis.x)` 与轴恒垂直，任何与轴同向的向量点积都为 0。⑤ **四分之一弧圆心必须取格角**：新增 `_corner_between(bounds_position, bounds_size, dir_a, dir_b, cell)`，半径取 `a.distance_to(centre)` = `cell·√0.5 ≈ 11.314`；修后四朝向 `tangent_in_dot = -0.9988` / `tangent_out_dot = 0.9988` / `bulge = 2.3431`（正是 90° 弦高 `r(1−cos45°)`）/ `outside = 0.0000`。两条弧管均**首尾强制钉到端口点**（`points[0] = a` / 末点 = `b`），因为 `atan2 → cos/sin` 往返会留下 1e-15 级误差而「无接缝」要求逐字节相同。⑥ **测试与实现共谋（本轮最重要的教训，比任何一行代码都重要）**：`tests/pipe_geometry_smoke.gd` 从 v3.35 起连续四个版本（v3.35–v3.38）报 `PIPE_GEOMETRY_OK` 而产品是坏的，**不是「测得不够多」而是测试在复述实现**——三处盲区叠加：(a) 第 ③ 条 `absf(t0.dot(side_vector)) <= tol` 断言的是「切线**垂直**于格边」，**把错误行为写成了期望值**；(b) 第 ④ 条 `_arc_centre()` 自己算圆心、半径写死 `CELL * 0.5`，与实现**两边同错 ⇒ 恒过（自证）**；(c) **完全没有「中心线首尾 == `port_point()`」这条断言**，原第 ② 条只比对两个 `port_point()`（两边同一函数、恒等）。**通用规则（已进 `agent_note.md` §8）：探针的期望值必须来自与实现无关的独立推导（几何定义 / 物理定律 / 离散化阶数）或用户可见需求；一旦复用被测算法的中间量，写多少条断言都没有区分力。**⑦ **测试修法**：第 ③ 条方向**翻转**为「必须沿轴」（`absf(dot) < 1.0 - 0.03` 即失败；容差 0.03 由 32 段离散化推得，`\|dot\| ≈ 0.995`，既容得下离散化又能抓到「垂直」这种真错）；**新增** `centre_line_head_not_port` / `centre_line_tail_not_port`；第 ④ 条换成「采样点在占位包围盒内（容差半格）+ 确实有凸起（≥ `CELL*0.1`）」两条与实现无关的断言。断言数 **139 → 163**；原第 ② 条**刻意保留**（它守 `_port_cell()` 与 `_opposite()` 的对称性，只是不能单独依赖）。⑧ **两次负向验证（只跑一遍绿不能证明测试有效）**：`negctl39.py apply`（四分之一弧圆心改回格中心）→ 立刻 **8 条** `arc_start_not_axial` / `arc_end_not_axial`（四朝向 × 2，`dot=-0.0491` / `0.0491`）；`negctl39b.py apply`（二分之一弧首尾各缩回半格并去掉端口钉死）→ 立刻 **8 条** `centre_line_head_not_port … gap=8.0000` / `centre_line_tail_not_port … gap=8.0000`。**失败输出精确对应用户描述的症状**；两次 restore 后均回到 `PIPE_GEOMETRY_OK checks=163 failures=0`。⑨ **独立探针**：`probe_arc2.gd` 56 条断言（首尾==端口点 / 端点切线沿轴 / 采样点在占位内且有凸起 / 邻居直管首尾逐字节相同）→ `ARC_PROBE_OK checks=56 failures=0`，逐朝向 `quarter tangent ±0.9988`、`half tangent ±0.9971`、`gap=0.0000`、`outside=0.0000`、`half bulge=8.0000`。⑩ **死代码清理**：`_append_arc_corner()`（只在「直段+圆角」那版试做里被调用）已确认零引用后删除，同时删掉只服务它的 `CORNER_SEGMENTS` 常量；`scripts/pipe_view.gd` 27,957 B → **26,689 B / 543 LF**，删后 `--check-only` 干净、`PIPE_GEOMETRY checks=163 failures=0` 不变。⑪ **全量回归**：`run_smoke39.ps1`（从 v3.38 版复制，**输出改到 `s39a.txt` 以免覆盖 v3.38 基线**）→ `s39a.txt` 1086 B / `cd86dbb4`，**23 行全部 OK**（含 `perf_smoke => PERF_OK`）。⑫ **视觉证据（真实窗口截图 + `Image_View` 亲眼看过，不是只看探针）**：`arc_final.png` 1920×1080 / `a2a9d5c3`、`crop_final.png` `feaf55cc`、8 倍放大 `zoom_q.png` `5b9117b8`（四分之一弧 `[6,5]` rot90 与 `[8,5]` rot180）/ `zoom_h.png` `78846ef0`（二分之一弧 `[14,6]` rot90 与 `[16,6]` rot0）；目视确认为**两端与邻居相接、无半格断口、无 90° 折角、弧形不越格**；三张中间版本哈希 `5E3EEEF7` / `049EED74` / `A2A9D5C3` 互不相同，证明改动逐版生效。⑬ **文档订正**：§6.7 的 `conveyor_arc_half` 由「180° U 形 / 出入方向相反，横向偏移 1 格」（与 `CONVEYOR_PORTS` 的 `in0 @ W` / `out0 @ E` 共线定义矛盾）就地改为「弧形渐弯（`sin²`）/ 两端切线沿管轴，鼓幅半格」；§11.4.2.16 里「弧端点切线**垂直**于所在格边」与「`_junction_hub` 只是简化、不是圆心错误」两处**被 v3.39 推翻的旧判断**按 append-only 就地加注更正并指向 §11.4.2.19；新增 `#### 11.4.2.19 弧管几何修复（v3.39）` 七节（两条判据 / 缺陷 A / 缺陷 B / 几何证明 / 短边与 lift / 测试共谋 / 负向验证 / 已知边界）。**如实声明**：**本次改动尚未经过用户实机确认**（本轮的弧管缺陷与上一版的炮管偏移都是用户实机发现的）；**探针与 smoke 全绿只证明数值正确，不证明画面正确**，视觉结论来自上述截图的 `Image_View` 目视；**没有做「v3.39 与 v3.38 构建」的像素基线比对**，能证明的是「中间三版截图哈希互不相同」与「几何断言全绿」；**`conveyor_arc_half` 的实际形状是向内鼓的弧形（鼓幅半格 8 px），不是 180° U 形半圆**；**直管 / 三通 / 二合一 / 四通未改动**（探针确认其几何本来正确）；**未在 Android 上验证，任何 APK 均不存在**。 | §6.7 §11.4.2.16 §11.4.2.19 §17 |
 | 2026-10-27 | v3.40 | **相机推拉重做：缩放不是「把地图在桌上缩放」，而是真的相机远近**（用户原话：「重新设计战斗场景缩放的功能，目前的效果存在很多问题，应该按照相机视角，相机远就缩小，相机近就放大」）。① **旧模型的核心错误是语义级的，不是参数不尽相同**：v3.38 的 `camera_rect(arena, focus, zoom)` 返回 `arena.size / zoom` 的矩形，`zoom < 1` 时**相机比地图还大**。独立探针 `probe_cam41.gd` 实测：`zoom=0.50` 时相机 **4096×2304**（竞技场只有 2048×1152）、`pos=(-1024,-576) end=(3072,1728)` **四边各溢出 1024 / 576 世界像素**、`cover=0.250` ⇒ **视图 75% 在画不存在的世界**（`zoom=0.75` 时 43.8%）；截图 `zd_0.5.png` 目视确认地图缩成中间 608×342 的小方块。**那不像相机，像把地图在桌上缩放** —— 这就是用户说的「很多问题」的直接来源。② **换成距离模型**：状态改为一维的**相机距离** `height`（相机视野覆盖的世界高，px）—— **数值大 = 相机远 = 画面缩小；数值小 = 相机近 = 画面放大**，与用户的镜头语言严格一致。新增 `CombatView.camera_at_height(arena, focus, height)`，三条硬约束：**(1) 最远 = 整张地图**（`height >= arena.size.y` 时**原样 `return arena`，零乘除** ⇒ 默认像素与 v3.37 逐字节相同，基线 `zh_1.0.png` = `1F299B04` 继续有效）；**(2) 相机永远不超出地图**（Rect 再夹进竞技场）；**(3) 宽高比永不改变**（宽 = 高 × 竞技场宽高比 ⇒ 任意距离下恰好铺满视图，既无 letterbox 也无裁切）。③ **两个端点可复算**：最远 `arena.size.y` = **1152** ⇒ 一格 `16×1216/2048` = **9.5 屏幕像素**；最近 `1152 / CAMERA_MAG_MAX` = **288** ⇒ 一格 `16×684/288` = **38 屏幕像素**（与建造页 32 px 格同等级）。新增 `camera_height_for_mag()` / `camera_mag()`，读数区间 **[1.00, 4.00]，1.00 = 整图**。④ **删除两个东西，并说清为什么**：`camera_rect()` **整段删除** —— 它与「相机比地图大」共用签名与常量族，留着就等于留着一条**能表达非法视角**的 API；`CAMERA_ZOOM_MIN = 0.5` **永久删除** —— 在距离模型里「比整图还远」这一档**不可构造**（`camera_height_for_mag(arena, 0.5)` 走 `maxf(mag,1.0)` 返回最远），保留常量只会误导后来者。还**踩过并删掉** `CAMERA_CELL_PX`：`16×684/38 = 288 = 1152/4`，它与 `CAMERA_MAG_MAX` 是同一个事实的两种写法（连带删掉引用它的 `_camera_dist_nearest()`）。⑤ **滚轮是推拉（不是阶跃）**：`_camera_zoom_by()` **只改目标距离**；换算路径是「目标距离 → 读数 → 乘除档位 → clamp 到 [1.00, 4.00] → 换回距离」—— **夹取在读数维**，因为距离维的边界是非线性的。每帧用 `1 - exp(-CAMERA_DIST_FOLLOW·delta)`（k=7）插值，约 0.3 s 到位、与帧率无关、不用 `randf`。**两个必要的细节**：`absf` 差 < 1e-3 时**必须直接吸附**（最远分支是 `>=` 的位比较，不吸附就永远停在「差一点点」，`to_screen()` 最后一位会变）；**必须先推距离再算焦点**（距离决定相机多大，相机多大决定焦点能夹到哪里）。⑥ **高倍下的两个真实缺陷（都是截图 / 探针实测，不是推断）**：**(A) 相机外的图元边界照样被画出来** —— 取相机上边界往上 40 世界像素的点，屏幕 y=**73**，而 `DRIVE_VIEW.position.y = 168`（落在视图外 95 px）；`cam40_d2.png` 里 `-6`/`-12` 两个伤害数字出现在**战场视图上方的标题区**。因为 `canvas.draw_*` 在 Godot 4 里**没有任何裁剪参数**（`canvas_item_set_clip_rect` 在 GDScript 里不存在，实测 `Parse Error`），新增 `in_view(view, at)` 并在**七处**加闸：`draw_shots` / `draw_fx` / `draw_hit_flash` / `draw_muzzle_flash` / `draw_expire_flash` / `draw_damage_popups`。**(B) 贴边时焦点被夹**，`zoom=2.0` 且 `focus_x=0` 时 `camera_centre_x=512`（偏移 512 px），车不在画面中心。这一条**本轮判断为设计取舍而非缺陷**：不越界优先于永远居中，两者冲突时前者胜（若用户要求「贴边也居中」，则必须允许越界，会重新引入空白）。⑦ **修正了 (A) 的修法本身**：`draw_string()` 的锚点是**基线**、字形向上延伸约一个字高，只判锚点时数字上半截仍会越界 —— 截图 `c40_d_far.png` 里 `-7` 正是压在 `DRIVE_VIEW` 的青色上边框上（4 倍裁切 `crop_far_top.png` 确认）；改为**基线与字顶两个点都要在视图内**后 `c40_d_far2.png` 里彻底不再越界。⑧ **测试与负向验证**：`tests/camera_zoom_smoke.gd` 整份重写（250 行 → **380 行 / 19,966 B**），11 组检查、**545 条断言**，核心是 `_check_never_exceeds_arena`（5 focus × 13 height，判据只用到 `Rect2` 四个边界，**不引用 `camera_at_height()` 的中间量** —— §11.4.2.19 第六节教训的直接应用）。负向：`negctl40.py apply` 删掉最远保护 → **62 条失败**（`far_identity_double`/`far_identity_huge` + 60 条 `inside_*`/`not_wider_*`/`not_taller_*`），`restore` 后回到 `CAMERA_OK checks=545` 且输出逐字节相同。**陷阱：距离表必须包含「超过最远」的非法输入**（`FAR*2`/`FAR*1.5`/`99999`）—— 第一版只到 `FAR`，去掉保护后核心断言一条都没失败，因为夹取公式在 `height == FAR` 时恰好也得到 `arena`。⑨ **另修两处下游引用**：`tests/aim_smoke.gd` 也引用了已删的 `camera_rect()`，导致 `AIM_OK` 消失、runner 记成 `NO_OK_LINE`（改为 `camera_at_height(arena, centre, arena.size.y)`，与旧 `zoom==1` 逐位等价）；另 `combat_view.gd` 曾因 `draw_muzzle_flash()` 里 `var forward` **写了两遍**而整文件 `Parse Error`（连带 `main.gd`/测试全部 preload 失败），已删重复行。⑩ **接口不兼容变更**：`--zoom=` 从「倍数 0.5–4.0」改为「**读数 1.00–4.00，1.00 = 整图**」，旧命令 `--zoom=0.5` 现在等价于 `1.0`；且必须**延迟应用**（它可能排在 `--screen=` 之前，那时竞技场还是空 `Rect2`）。反向顺序已实测：`--zoom=1.6 --screen=drive` 与 `--screen=drive --zoom=1.6` 的两张截图 `diff_png.py` 判定 **`IDENTICAL 1920x1080`**。⑪ **视觉证据（真实窗口截图 + `Image_View` 亲眼看过，不是只看断言）**：`c40_d_far2.png`（`f93cc99ebb60a37c`，1.00× 整图、零空白、读数 `相机 1.00×（整图）`）、`c40_d_mid2.png`（1.60×）、`c40_d_near.png`（`e0c417580e4c6172`，4.00× 近端、一格约 38 px、坦克可读）、`c40_m_mid.png`（`87f2e79d89f37711`，对局页 1.60×、镜头居中跟玩家车）、`c40_s_mid.png`（`0d1b3ef4cb70d5ff`，生存页 1.60×）、`c40_rev.png`（`5507b102d460884f`，反向参数顺序）。⑫ **全量回归**：新写 `run_smoke40.ps1`（从 v3.39 版复制，**输出改到 `s40a.txt` 以免覆盖 `s39a.txt`**）→ `s40a.txt` 1086 B / `5eef08b3`，**23 行全部 OK**，与 `s39a.txt` 的差异**只有** `camera_zoom_smoke => checks=149 → 545`。**如实声明**：**本次改动尚未经过用户实机确认**（上一版的弧管缺陷与再上一版的炮管偏移都是用户实机发现的）；**断言与 smoke 全绿只证明数值正确，不证明画面正确**，视觉结论来自上述 6 张截图的 `Image_View` 目视；**没有做「v3.40 与 v3.39 构建」的像素基线比对**，「最远 = 整图与 v3.37 逐字节相同」是**构造性论证**（零乘除）而非实测比对；**旧截图 `zd_0.5.png` / `zd_2.5.png` / `zm_2.0.png` / `zs_2.0.png` / `cam40_d2.png` / `cam40_d4.png` 全是旧模型下拍的，只能当「旧观感」证据，不能当新基线**；**「贴边不居中」是设计取舍，未与用户确认是否可接受**；**未在 Android 上验证，任何 APK 均不存在**。 | §11.4.2.18 §11.4.2.20 §17 |
 | 2026-10-24 | v3.41 | **弹药改进模块：从「无效容器」到「有实际功能的模块」**（用户原话：「弹药改进模块目前似乎没有实际效果，将这些模块改为有实际功能的模块，例如爆破模块、火焰模块、增伤模块等等」）。① **先查清「为什么没效果」，再动手**——用户报的是现象不是诊断。两个根因，一真一假：**根因 A（真产品缺陷）** 生存模式的 `survival_run.STARTER_MODULES` 里**五件模块没有一件带 `upgrade_slots`**，而 `_install_upgrade()` 是「按 `module_parts` 顺序找第一件还有空槽的改进装置」，找不到就把 id 推进 `collected_upgrades` 暂存。探针实测 `starter modifiers=0 total_slots=0`、`_install_upgrade("up_damage")` 返回「没有空槽的改进装置，升级已暂存」、`installed_upgrades=[]` —— **玩家升到满级也装不进任何升级**。这就是「没有实际效果」的直接根因，不是引擎失效，是玩家根本没有容器。（这个问题在 v3.24「升级载荷实体化」时就已存在，但那一轮只验了「载荷能不能随弹药流动」——用自己搭的车，**没验玩家的起始车装不装得上**。）**根因 B（探针缺陷，不是产品缺陷）** 上一轮报的 `dmg_delta=0.000` 是**弹药 id 写错**：探针传 `ammo_76`，而 `calibers.json` 的真实 id 是 **`cal_76`**，`get_ammo()` 返回 `{}` → `base=0.0` → `apply_hit()` 在最前面 `if base <= 0.0: return result` 就早退 → `result["damage"]` 恒 0。**那个数字什么也没证明。** 换成真实 id 实测 `cal_76 + up_damage` 从 **52.0 → 61.8（+9.8）**、`cal_155 + up_damage` 从 **237.0 → 280.2（+43.2）**；`_final_damage()` 的护甲是**减法**（`maxf(damage * 0.15, damage - armor_eff)`），所以「护甲把 +18% 差异削平」这个假设被**证伪**。② **修法：两族改进模块并存**。第一族**保留**通用的 `modifier_mk1/mk2/mk3`（只差 `upgrade_slots` 1/2/3 与 `processing_time_s`，槽里配什么由玩家决定，是「自由组合」的高级玩法，也是既有测试依赖的 id，不删）。第二族**新增**三件**功能固定的模块**，定义里带 `intrinsic_upgrades`：`modifier_blast`（爆破模块，1 格，130 cr，`up_explosive`）、`modifier_flame`（火焰模块，1 格，120 cr，`up_burn`）、`modifier_power`（增伤模块，1 格，110 cr，`up_damage`）；三者各带 1 个槽，固有升级**不占槽、永远生效**。③ **一个刻意的实现选择：固有升级不写进 `part["upgrades"]`**。它是模块**类型**的属性而不是实例状态，写进 part 会在蓝图反序列化、撤销、复制处多出一条可能漂移的副本。运行期由 `AmmoNetwork._make_part()` 从 `definitions.get_module()` 读进 `part["intrinsic"]`，加工完成时 `payload = 原载荷 + intrinsic + 槽配置`（顺序固定，保证确定性）。④ **起始坦克改造**：`STARTER_MODULES` 变成 `factory_76(0,1) → 直管(2,1) → modifier_power(3,1) → cannon_76(4,1)`，车体仍是 `6×4`、「不放弹药库」的原理由（殉爆在 6×4 的车里等于自杀）不变。开局就有 **+18% 伤害**，玩家第一次开火就能看到比白板更高的数字。⑤ **验证（数值层 + 玩家路径层 + 像素层三层都有证据）**。**端到端探针**（走真实 `SurvivalRun.build_starter()` + 真实 `AmmoNetwork`）：`starter cannon payloads = ["up_damage"]`、`modifier_blast/flame/power → cannon payloads = ["up_explosive"]/["up_burn"]/["up_damage"]`、`modifier_power slots after player config = ["up_damage"]`（固有升级不占槽）、**`PROBE41V3_DONE checks=25 failures=0`**。**永久回归**（`tests/upgrade_flow_smoke.gd` 10,256 → **15,385 B**）新增两段：`_check_function_modules_carry_intrinsic()`（三种模块 × 数据层声明 + 流程层真的流到炮管）与`_check_starter_can_install_upgrade()`（起始车有容器 → 装得上且**不靠暂存** → 弹药链真的把它带到炮管）。**负向验证**（`.me/tmp/main/negctl41.py` apply/restore）同时退回两处修复 → 立刻 **`UPGRADE_FAIL count=7`**，其中前 3 条只来自 `ammo_network`、后 4 条只来自 `survival_run` —— **两处修复各自都有独立的失败项**，证明断言有真实区分力；`restore` 后回到 `UPGRADE_OK`。**全量回归**：**23 项 smoke 全绿**（`s41a.txt` 1,086 B / `73e2a81e`），`physics_smoke` 数值与 v3.40 基线**逐字相同**（mass=61.0 / inertia=104064 / v_max=192.1 / turn180_s=1.70 / spin_stop_s=0.43）。**真实窗口截图 + `Image_View` 亲自看过**：`v41_surv.png`（1920×1080 / 202,833 B）的镜像面板「部件状态」里出现 **增伤模块 加工 100%**；`v41_modify.png`（270,554 B）上能看到「增」模块位于弹药链中段、`体积 7×4`、`结构合法，可以部署。`；6× 放大 `crop41_tank.png`（1320×780）里 **「76 → 直管 → 增 → 炮管」与青 in / 琥珀 out 箭头一眼可读**。两次 capture 均含 `WINDOW_MODE mode=2 size=(1842, 1057)` 与 `CAPTURE_OK`、**无 `SCRIPT ERROR`**。⑥ **一处自伤（已修）**：收尾时想追加本行，`File.Edit` 误把 v3.40 那一整行**截断成了一个标题**；立即用 `git show HEAD:docs/design.md` 取出原始行按字符数（4,653）逐字节写回并校验 `LAST_IS_V340 True`，然后才追加本行。**这是「`File.Edit` 范围算错会静默破坏历史行」的又一次印证，append-only 的变更表绝对不能用手写长行。****如实声明**：**本次改动尚未经过用户实机确认**（上一版的弧管与炮管偏移都是用户实机发现的）；**截图证明的是「装得上 / 在流水线里被加工 / 箭头可读」，不证明「开火后肉眼能看出伤害数字变大」**——那需要真实对局里同口径带/不带 `up_damage` 的伤害对比，本轮**没有做**，只有 `probe41b.txt` 的数值链（52.0 → 61.8）作间接证据；**改进槽的配置入口仍然只有键盘**（改装页 `Q/E` 选升级、`T` 装槽、`Shift+T` 清空），无鼠标路径，本次修法**绕开了这个可用性问题但没有解决它**；**`processing_multiplier` 仍是死字段**（`upgrades.json` 每条都有，零代码读取）；`data_smoke modules=45 → 48` 是新增三件模块的预期结果；**未在 Android 上验证，任何 APK 均不存在**。 | §6.4 §11.4.2.21 §17 |
+| 2026-10-30 | v3.43 | **生存模式掉落与房屋机制：机制一直在，缺的是「看得见」**（用户原话：「完善生存模式的机制，敌人击杀也掉落模块和金钱，房屋生命值过高，房屋摧毁也会掉落金币和模块」）。① **先核事实，不按字面改**：读码确认三件事里有两件**本来就已实现** —— 普通敌人击杀给 `credit_per_kill = 40` + `xp_per_kill = 25` + `enemy_drop_chance = 0.25` 掉它蓝图里已有的一件（Boss 更给 320 cr / 200 xp / **必掉 3 件**）；房屋摧毁给 `credit_per_house = 55` + `xp_per_house = 12` + `house_drop_chance = 0.30` 掉一件并留残骸可再碾一次得 18 cr。② **真正的缺陷是反馈链断了**：`main.gd::_survival_step()` 的 `if/elif` 链里**根本没有 `enemy_defeated` 分支**，`_reap_enemies()` 产生的事件被直接丢弃；`house_destroyed` 也只有一句没数字的「房屋被摧毁」。于是玩家击毁敌人、拆掉房子时，屏幕上什么都不发生，金钱只在外侧 HUD 静默跳一下。**这与 v3.20 修掉的「打上去没反应」同源：函数算对了、事件也发了，但页面层没接。机制存在 ≠ 可感知。**③ **事件带出收益**：`enemy_defeated` / `house_destroyed` 都补 `credit` / `xp` / `module` 三个字段；`main.gd` 新增 `enemy_defeated` 分支、重写 `house_destroyed` 分支，写文案并推一条绿色「+N cr」漂浮数字。漂浮数字**不复用** `CombatView.push_damage()` —— 它的符号语义写死了 `dealt → +N`、`received`/`shield` → `-N`，金钱没有正负之分；改为直接 `_survival_fx.push(kind="damage", …)` 并自己给 `text`、把 `mode` 标成 `"credit"` 参与限流。④ **数值下调 + 保底**：`house_hp` 260 → **120**、`house_armor` 5 → **3**（`cal_76` 由 6 发降到 3 发、`cal_40` 由 16 发降到 7 发；每波只 4 栋、波时限 45 s，260 HP 确实过高）；`house_drop_chance` 0.30 → **0.70**、`enemy_drop_chance` 0.25 → **0.35**；新增 `house_drop_pity = 3` / `enemy_drop_pity = 4` —— 纯概率时代「连着四五个敌人都没掉」频繁出现，而当时又没有任何提示，这才是「敌人不掉模块」的另一半原因。⑤ **`_roll_drop(chance, stream)` 的四个约束**：两条 stream（`house`/`enemy`）干次数**必须独立**，否则拆房会顺手抵掉敌人的保底；**保底分支不抽随机数**，所以同一 seed 的序列长度仍只取决于调用次数、确定性不破；干次数**跨波保留**、只有 `close_run()` 清零；Boss 走必掉路径**不参与** pity。⑥ **验证**：`tests/survival_smoke.gd` 新增两条验收（事件字段逐值等于 data、`module` 非空必已进库存、对纯函数 `_roll_drop(0.0, stream)` 的确定性阶梯断言、两 stream 隔离、真实拆房/击杀路径），全量 23 项 smoke 全绿（`s43_all.txt`）；负向验证 `negctl43.py`（备份文件而非 `git checkout`）摘掉保底分支后精确报 6 条 `*_pity_*` 失败、写回后 `NEGCTL43_PASS`。**本次改动尚未经过用户实机确认**；「房屋 120 HP 是否合适」是按弹药伤害与波时限算出的估计，不是实测手感。 | §3.4.4 §11.4.2.23 §14.8 §17 |

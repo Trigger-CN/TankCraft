@@ -3857,7 +3857,25 @@ func _survival_step(step_time: float) -> void:
 			for raw_cell in entry.get("cells", []):
 				_push_survival_fx("break", _survival_cell_world(Vector2i(raw_cell), side), 14.0, Palette.ACCENT_AMBER, 0.5)
 		elif kind == "house_destroyed":
-			_survival_event = "房屋被摧毁"
+			## 事件自 v3.43 起带 `credit` / `xp` / `module`：页面必须把收益说出来。
+			## 旧版只有一句「房屋被摧毁」，而 `enemy_defeated` 连分支都没有——
+			## 于是 55 cr / 40 cr / 掉模块全部静默，玩家只能报「不掉模块、不给钱」。
+			var payout := float(entry.get("credit", 0.0))
+			var house_module := String(entry.get("module", ""))
+			if house_module.is_empty():
+				_survival_event = "房屋摧毁 +%d cr" % int(roundf(payout))
+			else:
+				_survival_event = "房屋摧毁 +%d cr · 掉落 %s" % [int(roundf(payout)), _module_label(house_module)]
+			_push_credit_popup(_survival_arena_cell_world(Vector2i(entry.get("cell", Vector2i.ZERO))), payout)
+		elif kind == "enemy_defeated":
+			var kill_credit := float(entry.get("credit", 0.0))
+			var kill_module := String(entry.get("module", ""))
+			var tag := String(entry.get("tag", ""))
+			if kill_module.is_empty():
+				_survival_event = "击毁 %s +%d cr" % [tag, int(roundf(kill_credit))]
+			else:
+				_survival_event = "击毁 %s +%d cr · 掉落 %s" % [tag, int(roundf(kill_credit)), _module_label(kill_module)]
+			_push_credit_popup(_survival_tag_world(tag), kill_credit)
 		elif kind == "core_destroyed":
 			_survival_event = "驾驶舱被摧毁"
 		elif kind == "detach":
@@ -3898,6 +3916,52 @@ func _survival_cell_world(cell: Vector2i, tag: String) -> Vector2:
 	if hull == null:
 		return Vector2.ZERO
 	return hull.world_position_of_cell(cell)
+
+## 竞技场 `cell`（房屋用的坐标）→ 世界像素。房屋不属于任何一侧刚体，所以不能走
+## `_survival_cell_world()`：那样会被当成建造格坐标投到坦克身上。
+func _survival_arena_cell_world(cell: Vector2i) -> Vector2:
+	var cell_size := 16.0
+	if definitions != null:
+		cell_size = definitions.global_number("cell_size", 16.0)
+	return (Vector2(cell) + Vector2(0.5, 0.5)) * cell_size
+
+## 被击毁敌人的世界位置：优先用它的车身，车身已拆除时退回第一个存活部件。
+## 敌人被击毁后 `tank_of()` 仍会返回刚体（`destroyed` 只是标志），但保险起见两段式。
+func _survival_tag_world(tag: String) -> Vector2:
+	if survival == null or survival.duel == null:
+		return Vector2.ZERO
+	var hull: TankBody = survival.duel.tank_of(tag)
+	if hull == null:
+		return Vector2.ZERO
+	return hull.position
+
+## 「+N」金钱漂浮数字：让每次掉落都在屏幕上被看见一次。
+##
+## **不能复用 `CombatView.push_damage()`**：它的符号语义写死了 `dealt → +N`、
+## `received`/`shield` → `-N`，而金钱没有正负之分。这里直接推一条 `kind = "damage"`
+## （绘制端只认这个 kind 才当文字画）但**自己给 `text`**，不改那个共享函数的语义。
+## 与伤害数字共用同一条限流，避免屏幕上数字爆满。
+func _push_credit_popup(at: Vector2, amount: float) -> void:
+	var showed := int(roundf(amount))
+	if showed <= 0:
+		return
+	var counting := 0
+	for raw_entry in _survival_fx.entries:
+		var entry: Dictionary = raw_entry
+		if String(entry.get("kind", "")) == "damage" and String(entry.get("mode", "")) == "credit":
+			counting += 1
+	if counting >= CombatView.DAMAGE_POPUP_PER_SIDE:
+		return
+	_survival_fx.push("damage", at, 0.0, Palette.ACCENT_LIME, CombatView.DAMAGE_POPUP_LIFE, "+%d cr" % showed)
+	(_survival_fx.entries[_survival_fx.entries.size() - 1] as Dictionary)["mode"] = "credit"
+
+## 模块 id → 玩家看得懂的名字。数据里找不到时退回 id 本身，不隐藵。
+func _module_label(module_id: String) -> String:
+	if definitions == null:
+		return module_id
+	var module: Dictionary = definitions.get_module(module_id)
+	var label := String(module.get("name", ""))
+	return label if not label.is_empty() else module_id
 
 func _push_survival_fx(kind: String, at: Vector2, radius: float, colour: Color, life: float) -> void:
 	_survival_fx.push(kind, at, radius, colour, life)

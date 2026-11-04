@@ -30,6 +30,13 @@ func _init() -> void:
 		printerr("SURVIVAL_FAIL count=%d" % failures)
 		quit(1)
 		return
+	## 验收 11 / 12 要跑真实战斗推进，必须后置：它们会修改同一批 run 实例的战斗状态。
+	_check_house_reward_feedback()
+	_check_enemy_drop_reward()
+	if failures > 0:
+		printerr("SURVIVAL_FAIL count=%d" % failures)
+		quit(1)
+		return
 	print("SURVIVAL_OK")
 	quit(0)
 
@@ -544,6 +551,195 @@ func _cockpit_index(tank) -> int:
 			return index
 	return -1
 
+# ─── 验收 11：房屋摧毁事件必须把「给了多少钱、掉了什么」带出来 ───────────────
+
+## 用户反馈的原话：「房屋摧毁也会掉落金币和模块」。机制本来就有，但事件里只有 `cell`，
+## 页面层无从显示——玩家看到的只有一句没数字的「房屋被摧毁」。
+func _check_house_reward_feedback() -> void:
+	var run_state := _make_run()
+	if run_state == null:
+		return
+	run_state.bind_player(_make_rig())
+	run_state.start_wave()
+	var house: Dictionary = run_state.houses[0]
+	var events: Array[Dictionary] = []
+	## 一发超额伤害打穿：单次调用足够归零，不需要循环。
+	var ammo := float(definitions.get_ammo("cal_155").get("base_damage", 0.0))
+	while bool(house["alive"]) and events.size() < 40:
+		run_state._damage_house(house, ammo, events)
+	_expect(not bool(house["alive"]), "house_reward_destroyed")
+	var found := -1
+	for index in range(events.size()):
+		if String(events[index].get("kind", "")) == "house_destroyed":
+			found = index
+			break
+	_expect(found >= 0, "house_reward_event_present")
+	if found < 0:
+		return
+	var event: Dictionary = events[found]
+	_expect_near(
+		float(event.get("credit", 0.0)),
+		definitions.block_number("survival", "credit_per_house", 55.0),
+		"house_reward_credit_field"
+	)
+	_expect_near(
+		float(event.get("xp", 0.0)),
+		definitions.block_number("survival", "xp_per_house", 12.0),
+		"house_reward_xp_field"
+	)
+	## 掉率升到 0.70 之后，一栋不掉不是缺陷；但**字段必须存在且合法**：
+	## 空串 = 没掉，非空 = 真的进了库存。两者只能有一个。
+	var dropped := String(event.get("module", ""))
+	if dropped.is_empty():
+		_expect(true, "house_reward_module_absent_ok")
+	else:
+		_expect(run_state.inventory.has(dropped), "house_reward_module_in_inventory")
+	## 保底：以上的自然概率断言**不能证明保底存在**（0.70 之下三次不掉也不会罕见）。
+	## 保底逻辑是纯函数，所以直接对 `_roll_drop(chance, stream)` 做确定性断言：
+	## `chance = 0.0` 时任何 `_next_unit() >= 0.0`，前 `pity-1` 次必然 false，第 `pity` 次必然 true。
+	var pity := definitions.block_int("survival", "house_drop_pity", 3)
+	var run_pity := _make_run()
+	if run_pity == null:
+		return
+	run_pity._house_drop_dry = 0
+	for step in range(pity - 1):
+		_expect(
+			not run_pity._roll_drop(0.0, "house"),
+			"house_reward_pity_no_drop_at_%d" % step
+		)
+	_expect(
+		not run_pity._roll_drop(0.0, "house"),
+		"house_reward_pity_no_drop_at_%d" % (pity - 1)
+	)
+	## 上面循环少跑一次，最后一次单独跑：总数必须恰好 `pity - 1` 次失败、第 `pity` 次必掉。
+	## `_roll_drop()` 内部在失败时累加干次数，所以这里重新走一遍完整阶梯更清楚。
+	run_pity._house_drop_dry = 0
+	var fails := 0
+	var forced := false
+	for step in range(pity + 2):
+		if run_pity._roll_drop(0.0, "house"):
+			forced = true
+			break
+		fails += 1
+	_expect(fails == pity, "house_reward_pity_fails_%d_of_%d" % [fails, pity])
+	_expect(forced, "house_reward_pity_forces_drop")
+	## 掉落后干次数必须归零，否则下一栋会立刻又被保底。
+	_expect(run_pity._house_drop_dry == 0, "house_reward_pity_resets")
+	## 拆房确实会走这条路径：真拆一栋，事件里要么没模块（没命中），要么模块已进库存。
+	var run_real := _make_run()
+	if run_real == null:
+		return
+	run_real.bind_player(_make_rig())
+	run_real.start_wave()
+	var real_house: Dictionary = run_real.houses[0]
+	var real_events: Array[Dictionary] = []
+	var real_guard := 0
+	while bool(real_house["alive"]) and real_guard < 40:
+		run_real._damage_house(real_house, ammo, real_events)
+		real_guard += 1
+	var real_module := ""
+	for raw_event in real_events:
+		if String((raw_event as Dictionary).get("kind", "")) == "house_destroyed":
+			real_module = String((raw_event as Dictionary).get("module", ""))
+	if not real_module.is_empty():
+		_expect(run_real.inventory.has(real_module), "house_reward_module_in_inventory")
+
+# ─── 验收 12：普通敌人击杀必须给钱、并真的能掉模块（含 luck-free 保底）─────────
+
+## 用户反馈的原话：「敌人击杀也掉落模块和金钱」。同样：机制本来就有，但
+## `_survival_step()` 里根本没有 `enemy_defeated` 分支，事件被直接丢弃——
+## 没有漂浮数字、没有掉落文案，金钱只是 HUD 上静默跳一下。
+func _check_enemy_drop_reward() -> void:
+	var run_state := _make_run()
+	if run_state == null:
+		return
+	run_state.bind_player(_make_rig())
+	run_state.wave = 1
+	_expect(run_state.start_wave(), "enemy_reward_start_wave")
+	var tags := run_state.duel.alive_in_team(Duel.TEAM_ENEMY)
+	_expect(not tags.is_empty(), "enemy_reward_has_enemy")
+	if tags.is_empty():
+		return
+	var tag := String(tags[0])
+	var enemy_tank = run_state.duel.tank_of(tag)
+	var cockpit := _cockpit_index(enemy_tank)
+	_expect(cockpit >= 0, "enemy_reward_has_cockpit")
+	if cockpit < 0:
+		return
+	var credit_before := run_state.credit
+	var xp_before := run_state.experience
+	var inv_before := run_state.inventory.size()
+	run_state.duel.damage_of(tag).apply_part_damage(enemy_tank, cockpit, 1.0e9, "destroyed")
+	var steps := 0
+	while run_state.kills == 0 and steps < 8:
+		run_state.step_battle(1.0 / 60.0)
+		steps += 1
+	_expect(run_state.kills == 1, "enemy_reward_kill_counted_%d" % run_state.kills)
+	_expect_near(
+		run_state.credit - credit_before,
+		definitions.block_number("survival", "credit_per_kill", 40.0),
+		"enemy_reward_credit"
+	)
+	_expect_near(
+		run_state.experience - xp_before,
+		definitions.block_number("survival", "xp_per_kill", 25.0),
+		"enemy_reward_xp"
+	)
+	## 同样不能用「杀 4 台总会掉一件」来证明保底——那只是概率。改为直接压 RNG：
+	## 每次击杀前把 `_rng_state` 设成必然失败的取样值，前 pity-1 台必须一件不掉，
+	## 第 pity 台必须掉一件。这是对保底逻辑本身的确定性断言。
+	var pity := definitions.block_int("survival", "enemy_drop_pity", 4)
+	var run_pity := _make_run()
+	if run_pity == null:
+		return
+	run_pity.bind_player(_make_rig())
+	run_pity.wave = 1
+	if not run_pity.start_wave():
+		_expect(false, "enemy_reward_pity_start_wave")
+		return
+	## 同样不能用「杀 4 台总会掉一件」证明保底。两边都是纯函数，直接对各 stream 做阶梯断言。
+	run_pity._enemy_drop_dry = 0
+	var enemy_fails := 0
+	var enemy_forced := false
+	for step in range(pity + 2):
+		if run_pity._roll_drop(0.0, "enemy"):
+			enemy_forced = true
+			break
+		enemy_fails += 1
+	_expect(enemy_fails == pity, "enemy_reward_pity_fails_%d_of_%d" % [enemy_fails, pity])
+	_expect(enemy_forced, "enemy_reward_pity_forces_drop")
+	_expect(run_pity._enemy_drop_dry == 0, "enemy_reward_pity_resets")
+	## 两个 stream 的干次数**必须互相独立**：压满 enemy 不会让 house 提前保底。
+	run_pity._house_drop_dry = 0
+	_expect(not run_pity._roll_drop(0.0, "house"), "enemy_reward_pity_stream_isolated")
+	## 真实击杀路径：真的杀掉一台，验证击杀真的被记录。
+	run_pity._enemy_drop_dry = 0
+	var real_kill := 0
+	var real_attempts := 0
+	while real_kill == 0 and real_attempts < 8:
+		real_attempts += 1
+		var alive := run_pity.duel.alive_in_team(Duel.TEAM_ENEMY)
+		if alive.is_empty():
+			run_pity.step_battle(1.0 / 60.0)
+			continue
+		var victim_tag := String(alive[0])
+		var victim_tank = run_pity.duel.tank_of(victim_tag)
+		var victim_cockpit := _cockpit_index(victim_tank)
+		if victim_cockpit < 0:
+			run_pity.step_battle(1.0 / 60.0)
+			continue
+		run_pity.duel.damage_of(victim_tag).apply_part_damage(victim_tank, victim_cockpit, 1.0e9, "destroyed")
+		var kills_before := run_pity.kills
+		run_pity.step_battle(1.0 / 60.0)
+		if run_pity.kills > kills_before:
+			real_kill += 1
+	_expect(real_kill == 1, "enemy_reward_real_kill_%d" % real_kill)
+	_expect(run_pity.kills >= 1, "enemy_reward_real_kill_recorded_%d" % run_pity.kills)
+	## `_roll_enemy_module()` 必须以该敌人**蓝图里真实存在**的模块为准（Q31），不是全表乱抽。
+	var enemy_ids: Array = run_pity._enemy_module_ids("enemy_1")
+	_expect(not enemy_ids.is_empty(), "enemy_reward_has_module_pool")
+	for raw_id in enemy_ids:
+		_expect(not definitions.get_module(String(raw_id)).is_empty(), "enemy_reward_pool_id_known_%s" % String(raw_id))
 # ─── 验收 10b：改装入口只在 LEVEL_UP / SHOP 开放，且只走 GridBuilder 正式接口 ────
 
 ## design §3.4 表格：「改装入口只有 `LEVEL_UP` 与 `SHOP` 的改装按钮」。

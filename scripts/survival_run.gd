@@ -122,14 +122,25 @@ var _debris_xp_min: float = 4.0
 var _debris_xp_max: float = 12.0
 var _debris_credit_share: float = 0.5
 var _credit_per_house: float = 55.0
-var _house_hp: float = 260.0
-var _house_armor: float = 5.0
+var _house_hp: float = 120.0
+var _house_armor: float = 3.0
 var _house_debris_credit: float = 18.0
 var _props_houses: int = 4
 var _props_debris: int = 6
 var _debris_drop_chance: float = 0.15
-var _house_drop_chance: float = 0.30
-var _enemy_drop_chance: float = 0.25
+var _house_drop_chance: float = 0.70
+var _enemy_drop_chance: float = 0.35
+
+## 保底计数（pity）：连续这么多次没掉模块，下一次必掉。
+##
+## 纯概率时代 0.25 / 0.30 让「连着四五个敌人都没掉」频繁出现，而玩家看不到任何提示，
+## 于是「敌人不掉模块」变成了合理抱怨。保底把「运气差」封顶在可接受的长度内。
+var _house_drop_pity: int = 3
+var _enemy_drop_pity: int = 4
+
+## 距上一次成功掉落模块已经过了几次（成功即归零）。
+var _house_drop_dry: int = 0
+var _enemy_drop_dry: int = 0
 var _boss_credit_reward: float = 320.0
 var _boss_xp_reward: float = 200.0
 var _boss_drop_count: int = 3
@@ -181,14 +192,16 @@ func _read_config() -> void:
 	_debris_xp_max = definitions.block_number("survival", "debris_xp_max", 12.0)
 	_debris_credit_share = definitions.block_number("survival", "debris_credit_share", 0.5)
 	_credit_per_house = definitions.block_number("survival", "credit_per_house", 55.0)
-	_house_hp = definitions.block_number("survival", "house_hp", 260.0)
-	_house_armor = definitions.block_number("survival", "house_armor", 5.0)
+	_house_hp = definitions.block_number("survival", "house_hp", 120.0)
+	_house_armor = definitions.block_number("survival", "house_armor", 3.0)
 	_house_debris_credit = definitions.block_number("survival", "house_debris_credit", 18.0)
 	_props_houses = definitions.block_int("survival", "props_houses", 4)
 	_props_debris = definitions.block_int("survival", "props_debris", 6)
 	_debris_drop_chance = definitions.block_number("survival", "debris_drop_chance", 0.15)
-	_house_drop_chance = definitions.block_number("survival", "house_drop_chance", 0.30)
-	_enemy_drop_chance = definitions.block_number("survival", "enemy_drop_chance", 0.25)
+	_house_drop_chance = definitions.block_number("survival", "house_drop_chance", 0.70)
+	_enemy_drop_chance = definitions.block_number("survival", "enemy_drop_chance", 0.35)
+	_house_drop_pity = maxi(definitions.block_int("survival", "house_drop_pity", 3), 1)
+	_enemy_drop_pity = maxi(definitions.block_int("survival", "enemy_drop_pity", 4), 1)
 	_boss_credit_reward = definitions.block_number("survival", "boss_credit_reward", 320.0)
 	_boss_xp_reward = definitions.block_number("survival", "boss_xp_reward", 200.0)
 	_boss_drop_count = definitions.block_int("survival", "boss_drop_count", 3)
@@ -351,6 +364,8 @@ func start_wave() -> bool:
 	_enemy_serial = 0
 	_enemies_spawned = 0
 	_enemy_reinforce_timer = 0.0
+	## 保底干次数跨波保留：拆房/击杀的「运气欠账」不应该因为波次切换被清空。
+	##只有 `close_run()` 才清零，因为那才是一局真正的结束。
 	var count := mini(enemy_count_for(wave), enemy_quota_for(wave))
 	var tier := tier_for(wave)
 	for index in range(count):
@@ -592,14 +607,24 @@ func _damage_house(house: Dictionary, raw: float, frame_events: Array[Dictionary
 	house["hp"] = maxf(0.0, float(house["hp"]) - dealt)
 	if float(house["hp"]) > 0.0:
 		return
-	## 归零即摧毁：给钱 + 给经验，并按概率掉落配件。
+	## 归零即摧毁：给钱 + 给经验 + 掉模块（概率 + 保底），并留一处可再碾一次的残骸。
+	##
+	## 事件里带 `credit` / `xp` / `module` 三个字段：**页面层必须能说出「给了多少钱、掉了什么」**。
+	## 旧版事件只有 `cell`，与敌人击杀事件一样被页面层丢弃，玩家最终什么提示也看不到。
 	house["alive"] = false
 	houses_destroyed += 1
 	credit += _credit_per_house
 	_add_xp(_xp_per_house)
-	frame_events.append({"kind": "house_destroyed", "cell": house["cell"]})
-	if _next_unit() < _house_drop_chance:
-		_grant_random_module()
+	var module_id := ""
+	if _roll_drop(_house_drop_chance, "house"):
+		module_id = _roll_random_module()
+	frame_events.append({
+		"kind": "house_destroyed",
+		"cell": house["cell"],
+		"credit": _credit_per_house,
+		"xp": _xp_per_house,
+		"module": module_id,
+	})
 	## 摧毁后留下残骸格，可再被碾过一次（二次收益，量小于直接摧毁）。
 	debris.append({
 		"cell": house["cell"],
@@ -644,7 +669,7 @@ func _resolve_debris_crush() -> void:
 		else:
 			_add_xp(_roll_between(_debris_xp_min, _debris_xp_max))
 		if _next_unit() < _debris_drop_chance:
-			_grant_random_module()
+			_roll_random_module()
 
 ## 撞击房屋：玩家坦克的**真实格轮廓**与房屋相交且速度足够时扣血（design §3.4.4）。
 ## 只有玩家会撞房屋——敌人 AI 的目标是玩家，不去拆房子。
@@ -666,7 +691,11 @@ func _resolve_rammed_houses() -> void:
 		var raw: float = _wall_base + _wall_per_speed * speed
 		_damage_house(house, raw, [])
 
-## 结算已被击毁的敌人：给钱、给经验、按概率掉落它自己的一个配件（design §3.4.4 / Q31）。
+## 结算已被击毁的敌人：给钱、给经验、掉它自己的一个配件（design §3.4.4 / Q31）。
+##
+## 事件带 `credit` / `xp` / `module`：页面层靠这三个字段做「+N 金钱」漂浮数字与掉落文案。
+## 旧版事件只有 `tag`，而 `_survival_step()` 也没有这个 kind 的分支，
+## 于是所有掉落都是静默的——这是「敌人不掉模块」这个抱怨的直接来源。
 func _reap_enemies(frame_events: Array[Dictionary]) -> void:
 	var tags: Array = enemy_ai.keys()
 	tags.sort()
@@ -678,17 +707,32 @@ func _reap_enemies(frame_events: Array[Dictionary]) -> void:
 			continue
 		duel.sides[tag]["reaped"] = true
 		kills += 1
+		var reward_credit := 0.0
+		var reward_xp := 0.0
+		var module_id := ""
 		if is_boss_wave():
-			credit += _boss_credit_reward
-			_add_xp(_boss_xp_reward)
+			reward_credit = _boss_credit_reward
+			reward_xp = _boss_xp_reward
+			credit += reward_credit
+			_add_xp(reward_xp)
+			## Boss 必掉多件：这里是「保险柜」，不走概率也不动保底计数。
 			for index in range(_boss_drop_count):
-				_grant_random_module()
+				var dropped := _roll_random_module()
+				if module_id.is_empty():
+					module_id = dropped
 		else:
-			credit += _credit_per_kill
-			_add_xp(_xp_per_kill)
-			if _next_unit() < _enemy_drop_chance:
-				_grant_enemy_module(tag)
-		frame_events.append({"kind": "enemy_defeated", "tag": tag})
+			reward_credit = _credit_per_kill
+			reward_xp = _xp_per_kill
+			credit += reward_credit
+			_add_xp(reward_xp)
+			module_id = _roll_enemy_module(tag, _enemy_drop_chance, _enemy_drop_pity)
+		frame_events.append({
+			"kind": "enemy_defeated",
+			"tag": tag,
+			"credit": reward_credit,
+			"xp": reward_xp,
+			"module": module_id,
+		})
 
 # ─── 资源与升级 ───────────────────────────────────────────────────────────────
 
@@ -1057,24 +1101,64 @@ func commit_modification() -> void:
 
 # ─── 掉落 ─────────────────────────────────────────────────────────────────────
 
-func _grant_random_module() -> void:
+## 掉落判定：先按概率抽，再受 pity 保底约束。命中就入库存并返回模块 id（空串 = 没掉）。
+##
+## `stream` 只能是 `"house"` / `"enemy"`：两条线各有独立的干次数，
+## 否则拆房顺手把敌人保底抵掉，玩家会觉得「刚掉过又掉不出来了」。
+##
+## 随机数**只**在 `_next_unit()` 分支里消耗，且概率失败那一支也消耗一次，
+## 保底触发那一支**不**抽——这样同一 seed 的序列长度仍然只取决于调用次数，
+## 不会被保底逻辑改变（确定性不破）。
+func _roll_drop(chance: float, stream: String) -> bool:
+	var pity := _house_drop_pity if stream == "house" else _enemy_drop_pity
+	var dry := _house_drop_dry if stream == "house" else _enemy_drop_dry
+	if dry >= pity:
+		## 保底：这一发必掉，不计入「运气」，干次计数归零。
+		_set_drop_dry(stream, 0)
+		return true
+	if _next_unit() < chance:
+		_set_drop_dry(stream, 0)
+		return true
+	_set_drop_dry(stream, dry + 1)
+	return false
+
+func _set_drop_dry(stream: String, value: int) -> void:
+	if stream == "house":
+		_house_drop_dry = value
+	else:
+		_enemy_drop_dry = value
+
+## 从全部模块里抽一件放进库存，返回模块 id（空串 = 池子为空，什么都没掉）。
+func _roll_random_module() -> String:
 	var pool: Array = []
 	for raw_id in definitions.registry.modules.keys():
 		pool.append(String(raw_id))
 	pool.sort()
 	if pool.is_empty():
-		return
+		return ""
 	var module_id := String(pool[int(_next_unit() * float(pool.size())) % pool.size()])
 	inventory.append(module_id)
+	return module_id
 
 ## 掉落该敌人**蓝图里**已有的某个模块（Q31：与战损解耦，避免先打爆再杀就没得掉）。
-func _grant_enemy_module(tag: String) -> void:
+## 返回模块 id；敌人不存在或蓝图无模块时返回空串（此时**不**消耗保底干次数）。
+func _roll_enemy_module(tag: String, chance: float, pity: int) -> String:
+	var ids := _enemy_module_ids(tag)
+	if ids.is_empty():
+		return ""
+	if not _roll_drop(chance, "enemy"):
+		return ""
+	var module_id := String(ids[int(_next_unit() * float(ids.size())) % ids.size()])
+	inventory.append(module_id)
+	return module_id
+
+func _enemy_module_ids(tag: String) -> Array:
+	var ids: Array = []
 	if not duel.sides.has(tag):
-		return
+		return ids
 	var enemy_builder: GridBuilder = (duel.sides[tag] as Dictionary)["builder"]
 	if enemy_builder == null:
-		return
-	var ids: Array = []
+		return ids
 	for part in enemy_builder.module_parts:
 		var module_id := String(part.get("id", ""))
 		if module_id.is_empty():
@@ -1082,9 +1166,7 @@ func _grant_enemy_module(tag: String) -> void:
 		if not ids.has(module_id):
 			ids.append(module_id)
 	ids.sort()
-	if ids.is_empty():
-		return
-	inventory.append(String(ids[int(_next_unit() * float(ids.size())) % ids.size()]))
+	return ids
 
 # ─── 结算 ─────────────────────────────────────────────────────────────────────
 
@@ -1121,6 +1203,9 @@ func close_run() -> void:
 	modify_spent_total = 0.0
 	shop_slots.clear()
 	shop_slots.clear()
+	## 保底干次数属于单局状态，跨局必须归零——否则新一局的第一击就可能是「白送的必掉」。
+	_house_drop_dry = 0
+	_enemy_drop_dry = 0
 	houses.clear()
 	debris.clear()
 	enemy_ai.clear()
@@ -1139,9 +1224,18 @@ func start_next_wave() -> bool:
 # ─── 确定性随机 ───────────────────────────────────────────────────────────────
 
 ## 显式 LCG（数值取自 Numerical Recipes），状态完全由 seed 决定，录制种子即可复现。
+##
+## **超过 32 位的有符号范围**：GDScript 的 `int` 是 64 位，乘法结果最大到
+## `4294967295 * 1664525 ≈ 7.15e15`，仍在 64 位内，所以不会溢出；取模后再计算。
 func _next_unit() -> float:
 	_rng_state = (_rng_state * 1664525 + 1013904223) % 4294967296
 	return float(_rng_state) / 4294967296.0
+
+
+## 删掉之前的 RNG 调试辅助（`_set_rng_half_step_seed` / `_rng_never_under`）。
+## 保底逻辑本身是纯函数：`chance = 0.0` 时任何 `_next_unit() >= 0.0` 都判失败，
+## 于是「连 shot 都不掉，第 pity 次必掉」可以在不碰 RNG 的前提下确定地断言。
+## 这比反解 LCG 简单得多，也不会在产品代码里留下只服务测试的接口。
 
 func _roll_between(low: float, high: float) -> float:
 	if high <= low:
