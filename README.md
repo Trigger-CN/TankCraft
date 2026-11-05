@@ -299,6 +299,7 @@ TankCraft/
 - **桌面 exe 没有任何人工启动验证**：它只在 `--headless` 下被跑过（且只跑到主菜单/生存模式初始化），Android 也没有 APK。**注意：这一条讲的是「exe 从未被双击启动」，不是「游戏没人玩」——游戏本身一直由用户实机试玩。**
 - `expedition_run.gd` / `runtime_builder.gd` 仍存在但**无任何玩法调用方**。
 - 若干旧缺口：`boss_armor` 未实现、`safe_radius` 从未被读取、商店稀有度权重方向反、竞技场障碍 `hp` 无人扣减（障碍不可摧毁）。
+- **实现设计审核结论见 `docs/audit_report.md`**（v3.45，8 节 / 509 行，**只审核不改码**）。唯一 **P0**：**蓝图不保存改进槽配置** —— `grid_builder._parse_part()` / `_serialize_parts()` 都不处理 `upgrades`，在改装页用 `Q/E` + `T` 配好的改进槽，`Ctrl+S` 会提示保存成功、`Ctrl+O` 会提示读回成功，**但槽位是空的**（静默丢失、无警告）。其余三条横切空白：**无 `[input]` 段**（95 处 `KEY_*` 硬编码、`Input.is_action_*` 0 处 ⇒ 键位不可重绑定，手柄与触屏无从下手）、**无音频**（仓库内 0 个 `.wav`/`.ogg`、0 处 `AudioStream`，但 `Duel.drain_events()` 已在产出 `muzzle`/`impact`/`destroyed`/`expire` 等事件，只缺消费者）、**单语言硬编码**（156 处中文文案、`tr()` 0 处；单语言是当前正确选择，只需在 design 里显式声明、不必强行引入 `tr()`）。审核同时确认**领域层（10 个模块、preload 单向 DAG、零反向引用）是项目最好的资产**，报告明确不建议为了「架构整洁」去动它。
 
 完整清单见 `agent_note.md` §8 与 `docs/design.md` §17。
 
