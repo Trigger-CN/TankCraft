@@ -3882,6 +3882,11 @@ func _survival_step(step_time: float) -> void:
 			_survival_event = "整块脱落"
 		elif kind == "level_up_opened":
 			_survival_event = "升级：选择一项奖励"
+		elif kind == "wave_cleared":
+			## v3.44：过波结算奖金。它不属于任何一次击杀 / 拆房，所以不能靠漂浮数字表达——
+			## 写进「最近事件」并在商店页标题行单独列出来，玩家才能把「这笔钱从哪来」对上。
+			var clear_credit := float(entry.get("credit", 0.0))
+			_survival_event = "第 %d 波通过 · 结算 +%d cr" % [int(entry.get("wave", 0)), int(roundf(clear_credit))]
 		elif kind == "muzzle":
 			## 炮口闪光。**所有敌人与玩家走同一条分支**：颜色按 tag 判，不按谁开火。
 			var muzzle_colour := Palette.ACCENT_CYAN if String(entry.get("tag", "")) == Duel.TAG_PLAYER else Palette.ACCENT_MAGENTA
@@ -4297,7 +4302,9 @@ func _draw_survival_level_up() -> void:
 func _draw_survival_shop() -> void:
 	draw_rect(DRIVE_VIEW, Color(Palette.BG_BASE, 0.92), true)
 	_draw_text("商店 · 第 %d 波通过" % survival.wave, Vector2(DRIVE_VIEW.position.x + 32.0, DRIVE_VIEW.position.y + 44.0), 24, Palette.ACCENT_CYAN, false)
-	_draw_text("金钱 %d cr · 刷新价 %d cr · 已刷新 %d 次" % [int(roundf(survival.credit)), int(roundf(survival.shop_reroll_cost())), survival.shop_rerolls], Vector2(DRIVE_VIEW.position.x + 32.0, DRIVE_VIEW.position.y + 74.0), 15, Palette.ACCENT_LIME, true)
+	## v3.44：`本波结算 +N cr` 必须显示出来——这笔钱不来自任何一次击杀或拆房，
+	## 若只涨数字不说明来源，玩家会以为是 HUD 算错了。
+	_draw_text("金钱 %d cr · 刷新价 %d cr · 已刷新 %d 次 · 本波结算 +%d cr" % [int(roundf(survival.credit)), int(roundf(survival.shop_reroll_cost())), survival.shop_rerolls, int(roundf(survival.last_wave_credit))], Vector2(DRIVE_VIEW.position.x + 32.0, DRIVE_VIEW.position.y + 74.0), 15, Palette.ACCENT_LIME, true)
 	for index in range(survival.shop_slots.size()):
 		var slot: Dictionary = survival.shop_slots[index]
 		var rect := _survival_shop_rect(index)

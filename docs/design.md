@@ -4183,7 +4183,111 @@ func _roll_drop(chance: float, stream: String) -> bool:
 - 「房屋 120 HP 是否合适」是**根据弹药伤害与波时限算出的估计**，不是实测手感；若仍偏硬/偏软，只需改 `data/globals.json` 的 `house_hp`，不动代码。
 - 残骸二次收益（`house_debris_credit = 18`）与 `debris_drop_chance = 0.15` 本轮**未调整**。
 
-#### 11.4.3 两个 SETUP 界面
+#### 11.4.2.24 金钱收入提高（v3.44）
+
+**用户原话**：「增加金钱收入，目前战斗消耗的模块想补上来有些困难」。
+
+##### 一、先量缺口，不拍数字
+
+探针 `probe44.gd` → `p44a.txt` 逐项实测（非估算）：
+
+- 模块价格（48 件）：中位 **90 cr**、最高 **260 cr**。关键件 `cannon_76` = 120、`ammo_factory_76` = 140、
+  `modifier_power` = 110；另有一批几乎免费的布局件（`conveyor_straight` = 6、`platform_cell` = 4）。
+- 改之前单波**理论最高**收入（= 配额内敌人全杀 + 4 栋房全拆 + 6 处残骸全碾 + 4 处房屋残骸全碾）：
+
+| 波 | 配额 | 敌人 cr | 房屋 cr | 残骸 cr | 合计 |
+| --- | --- | --- | --- | --- | --- |
+| 1 | 4 | 160 | 292 | 90 | **542** |
+| 3 | 4 | 160 | 292 | 90 | **542** |
+| 5（Boss） | 1 | 320 | 292 | 90 | **702** |
+| 8 | 8 | 320 | 292 | 90 | **702** |
+
+重建 2–3 件典型模块要 **240–400 cr**（120 + 140 + 110 = 370）。**缺口成立，且与用户描述一致。**
+
+##### 二、根因是两层，不是「单价偏低」一层
+
+**① 总量不足**：542 / 702 是**理想上限**，要求清空全部敌人、拆完 4 栋房、碾完 10 处残骸**同时达成**。
+
+**② 结构性下行螺旋（这才是「补不回来」的真机制）**：原先的收入**全部**来自「打中东西」
+（击杀 / 拆房 / 碾残骸），而打中东西本身要求坦克完好 —— **坦克一残，收入能力同步下降**，
+于是越残越穷、越穷越补不回来。光调高 `credit_per_kill` 这类单价治不了这一层。
+
+所以修法必须两条腿：**提高单价** + **新增一笔与战况无关、活下来就能拿到的收入**。
+
+##### 三、修法（全部数据驱动，两个新键 + 五个调值）
+
+| 键 | 旧 → 新 | 理由 |
+| --- | --- | --- |
+| `credit_per_kill` | 40 → **60** | 击杀是最主要的动态来源 |
+| `credit_per_house` | 55 → **85** | 拆房是高投入动作（3 发 `cal_76`），收益要匹配 |
+| `house_debris_credit` | 18 → **28** | 跟着房屋上涨 |
+| `debris_credit_min/max` | 15/45 → **22/65** | 碾残骸是零成本动作，小幅上涨 |
+| `boss_credit_reward` | 320 → **460** | Boss 是主要收入节点，同比例 |
+| `wave_clear_credit_base` | — → **120** | **新增**：过波保底收入，不依赖运气与残留道具 |
+| `wave_clear_credit_per_wave` | — → **40** | **新增**：`奖金 = base + per_wave × (波次 − 1)` |
+
+改后单波理论上限：wave1 ≈ **942**、wave5 ≈ **1182**。
+
+**`default_build_credits = 2400` 与商店价格（`shop_common_price_max` / `shop_rare_price_max` /
+`shop_reroll_cost` / `shop_sell_rate`）本轮不动** —— 用户抱怨的是「战斗中补不回来」，不是开局预算或定价。
+
+##### 四、过波奖金的位置与理由
+
+```gdscript
+func wave_clear_credit_award(current_wave: int) -> float:
+    return _wave_clear_credit_base + _wave_clear_credit_per_wave * float(maxi(current_wave, 1) - 1)
+```
+
+发放点在 `step_battle()` 的过波分支（`wave_passed = true` / `_enemy_serial = 0` / `_enemies_spawned = 0` /
+`_enemy_reinforce_timer = 0.0` 之后，`_enter_intermission(frame_events)` **之前**）：
+
+```gdscript
+last_wave_credit = wave_clear_credit_award(wave)
+credit += last_wave_credit
+frame_events.append({"kind": "wave_cleared", "wave": wave, "credit": last_wave_credit})
+```
+
+1. **绝对不能放进 `_enter_intermission()`** —— `tests/survival_smoke.gd::_check_xp_and_levels()` 会直接调它来测
+   「波次通过时先进升级菜单」，放里面会让测试（以及从升级页返回的路径）多拿一份奖金。过波奖金只属于
+   「真的把波打完了」这一条路径。
+2. **必须随波增长** —— 模块价格 6–260 cr、中位 90，而波次越往后敌人越多、被拆的模块也越贵
+   （高级车带高级件）。固定金额到中后期等于没涨。
+3. **`last_wave_credit` 必须可读** —— 波间商店页标题行显示「本波结算 +N cr」，否则玩家看到金钱跳了一截
+   却找不到来源，会以为 HUD 算错。`start_wave()` 与 `close_run()` 都把它归零。
+4. **`enemy_defeated` / `house_destroyed` / `wave_cleared` 三个事件的字段口径统一**（都带金额），
+   页面层 `_survival_step()` 对每个都有分支。**「机制存在」不等于「玩家能感知」**（v3.43 的教训）。
+
+##### 五、验证
+
+- `tests/survival_smoke.gd` 新增 `_check_wave_clear_credit()`（验收 13）：公式三点（wave1 / wave2 / wave5）+ 随波单调递增；
+  真实过波路径（`enemy_ai.clear()` + 逐帧推进到计时归零）中断言 `credit` 增量 ≥ 奖金、`last_wave_credit` 同步、
+  事件流里有 `wave_cleared` 且金额一致；`start_wave()` / `close_run()` 归零。
+- `_check_boss_wave()` 的金钱断言改为 `boss_credit_reward + wave_clear_credit_award(本波)` —— **这是行为变更导致的
+  测试更新，不是放宽断言**：击毁 Boss 会当场把本波打完，同一帧内必然多拿一份奖金。
+- **负向验证**（`negctl44.py`，备份文件式，绝不用 `git checkout`）：把 `credit += last_wave_credit` 改成 `pass` →
+  精确报 `boss_credit_reward 460.0000 != 740.0000`（460 + award(5) = 280）与 `wave_credit_paid_0.00_of_120.00`；
+  写回后 `NEGCTL44_PASS`。
+
+##### 六、顺带修掉的既有测试装置缺陷（不是本轮引入）
+
+`tests/survival_smoke.gd::_init()` 原本只调用 19 个 `_check_*` 里的 **10 个**，另外 9 个（`_check_props` /
+`_check_xp_and_levels` / `_check_level_choices` / `_check_shop` / `_check_boss_wave` / `_check_modification` /
+`_check_player_fire_damage` / `_check_no_combat_modification` / `_check_determinism`）**存在但从未被执行** ——
+`SURVIVAL_OK` 长期只覆盖 10/19，`_check_boss_wave()` 那个「必掉 3 件」的断言尤其关键却一直在睡觉。
+
+本可用 `git show HEAD:tests/survival_smoke.gd` 确认 HEAD 版本同样只有 10 个调用 → **既有缺陷**。接上之后只有 1 条真红：
+`level_upgrade_collected`。根因是 `_check_level_choices()` 断言 `collected_upgrades.size() > 0`，而 `_install_upgrade()`
+在**有空槽时会直接写进 `part["upgrades"]` 并返回**，根本不会 append 到 `collected_upgrades` —— 旧断言在「有空槽、
+直接装上」这一支必然假红。改为断言 `staged or fitted`（用 `pick["id"]` 精确比对两个来源之一）。
+
+##### 七、已知边界
+
+- **本次改动尚未经过用户实机确认。**
+- **「真人实得率 45–55%」是按理论上限折扣的估计，不是实测数据。** 上限（942 / 1182 cr/波）是探针按配额与道具数量算出的**理想值**，
+  headless 无法验证手感，也无法验证「新数值是否真的够用」。
+- 过波奖金只验到「发到了 `credit` 上、事件字段一致」；**不证明玩家在商店页真的注意到了那行文案**。
+- `_boss_credit_reward` 的代码缺省值也一并从 320 改到 460，与 data 保持一致（data 缺失时不会回退到旧值）。
+
 #### 11.4.3 两个 SETUP 界面
 
 **`EXPEDITION_SETUP`（单人远征）**
@@ -5212,14 +5316,16 @@ M3 的物理验收基准（`M 61.0 u` / `I 104 064 u·px²` / `T 9000` / `v_max 
 
 | 常量 | 值 | 说明 |
 | --- | --- | --- |
-| `SURVIVAL_CREDIT_PER_KILL` | 40 | 击毁一台普通敌人 |
-| `DEBRIS_CREDIT_MIN` / `DEBRIS_CREDIT_MAX` | 15 / 45 | 碾过残骸得到的金钱区间 |
+| `SURVIVAL_CREDIT_PER_KILL` | 60 | 击毁一台普通敌人（**v3.44 从 40 上调**，理由见 §11.4.2.24） |
+| `DEBRIS_CREDIT_MIN` / `DEBRIS_CREDIT_MAX` | 22 / 65 | 碾过残骸得到的金钱区间（**v3.44 从 15 / 45 上调**） |
 | `DEBRIS_XP_MIN` / `DEBRIS_XP_MAX` | 4 / 12 | 碾过残骸得到的经验区间 |
 | `DEBRIS_CREDIT_SHARE` | 0.5 | 残骸产出中金钱占的比例（余下为经验），用显式 LCG 判定 |
-| `SURVIVAL_CREDIT_PER_HOUSE` | 55 | 摧毁一栋房屋 |
+| `SURVIVAL_CREDIT_PER_HOUSE` | 85 | 摧毁一栋房屋（**v3.44 从 55 上调**） |
 | `HOUSE_HP` | 120 | 房屋生命值（**v3.43 从 260 下调**，理由见 §11.4.2.23） |
 | `HOUSE_ARMOR` | 3 | 房屋护甲（**v3.43 从 5 下调**） |
-| `HOUSE_DEBRIS_CREDIT` | 18 | 房屋残骸被碾过的二次收益 |
+| `HOUSE_DEBRIS_CREDIT` | 28 | 房屋残骸被碾过的二次收益（**v3.44 从 18 上调**） |
+| `WAVE_CLEAR_CREDIT_BASE` | 120 | **v3.44 新增**：每波打完的结算奖金基数（与战绩无关，活下来就有） |
+| `WAVE_CLEAR_CREDIT_PER_WAVE` | 40 | **v3.44 新增**：结算奖金每波递增额，`奖金 = BASE + PER_WAVE × (波次 − 1)` |
 | `SURVIVAL_PROPS_HOUSES` / `SURVIVAL_PROPS_DEBRIS` | 4 / 6 | 每波生成的房屋 / 残骸数量 |
 
 **掉落**
@@ -5231,7 +5337,7 @@ M3 的物理验收基准（`M 61.0 u` / `I 104 064 u·px²` / `T 9000` / `v_max 
 | `SURVIVAL_ENEMY_DROP_CHANCE` | 0.35 | 击毁普通敌人时掉落**它自己已装有的某个配件**的概率（**v3.43 从 0.25 上调**） |
 | `HOUSE_DROP_PITY` | 3 | **v3.43 新增**：连续拆掉这么多栋都没掉模块时，下一栋必掉 |
 | `ENEMY_DROP_PITY` | 4 | **v3.43 新增**：连续击杀这么多台普通敌人都没掉模块时，下一台必掉 |
-| `BOSS_CREDIT_REWARD` | 320 | 击毁 Boss 的金钱 |
+| `BOSS_CREDIT_REWARD` | 460 | 击毁 Boss 的金钱（**v3.44 从 320 上调**） |
 | `BOSS_XP_REWARD` | 200 | 击毁 Boss 的经验 |
 | `BOSS_DROP_COUNT` | 3 | 击毁 Boss **必定**掉落的配件数 |
 
@@ -5541,3 +5647,4 @@ M3 的物理验收基准（`M 61.0 u` / `I 104 064 u·px²` / `T 9000` / `v_max 
 | 2026-10-27 | v3.40 | **相机推拉重做：缩放不是「把地图在桌上缩放」，而是真的相机远近**（用户原话：「重新设计战斗场景缩放的功能，目前的效果存在很多问题，应该按照相机视角，相机远就缩小，相机近就放大」）。① **旧模型的核心错误是语义级的，不是参数不尽相同**：v3.38 的 `camera_rect(arena, focus, zoom)` 返回 `arena.size / zoom` 的矩形，`zoom < 1` 时**相机比地图还大**。独立探针 `probe_cam41.gd` 实测：`zoom=0.50` 时相机 **4096×2304**（竞技场只有 2048×1152）、`pos=(-1024,-576) end=(3072,1728)` **四边各溢出 1024 / 576 世界像素**、`cover=0.250` ⇒ **视图 75% 在画不存在的世界**（`zoom=0.75` 时 43.8%）；截图 `zd_0.5.png` 目视确认地图缩成中间 608×342 的小方块。**那不像相机，像把地图在桌上缩放** —— 这就是用户说的「很多问题」的直接来源。② **换成距离模型**：状态改为一维的**相机距离** `height`（相机视野覆盖的世界高，px）—— **数值大 = 相机远 = 画面缩小；数值小 = 相机近 = 画面放大**，与用户的镜头语言严格一致。新增 `CombatView.camera_at_height(arena, focus, height)`，三条硬约束：**(1) 最远 = 整张地图**（`height >= arena.size.y` 时**原样 `return arena`，零乘除** ⇒ 默认像素与 v3.37 逐字节相同，基线 `zh_1.0.png` = `1F299B04` 继续有效）；**(2) 相机永远不超出地图**（Rect 再夹进竞技场）；**(3) 宽高比永不改变**（宽 = 高 × 竞技场宽高比 ⇒ 任意距离下恰好铺满视图，既无 letterbox 也无裁切）。③ **两个端点可复算**：最远 `arena.size.y` = **1152** ⇒ 一格 `16×1216/2048` = **9.5 屏幕像素**；最近 `1152 / CAMERA_MAG_MAX` = **288** ⇒ 一格 `16×684/288` = **38 屏幕像素**（与建造页 32 px 格同等级）。新增 `camera_height_for_mag()` / `camera_mag()`，读数区间 **[1.00, 4.00]，1.00 = 整图**。④ **删除两个东西，并说清为什么**：`camera_rect()` **整段删除** —— 它与「相机比地图大」共用签名与常量族，留着就等于留着一条**能表达非法视角**的 API；`CAMERA_ZOOM_MIN = 0.5` **永久删除** —— 在距离模型里「比整图还远」这一档**不可构造**（`camera_height_for_mag(arena, 0.5)` 走 `maxf(mag,1.0)` 返回最远），保留常量只会误导后来者。还**踩过并删掉** `CAMERA_CELL_PX`：`16×684/38 = 288 = 1152/4`，它与 `CAMERA_MAG_MAX` 是同一个事实的两种写法（连带删掉引用它的 `_camera_dist_nearest()`）。⑤ **滚轮是推拉（不是阶跃）**：`_camera_zoom_by()` **只改目标距离**；换算路径是「目标距离 → 读数 → 乘除档位 → clamp 到 [1.00, 4.00] → 换回距离」—— **夹取在读数维**，因为距离维的边界是非线性的。每帧用 `1 - exp(-CAMERA_DIST_FOLLOW·delta)`（k=7）插值，约 0.3 s 到位、与帧率无关、不用 `randf`。**两个必要的细节**：`absf` 差 < 1e-3 时**必须直接吸附**（最远分支是 `>=` 的位比较，不吸附就永远停在「差一点点」，`to_screen()` 最后一位会变）；**必须先推距离再算焦点**（距离决定相机多大，相机多大决定焦点能夹到哪里）。⑥ **高倍下的两个真实缺陷（都是截图 / 探针实测，不是推断）**：**(A) 相机外的图元边界照样被画出来** —— 取相机上边界往上 40 世界像素的点，屏幕 y=**73**，而 `DRIVE_VIEW.position.y = 168`（落在视图外 95 px）；`cam40_d2.png` 里 `-6`/`-12` 两个伤害数字出现在**战场视图上方的标题区**。因为 `canvas.draw_*` 在 Godot 4 里**没有任何裁剪参数**（`canvas_item_set_clip_rect` 在 GDScript 里不存在，实测 `Parse Error`），新增 `in_view(view, at)` 并在**七处**加闸：`draw_shots` / `draw_fx` / `draw_hit_flash` / `draw_muzzle_flash` / `draw_expire_flash` / `draw_damage_popups`。**(B) 贴边时焦点被夹**，`zoom=2.0` 且 `focus_x=0` 时 `camera_centre_x=512`（偏移 512 px），车不在画面中心。这一条**本轮判断为设计取舍而非缺陷**：不越界优先于永远居中，两者冲突时前者胜（若用户要求「贴边也居中」，则必须允许越界，会重新引入空白）。⑦ **修正了 (A) 的修法本身**：`draw_string()` 的锚点是**基线**、字形向上延伸约一个字高，只判锚点时数字上半截仍会越界 —— 截图 `c40_d_far.png` 里 `-7` 正是压在 `DRIVE_VIEW` 的青色上边框上（4 倍裁切 `crop_far_top.png` 确认）；改为**基线与字顶两个点都要在视图内**后 `c40_d_far2.png` 里彻底不再越界。⑧ **测试与负向验证**：`tests/camera_zoom_smoke.gd` 整份重写（250 行 → **380 行 / 19,966 B**），11 组检查、**545 条断言**，核心是 `_check_never_exceeds_arena`（5 focus × 13 height，判据只用到 `Rect2` 四个边界，**不引用 `camera_at_height()` 的中间量** —— §11.4.2.19 第六节教训的直接应用）。负向：`negctl40.py apply` 删掉最远保护 → **62 条失败**（`far_identity_double`/`far_identity_huge` + 60 条 `inside_*`/`not_wider_*`/`not_taller_*`），`restore` 后回到 `CAMERA_OK checks=545` 且输出逐字节相同。**陷阱：距离表必须包含「超过最远」的非法输入**（`FAR*2`/`FAR*1.5`/`99999`）—— 第一版只到 `FAR`，去掉保护后核心断言一条都没失败，因为夹取公式在 `height == FAR` 时恰好也得到 `arena`。⑨ **另修两处下游引用**：`tests/aim_smoke.gd` 也引用了已删的 `camera_rect()`，导致 `AIM_OK` 消失、runner 记成 `NO_OK_LINE`（改为 `camera_at_height(arena, centre, arena.size.y)`，与旧 `zoom==1` 逐位等价）；另 `combat_view.gd` 曾因 `draw_muzzle_flash()` 里 `var forward` **写了两遍**而整文件 `Parse Error`（连带 `main.gd`/测试全部 preload 失败），已删重复行。⑩ **接口不兼容变更**：`--zoom=` 从「倍数 0.5–4.0」改为「**读数 1.00–4.00，1.00 = 整图**」，旧命令 `--zoom=0.5` 现在等价于 `1.0`；且必须**延迟应用**（它可能排在 `--screen=` 之前，那时竞技场还是空 `Rect2`）。反向顺序已实测：`--zoom=1.6 --screen=drive` 与 `--screen=drive --zoom=1.6` 的两张截图 `diff_png.py` 判定 **`IDENTICAL 1920x1080`**。⑪ **视觉证据（真实窗口截图 + `Image_View` 亲眼看过，不是只看断言）**：`c40_d_far2.png`（`f93cc99ebb60a37c`，1.00× 整图、零空白、读数 `相机 1.00×（整图）`）、`c40_d_mid2.png`（1.60×）、`c40_d_near.png`（`e0c417580e4c6172`，4.00× 近端、一格约 38 px、坦克可读）、`c40_m_mid.png`（`87f2e79d89f37711`，对局页 1.60×、镜头居中跟玩家车）、`c40_s_mid.png`（`0d1b3ef4cb70d5ff`，生存页 1.60×）、`c40_rev.png`（`5507b102d460884f`，反向参数顺序）。⑫ **全量回归**：新写 `run_smoke40.ps1`（从 v3.39 版复制，**输出改到 `s40a.txt` 以免覆盖 `s39a.txt`**）→ `s40a.txt` 1086 B / `5eef08b3`，**23 行全部 OK**，与 `s39a.txt` 的差异**只有** `camera_zoom_smoke => checks=149 → 545`。**如实声明**：**本次改动尚未经过用户实机确认**（上一版的弧管缺陷与再上一版的炮管偏移都是用户实机发现的）；**断言与 smoke 全绿只证明数值正确，不证明画面正确**，视觉结论来自上述 6 张截图的 `Image_View` 目视；**没有做「v3.40 与 v3.39 构建」的像素基线比对**，「最远 = 整图与 v3.37 逐字节相同」是**构造性论证**（零乘除）而非实测比对；**旧截图 `zd_0.5.png` / `zd_2.5.png` / `zm_2.0.png` / `zs_2.0.png` / `cam40_d2.png` / `cam40_d4.png` 全是旧模型下拍的，只能当「旧观感」证据，不能当新基线**；**「贴边不居中」是设计取舍，未与用户确认是否可接受**；**未在 Android 上验证，任何 APK 均不存在**。 | §11.4.2.18 §11.4.2.20 §17 |
 | 2026-10-24 | v3.41 | **弹药改进模块：从「无效容器」到「有实际功能的模块」**（用户原话：「弹药改进模块目前似乎没有实际效果，将这些模块改为有实际功能的模块，例如爆破模块、火焰模块、增伤模块等等」）。① **先查清「为什么没效果」，再动手**——用户报的是现象不是诊断。两个根因，一真一假：**根因 A（真产品缺陷）** 生存模式的 `survival_run.STARTER_MODULES` 里**五件模块没有一件带 `upgrade_slots`**，而 `_install_upgrade()` 是「按 `module_parts` 顺序找第一件还有空槽的改进装置」，找不到就把 id 推进 `collected_upgrades` 暂存。探针实测 `starter modifiers=0 total_slots=0`、`_install_upgrade("up_damage")` 返回「没有空槽的改进装置，升级已暂存」、`installed_upgrades=[]` —— **玩家升到满级也装不进任何升级**。这就是「没有实际效果」的直接根因，不是引擎失效，是玩家根本没有容器。（这个问题在 v3.24「升级载荷实体化」时就已存在，但那一轮只验了「载荷能不能随弹药流动」——用自己搭的车，**没验玩家的起始车装不装得上**。）**根因 B（探针缺陷，不是产品缺陷）** 上一轮报的 `dmg_delta=0.000` 是**弹药 id 写错**：探针传 `ammo_76`，而 `calibers.json` 的真实 id 是 **`cal_76`**，`get_ammo()` 返回 `{}` → `base=0.0` → `apply_hit()` 在最前面 `if base <= 0.0: return result` 就早退 → `result["damage"]` 恒 0。**那个数字什么也没证明。** 换成真实 id 实测 `cal_76 + up_damage` 从 **52.0 → 61.8（+9.8）**、`cal_155 + up_damage` 从 **237.0 → 280.2（+43.2）**；`_final_damage()` 的护甲是**减法**（`maxf(damage * 0.15, damage - armor_eff)`），所以「护甲把 +18% 差异削平」这个假设被**证伪**。② **修法：两族改进模块并存**。第一族**保留**通用的 `modifier_mk1/mk2/mk3`（只差 `upgrade_slots` 1/2/3 与 `processing_time_s`，槽里配什么由玩家决定，是「自由组合」的高级玩法，也是既有测试依赖的 id，不删）。第二族**新增**三件**功能固定的模块**，定义里带 `intrinsic_upgrades`：`modifier_blast`（爆破模块，1 格，130 cr，`up_explosive`）、`modifier_flame`（火焰模块，1 格，120 cr，`up_burn`）、`modifier_power`（增伤模块，1 格，110 cr，`up_damage`）；三者各带 1 个槽，固有升级**不占槽、永远生效**。③ **一个刻意的实现选择：固有升级不写进 `part["upgrades"]`**。它是模块**类型**的属性而不是实例状态，写进 part 会在蓝图反序列化、撤销、复制处多出一条可能漂移的副本。运行期由 `AmmoNetwork._make_part()` 从 `definitions.get_module()` 读进 `part["intrinsic"]`，加工完成时 `payload = 原载荷 + intrinsic + 槽配置`（顺序固定，保证确定性）。④ **起始坦克改造**：`STARTER_MODULES` 变成 `factory_76(0,1) → 直管(2,1) → modifier_power(3,1) → cannon_76(4,1)`，车体仍是 `6×4`、「不放弹药库」的原理由（殉爆在 6×4 的车里等于自杀）不变。开局就有 **+18% 伤害**，玩家第一次开火就能看到比白板更高的数字。⑤ **验证（数值层 + 玩家路径层 + 像素层三层都有证据）**。**端到端探针**（走真实 `SurvivalRun.build_starter()` + 真实 `AmmoNetwork`）：`starter cannon payloads = ["up_damage"]`、`modifier_blast/flame/power → cannon payloads = ["up_explosive"]/["up_burn"]/["up_damage"]`、`modifier_power slots after player config = ["up_damage"]`（固有升级不占槽）、**`PROBE41V3_DONE checks=25 failures=0`**。**永久回归**（`tests/upgrade_flow_smoke.gd` 10,256 → **15,385 B**）新增两段：`_check_function_modules_carry_intrinsic()`（三种模块 × 数据层声明 + 流程层真的流到炮管）与`_check_starter_can_install_upgrade()`（起始车有容器 → 装得上且**不靠暂存** → 弹药链真的把它带到炮管）。**负向验证**（`.me/tmp/main/negctl41.py` apply/restore）同时退回两处修复 → 立刻 **`UPGRADE_FAIL count=7`**，其中前 3 条只来自 `ammo_network`、后 4 条只来自 `survival_run` —— **两处修复各自都有独立的失败项**，证明断言有真实区分力；`restore` 后回到 `UPGRADE_OK`。**全量回归**：**23 项 smoke 全绿**（`s41a.txt` 1,086 B / `73e2a81e`），`physics_smoke` 数值与 v3.40 基线**逐字相同**（mass=61.0 / inertia=104064 / v_max=192.1 / turn180_s=1.70 / spin_stop_s=0.43）。**真实窗口截图 + `Image_View` 亲自看过**：`v41_surv.png`（1920×1080 / 202,833 B）的镜像面板「部件状态」里出现 **增伤模块 加工 100%**；`v41_modify.png`（270,554 B）上能看到「增」模块位于弹药链中段、`体积 7×4`、`结构合法，可以部署。`；6× 放大 `crop41_tank.png`（1320×780）里 **「76 → 直管 → 增 → 炮管」与青 in / 琥珀 out 箭头一眼可读**。两次 capture 均含 `WINDOW_MODE mode=2 size=(1842, 1057)` 与 `CAPTURE_OK`、**无 `SCRIPT ERROR`**。⑥ **一处自伤（已修）**：收尾时想追加本行，`File.Edit` 误把 v3.40 那一整行**截断成了一个标题**；立即用 `git show HEAD:docs/design.md` 取出原始行按字符数（4,653）逐字节写回并校验 `LAST_IS_V340 True`，然后才追加本行。**这是「`File.Edit` 范围算错会静默破坏历史行」的又一次印证，append-only 的变更表绝对不能用手写长行。****如实声明**：**本次改动尚未经过用户实机确认**（上一版的弧管与炮管偏移都是用户实机发现的）；**截图证明的是「装得上 / 在流水线里被加工 / 箭头可读」，不证明「开火后肉眼能看出伤害数字变大」**——那需要真实对局里同口径带/不带 `up_damage` 的伤害对比，本轮**没有做**，只有 `probe41b.txt` 的数值链（52.0 → 61.8）作间接证据；**改进槽的配置入口仍然只有键盘**（改装页 `Q/E` 选升级、`T` 装槽、`Shift+T` 清空），无鼠标路径，本次修法**绕开了这个可用性问题但没有解决它**；**`processing_multiplier` 仍是死字段**（`upgrades.json` 每条都有，零代码读取）；`data_smoke modules=45 → 48` 是新增三件模块的预期结果；**未在 Android 上验证，任何 APK 均不存在**。 | §6.4 §11.4.2.21 §17 |
 | 2026-10-30 | v3.43 | **生存模式掉落与房屋机制：机制一直在，缺的是「看得见」**（用户原话：「完善生存模式的机制，敌人击杀也掉落模块和金钱，房屋生命值过高，房屋摧毁也会掉落金币和模块」）。① **先核事实，不按字面改**：读码确认三件事里有两件**本来就已实现** —— 普通敌人击杀给 `credit_per_kill = 40` + `xp_per_kill = 25` + `enemy_drop_chance = 0.25` 掉它蓝图里已有的一件（Boss 更给 320 cr / 200 xp / **必掉 3 件**）；房屋摧毁给 `credit_per_house = 55` + `xp_per_house = 12` + `house_drop_chance = 0.30` 掉一件并留残骸可再碾一次得 18 cr。② **真正的缺陷是反馈链断了**：`main.gd::_survival_step()` 的 `if/elif` 链里**根本没有 `enemy_defeated` 分支**，`_reap_enemies()` 产生的事件被直接丢弃；`house_destroyed` 也只有一句没数字的「房屋被摧毁」。于是玩家击毁敌人、拆掉房子时，屏幕上什么都不发生，金钱只在外侧 HUD 静默跳一下。**这与 v3.20 修掉的「打上去没反应」同源：函数算对了、事件也发了，但页面层没接。机制存在 ≠ 可感知。**③ **事件带出收益**：`enemy_defeated` / `house_destroyed` 都补 `credit` / `xp` / `module` 三个字段；`main.gd` 新增 `enemy_defeated` 分支、重写 `house_destroyed` 分支，写文案并推一条绿色「+N cr」漂浮数字。漂浮数字**不复用** `CombatView.push_damage()` —— 它的符号语义写死了 `dealt → +N`、`received`/`shield` → `-N`，金钱没有正负之分；改为直接 `_survival_fx.push(kind="damage", …)` 并自己给 `text`、把 `mode` 标成 `"credit"` 参与限流。④ **数值下调 + 保底**：`house_hp` 260 → **120**、`house_armor` 5 → **3**（`cal_76` 由 6 发降到 3 发、`cal_40` 由 16 发降到 7 发；每波只 4 栋、波时限 45 s，260 HP 确实过高）；`house_drop_chance` 0.30 → **0.70**、`enemy_drop_chance` 0.25 → **0.35**；新增 `house_drop_pity = 3` / `enemy_drop_pity = 4` —— 纯概率时代「连着四五个敌人都没掉」频繁出现，而当时又没有任何提示，这才是「敌人不掉模块」的另一半原因。⑤ **`_roll_drop(chance, stream)` 的四个约束**：两条 stream（`house`/`enemy`）干次数**必须独立**，否则拆房会顺手抵掉敌人的保底；**保底分支不抽随机数**，所以同一 seed 的序列长度仍只取决于调用次数、确定性不破；干次数**跨波保留**、只有 `close_run()` 清零；Boss 走必掉路径**不参与** pity。⑥ **验证**：`tests/survival_smoke.gd` 新增两条验收（事件字段逐值等于 data、`module` 非空必已进库存、对纯函数 `_roll_drop(0.0, stream)` 的确定性阶梯断言、两 stream 隔离、真实拆房/击杀路径），全量 23 项 smoke 全绿（`s43_all.txt`）；负向验证 `negctl43.py`（备份文件而非 `git checkout`）摘掉保底分支后精确报 6 条 `*_pity_*` 失败、写回后 `NEGCTL43_PASS`。**本次改动尚未经过用户实机确认**；「房屋 120 HP 是否合适」是按弹药伤害与波时限算出的估计，不是实测手感。 | §3.4.4 §11.4.2.23 §14.8 §17 |
+| 2026-11-05 | v3.44 | **金钱收入提高：先补「下行螺旋」，再谈单价**（用户原话：「增加金钱收入，目前战斗消耗的模块想补上来有些困难」）。① **先量缺口**（探针 `probe44.gd` → `p44a.txt`，逐项实测）：模块价格 48 件中位 **90 cr** / 最高 **260 cr**（`cannon_76`=120、`ammo_factory_76`=140、`modifier_power`=110）；改前单波**理论最高**收入 wave1/3 = **542 cr**（敌人 160 + 房屋 292 + 残骸 90）、wave5/8 = **702 cr**，而那要求「配额敌人全杀 + 4 栋房全拆 + 10 处残骸全碾」同时达成。重建 2–3 件典型模块要 **240–400 cr**，缺口成立且与用户描述一致。② **根因是两层，不是「单价偏低」一层**：总量不足之外，原先收入**全部**来自「打中东西」（击杀 / 拆房 / 碾残骸），而打中东西本身要求坦克完好 —— **坦克一残，收入能力同步下降**，越残越穷，这才是「补不回来」的真机制，光调单价治不了。③ **修法（全部数据驱动）**：`credit_per_kill` 40→**60**、`credit_per_house` 55→**85**、`house_debris_credit` 18→**28**、`debris_credit_min/max` 15/45→**22/65**、`boss_credit_reward` 320→**460**；**新增过波结算奖金** `wave_clear_credit_base = 120` / `wave_clear_credit_per_wave = 40`，`wave_clear_credit_award(w) = base + per_wave × (w − 1)`（随波增长：模块价格 6–260 cr、后期被拆的件也更贵；固定额到中后期等于没涨）。发放点在 `step_battle()` 的过波分支并 append `{"kind": "wave_cleared", "wave", "credit"}`；**绝不能放进 `_enter_intermission()`** —— 测试与升级页返回路径会直接调它，放里面会多拿一份。`default_build_credits` 与商店价格本轮不动。改后理论上限 wave1 ≈ **942**、wave5 ≈ **1182 cr**。④ **玩家看得见**：`_survival_step()` 新增 `wave_cleared` 分支写「第 N 波通过 · 结算 +M cr」；商店页标题行追加「本波结算 +N cr」（`last_wave_credit`，`start_wave()` / `close_run()` 归零）。⑤ **验证**：新增 `_check_wave_clear_credit()`（公式三点 + 随波递增 + 真实过波路径 + `credit` 增量 `>=` 奖金 + 事件金额 + 生命周期）；`_check_boss_wave()` 的金钱断言改为 `boss_credit_reward + wave_clear_credit_award(本波)`（**行为变更导致的测试更新，不是放宽**）；负向验证 `negctl44.py`（备份文件式）摘掉 `credit += last_wave_credit` → 精确报 `boss_credit_reward 460.0000 != 740.0000`（460 + award(5)=280）与 `wave_credit_paid_0.00_of_120.00`，写回后 `NEGCTL44_PASS`；**23 项 smoke 全绿**（`s44_all.txt` 1086 B）。⑥ **顺带修掉既有测试装置缺陷**：`survival_smoke._init()` 只调用 19 个 `_check_*` 里的 **10 个**，另外 9 个从未执行（`git show HEAD:` 版本同样只有 10 个 → **既有缺陷**，`SURVIVAL_OK` 长期只盖 10/19）；接上后只有 1 条真红 `level_upgrade_collected` —— 旧断言只看 `collected_upgrades`，而 `_install_upgrade()` 在**车上有空槽时会直接写进 `part[\"upgrades\"]`**，改为断言 `staged or fitted` 并精确比对 `pick[\"id\"]`。**如实声明**：**本次改动尚未经过用户实机确认**；「真人实得 470–570 cr/波」是**按理论上限折扣的估计，不是实测**；「新数值够不够用」headless 无法验证；**未在 Android 上验证，任何 APK 均不存在**。 | §3.4.3 §11.4.2.24 §14.8 §17 |

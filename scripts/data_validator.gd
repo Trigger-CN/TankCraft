@@ -60,6 +60,9 @@ func validate_globals(path: String, data: Variant) -> PackedStringArray:
 			_require_number_range(path, "$.survival.%s" % key, survival_data, key, 0.0, 1.0, errors)
 		for key in ["house_drop_pity", "enemy_drop_pity"]:
 			_require_positive_int(path, "$.survival.%s" % key, survival_data, key, errors)
+		## v3.44：波次结算奖金。base 必须为正（每波至少给一份），per_wave 允许为 0（不随波增长）。
+		_require_positive_number(path, "$.survival.wave_clear_credit_base", survival_data, "wave_clear_credit_base", errors)
+		_require_number_range(path, "$.survival.wave_clear_credit_per_wave", survival_data, "wave_clear_credit_per_wave", 0.0, 10000.0, errors)
 		_validate_number_array(path, "$.survival.shop_rarity_weight", survival_data, "shop_rarity_weight", errors)
 	if menu_data is Dictionary:
 		_require_number_range(path, "$.menu.ui_scale_min", menu_data, "ui_scale_min", 0.1, 4.0, errors)

@@ -89,6 +89,8 @@ var kills: int = 0
 var houses_destroyed: int = 0
 var debris_taken: int = 0
 var total_damage: float = 0.0
+## 上一次过波结算拿到的奖金（波间商店页要显示它，否则玩家不知道这笔钱从哪来）。
+var last_wave_credit: float = 0.0
 ## run 结束时置真（驾驶舱被毁）。
 var run_over: bool = false
 
@@ -141,9 +143,17 @@ var _enemy_drop_pity: int = 4
 ## 距上一次成功掉落模块已经过了几次（成功即归零）。
 var _house_drop_dry: int = 0
 var _enemy_drop_dry: int = 0
-var _boss_credit_reward: float = 320.0
+var _boss_credit_reward: float = 460.0
 var _boss_xp_reward: float = 200.0
 var _boss_drop_count: int = 3
+
+## 过波结算奖金：`bonus = base + per_wave × (wave − 1)`。
+##
+## **为什么需要它**（v3.44）：原先的收入全靠「打中东西」，而打中东西本身就要求坦克完好。
+## 战斗中被打掉几件后收入能力同步下降，形成向下螺旋——玩家报「想补上来有些困难」正是这个。
+## 这笔钱与战挂钩：活着把波打完就拿到，与拆房拆到几栋、碾到几处残骸无关。
+var _wave_clear_credit_base: float = 120.0
+var _wave_clear_credit_per_wave: float = 40.0
 var _shop_slot_count: int = 6
 var _shop_reroll_cost: float = 60.0
 var _shop_sell_rate: float = 0.5
@@ -202,9 +212,11 @@ func _read_config() -> void:
 	_enemy_drop_chance = definitions.block_number("survival", "enemy_drop_chance", 0.35)
 	_house_drop_pity = maxi(definitions.block_int("survival", "house_drop_pity", 3), 1)
 	_enemy_drop_pity = maxi(definitions.block_int("survival", "enemy_drop_pity", 4), 1)
-	_boss_credit_reward = definitions.block_number("survival", "boss_credit_reward", 320.0)
+	_boss_credit_reward = definitions.block_number("survival", "boss_credit_reward", 460.0)
 	_boss_xp_reward = definitions.block_number("survival", "boss_xp_reward", 200.0)
 	_boss_drop_count = definitions.block_int("survival", "boss_drop_count", 3)
+	_wave_clear_credit_base = definitions.block_number("survival", "wave_clear_credit_base", 120.0)
+	_wave_clear_credit_per_wave = definitions.block_number("survival", "wave_clear_credit_per_wave", 40.0)
 	_shop_slot_count = maxi(definitions.block_int("survival", "shop_slot_count", 6), 1)
 	_shop_reroll_cost = definitions.block_number("survival", "shop_reroll_cost", 60.0)
 	_shop_sell_rate = definitions.block_number("survival", "shop_sell_rate", 0.5)
@@ -312,6 +324,13 @@ func wave_time_for(current_wave: int) -> float:
 	var steps := int(floorf(float(current_wave - 1) / float(_boss_every)))
 	return _wave_time_s + _wave_growth_s * float(steps)
 
+## 过波结算奖金：`base + per_wave × (wave − 1)`，纯数据驱动，无上限。
+##
+## **为什么要随波增长**：模块价格在 6–260 cr、中位 90，而波次越往后敌人越多、
+## 被拆的模块也越贵（高级车帶高级件）。固定金额到了中后期等于没涨。
+func wave_clear_credit_award(current_wave: int) -> float:
+	return _wave_clear_credit_base + _wave_clear_credit_per_wave * float(maxi(current_wave, 1) - 1)
+
 ## 同屏上限（普通波按 `base + per_wave·(n−1)` 向下取整并封顶；Boss 波固定 1 台）。
 ## 注意：这**不再是本波总数**——本波总数见 `enemy_quota_for()`。
 func enemy_count_for(current_wave: int) -> int:
@@ -352,6 +371,8 @@ func start_wave() -> bool:
 	wave_passed = false
 	wave_time_limit = wave_time_for(wave)
 	wave_time_left = wave_time_limit
+	## 新一波开始：上一波的结算奖金读数归零，避免商店页把旧值当成新值显示。
+	last_wave_credit = 0.0
 	duel = Duel.new()
 	if not duel.setup(definitions):
 		return false
@@ -548,6 +569,12 @@ func step_battle(dt: float) -> Array[Dictionary]:
 			_enemy_serial = 0
 			_enemies_spawned = 0
 			_enemy_reinforce_timer = 0.0
+			## v3.44：过波结算奖金。放在这里而**不**放在 `_enter_intermission()` 里，
+			## 是因为过波奖金只属于「真的把波打完了」这一条路径，而 `_enter_intermission()`
+			## 是从升级页 / 测试里也能直接调的纯阶段切换函数。
+			last_wave_credit = wave_clear_credit_award(wave)
+			credit += last_wave_credit
+			frame_events.append({"kind": "wave_cleared", "wave": wave, "credit": last_wave_credit})
 			_enter_intermission(frame_events)
 	return frame_events
 
@@ -1201,6 +1228,7 @@ func close_run() -> void:
 	modify_return_stage = ""
 	modify_credit_baseline = 0.0
 	modify_spent_total = 0.0
+	last_wave_credit = 0.0
 	shop_slots.clear()
 	shop_slots.clear()
 	## 保底干次数属于单局状态，跨局必须归零——否则新一局的第一击就可能是「白送的必掉」。

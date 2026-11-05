@@ -30,9 +30,24 @@ func _init() -> void:
 		printerr("SURVIVAL_FAIL count=%d" % failures)
 		quit(1)
 		return
-	## 验收 11 / 12 要跑真实战斗推进，必须后置：它们会修改同一批 run 实例的战斗状态。
+	## 验收 11 / 12 / 13 要跑真实战斗推进，必须后置：它们会修改同一批 run 实例的战斗状态。
+	## v3.44：这一组「后置」验收里原本只调了 2 个。`_check_props` / `_check_xp_and_levels` /
+	## `_check_level_choices` / `_check_shop` / `_check_boss_wave` / `_check_modification` /
+	## `_check_player_fire_damage` / `_check_no_combat_modification` / `_check_determinism`
+	## 九个函数**存在但从未被调用**（`SURVIVAL_OK` 因此只覆盖了 10 / 19 个验收）。
+	## 不是本轮代码改坏的，但正是「看着像绿其实没跑」的典型，一并接上。
+	_check_props()
+	_check_xp_and_levels()
+	_check_level_choices()
+	_check_shop()
+	_check_boss_wave()
+	_check_modification()
+	_check_player_fire_damage()
+	_check_no_combat_modification()
+	_check_determinism()
 	_check_house_reward_feedback()
 	_check_enemy_drop_reward()
+	_check_wave_clear_credit()
 	if failures > 0:
 		printerr("SURVIVAL_FAIL count=%d" % failures)
 		quit(1)
@@ -411,7 +426,15 @@ func _check_level_choices() -> void:
 		SurvivalRun.CHOICE_MASS_CAP:
 			_expect(run_state.builder.mass_cap_level > mass_before, "level_mass_cap_applied")
 		SurvivalRun.CHOICE_UPGRADE:
-			_expect(run_state.collected_upgrades.size() > 0, "level_upgrade_collected")
+			## 期望值跟着行为走：升级是**实体模块上的槽配置**（v3.24 / 用户 2026-10-17 的原始需求），
+			## 所以它先去 `collected_upgrades`（若车上有空槽则直接就位），进改装页时由
+			## `flush_collected_upgrades()` 落到槽里。这里断言两者之一：暂存了 **或** 已就位。
+			## 旧断言只看 `collected_upgrades`，在「有空槽、直接装上」这一支会假红——
+			## 那个函数此前从未被 `_init()` 调用，所以一直没人发现。
+			var upgrade_id := String(pick["id"])
+			var staged := run_state.collected_upgrades.has(upgrade_id)
+			var fitted := run_state.installed_upgrades().has(upgrade_id)
+			_expect(staged or fitted, "level_upgrade_collected")
 		_:
 			_expect(run_state.inventory.size() > inventory_before, "level_module_to_inventory")
 
@@ -519,9 +542,13 @@ func _check_boss_wave() -> void:
 	var boss_tank = run_state.duel.tank_of(tag)
 	run_state.duel.damage_of(tag).apply_part_damage(boss_tank, _cockpit_index(boss_tank), 1.0e9, "destroyed")
 	run_state.step_battle(1.0 / 60.0)
+	## v3.44 行为变更：击毁 Boss 会当场把本波打完，于是同一帧内还会发放过波结算奖金。
+	## 所以金钱增量 = `boss_credit_reward` + `wave_clear_credit_award(本波)`。
+	## 这不是放宽断言，是断言必须跟着行为走——若奖金被漏发，这里会精确少 280。
+	var expected_boss_credit := definitions.block_number("survival", "boss_credit_reward", 460.0) + run_state.wave_clear_credit_award(run_state.wave)
 	_expect_near(
 		run_state.credit - credit_before,
-		definitions.block_number("survival", "boss_credit_reward", 320.0),
+		expected_boss_credit,
 		"boss_credit_reward"
 	)
 	_expect_near(
@@ -533,6 +560,68 @@ func _check_boss_wave() -> void:
 		run_state.inventory.size() == inv_before + definitions.block_int("survival", "boss_drop_count", 3),
 		"boss_drop_count_%d" % (run_state.inventory.size() - inv_before)
 	)
+
+# ─── 验收 13：过波结算奖金（v3.44 金钱收入）──────────────────────────────
+
+## 用户 2026-10-30：「增加金钱收入，目前战斗消耗的模块想补上来有些困难」。
+## 根因不是单价偏低：原先收入**全部**来自「打中东西」（击杀 / 拆房 / 碾残骸），
+## 而打中东西本身要求坦克完好——坦克一残，收入能力同步下降，
+## 形成「越残越穷、补不回来」的下行螺旋。
+## 所以 v3.44 加了一笔与战况无关、活下来就能拿到的收入：过波结算奖金。
+##
+## 这里验四件事：① 公式 = base + per_wave × (wave − 1)；② 真的发到 `credit` 上；
+## ③ 事件流里有 `wave_cleared` 且金额一致；④ `last_wave_credit` 的生命周期。
+func _check_wave_clear_credit() -> void:
+	var base := definitions.block_number("survival", "wave_clear_credit_base", 120.0)
+	var per_wave := definitions.block_number("survival", "wave_clear_credit_per_wave", 40.0)
+	_expect(base > 0.0, "wave_credit_base_positive_%.2f" % base)
+	var formula_run := _make_run()
+	if formula_run == null:
+		return
+	_expect_near(formula_run.wave_clear_credit_award(1), base, "wave_credit_award_wave1")
+	_expect_near(formula_run.wave_clear_credit_award(2), base + per_wave, "wave_credit_award_wave2")
+	_expect_near(formula_run.wave_clear_credit_award(5), base + per_wave * 4.0, "wave_credit_award_wave5")
+	## 必须随波递增：模块价格随波次水涨船高（高级车带高级件），固定金额到中后期等于没涨。
+	_expect(formula_run.wave_clear_credit_award(9) > formula_run.wave_clear_credit_award(1), "wave_credit_grows_with_wave")
+
+	var run_state := _make_run()
+	if run_state == null:
+		return
+	run_state.bind_player(_make_rig())
+	_expect(run_state.start_wave(), "wave_credit_start_wave")
+	_expect_near(run_state.last_wave_credit, 0.0, "wave_credit_reset_on_start")
+	## 清空 AI 表：敌人既不动也不开火。这里测的是「过波结算」本身，
+	## 不是「能不能活到计时归零」（那是验收 3 的事）。
+	run_state.enemy_ai.clear()
+	var credit_before := run_state.credit
+	var expected := run_state.wave_clear_credit_award(run_state.wave)
+	var seen_wave_cleared := false
+	var seen_credit := -1.0
+	var dt := 1.0 / 60.0
+	var steps := int(ceilf(run_state.wave_time_limit / dt)) + 5
+	for step_index in range(steps):
+		## 先判 wave_passed 再推进：这样过波那一帧的事件仍然会被取到。
+		if run_state.wave_passed:
+			break
+		for raw_event in run_state.step_battle(dt):
+			var entry: Dictionary = raw_event
+			if String(entry.get("kind", "")) == "wave_cleared":
+				seen_wave_cleared = true
+				seen_credit = float(entry.get("credit", -1.0))
+	_expect(run_state.wave_passed, "wave_credit_wave_passed")
+	## 用 `>=` 而不是 `==`：本波还可能顺手碾到残骸、打死敌人，
+	## 那些收益是独立来源，不该让这条断言变成「总收入必须恰好等于奖金」。
+	## 反向仍恒成立——奖金一旦漏发，增量就是 0 < expected。
+	_expect(
+		run_state.credit - credit_before >= expected - 0.001,
+		"wave_credit_paid_%.2f_of_%.2f" % [run_state.credit - credit_before, expected]
+	)
+	_expect_near(run_state.last_wave_credit, expected, "wave_credit_last_value")
+	_expect(seen_wave_cleared, "wave_credit_event_emitted")
+	_expect_near(seen_credit, expected, "wave_credit_event_amount")
+	## 生命周期：`close_run()` 是新一局的起点，旧一局的奖金读数不能留。
+	run_state.close_run()
+	_expect_near(run_state.last_wave_credit, 0.0, "wave_credit_reset_on_close")
 
 func _blueprint_cell_count(blueprint: Dictionary) -> int:
 	var total := 0
