@@ -157,9 +157,18 @@ var _wave_clear_credit_per_wave: float = 40.0
 var _shop_slot_count: int = 6
 var _shop_reroll_cost: float = 60.0
 var _shop_sell_rate: float = 0.5
+## v3.45：`_shop_weights` 从「价格倍率」改回「**抽取权重**」（审核 S1）。
+## 语义：普通 / 稀有 / 史诗三档，**权重越高越常出现**（[60,30,10] ⇒ 60% / 30% / 10%）。
 var _shop_weights: Array = [60, 30, 10]
+## 各档的价格倍率。**默认全 1.0** —— 即「价格就是 `price` 字段本身」，
+## 与 v3.44 的实际成交价一致（旧版把权重当倍率，等效于 ×1.6 / ×1.3 / ×1.1，
+## 那是语义错误产生的副作用，不是设计意图）。要按档调价就改这个数组。
+var _shop_tier_price: Array = [1.0, 1.0, 1.0]
 var _shop_common_max: float = 80.0
 var _shop_rare_max: float = 160.0
+## v3.45（审核 S2）：敌人升档的波次阈值，从 `tier_wave_thresholds` 读。
+## 默认值与 v3.44 写死在 `tier_for()` 里的 4/9/14 等价（含义：第 5 波起老兵、第 10 波起精英、第 15 波起王牌）。
+var _tier_thresholds: Dictionary = {"recruit": 1, "veteran": 5, "elite": 10, "ace": 15}
 var _wall_base: float = 4.0
 var _wall_per_speed: float = 0.05
 var _wall_min_speed: float = 20.0
@@ -220,9 +229,18 @@ func _read_config() -> void:
 	_shop_slot_count = maxi(definitions.block_int("survival", "shop_slot_count", 6), 1)
 	_shop_reroll_cost = definitions.block_number("survival", "shop_reroll_cost", 60.0)
 	_shop_sell_rate = definitions.block_number("survival", "shop_sell_rate", 0.5)
+	## v3.45（审核 S1）：`shop_rarity_weight` 现在真的是**抽取权重**（越高越常出现），
+	## 不再是价格倍率。价格另由 `shop_tier_price_multiplier` 控制（默认全 1.0）。
 	var raw_weights: Variant = definitions.registry.globals.get("survival", {}).get("shop_rarity_weight", [])
 	if raw_weights is Array and (raw_weights as Array).size() >= 3:
 		_shop_weights = (raw_weights as Array).duplicate()
+	var raw_tier_price: Variant = definitions.registry.globals.get("survival", {}).get("shop_tier_price_multiplier", [])
+	if raw_tier_price is Array and (raw_tier_price as Array).size() >= 3:
+		_shop_tier_price = (raw_tier_price as Array).duplicate()
+	## v3.45（审核 S2）：敌人升档阈值也走 data。缺键 / 类型不对时保留默认值。
+	var raw_thresholds: Variant = definitions.registry.globals.get("survival", {}).get("tier_wave_thresholds", {})
+	if raw_thresholds is Dictionary and not (raw_thresholds as Dictionary).is_empty():
+		_tier_thresholds = (raw_thresholds as Dictionary).duplicate()
 	_shop_common_max = definitions.block_number("survival", "shop_common_price_max", 80.0)
 	_shop_rare_max = definitions.block_number("survival", "shop_rare_price_max", 160.0)
 	_wall_base = definitions.global_number("wall_impact_damage_base", 4.0)
@@ -351,14 +369,17 @@ func enemy_quota_for(current_wave: int) -> int:
 
 ## 当前波对应的敌人档位（design §14.8 敌人级别表）。
 ## Boss 波额外抬高到**至少精英**（design §3.4.5：“Boss 的 AI 档位取当前波次对应的最高档（≥ 精英）”）。
+##
+## v3.45（审核 S2）：升档阈值从**代码内魔数**改为**数据表** `tier_wave_thresholds`。
+## 旧版把 4 / 9 / 14 写死在这里，而同一个 `survival` 块里的 `wave_time_s` / `enemy_count_*` /
+## `boss_every` 全都从 data 读 —— 这是全项目「数据驱动」纪律的**唯一**系统性破口，
+## 而且恰好是最需要反复调参的那一处。现在改表即改难度。
 func tier_for(current_wave: int) -> String:
 	var tier := BotAI.TIER_RECRUIT
-	if current_wave > 4:
-		tier = BotAI.TIER_VETERAN
-	if current_wave > 9:
-		tier = BotAI.TIER_ELITE
-	if current_wave > 14:
-		tier = BotAI.TIER_ACE
+	for candidate in BotAI.TIERS:
+		var threshold := int(_tier_thresholds.get(String(candidate), 1))
+		if current_wave >= threshold:
+			tier = String(candidate)
 	if current_wave % _boss_every == 0 and BotAI.TIERS.find(tier) < BotAI.TIERS.find(BotAI.TIER_ELITE):
 		tier = BotAI.TIER_ELITE
 	return tier
@@ -936,6 +957,10 @@ func shop_sell_rate() -> float:
 	return _shop_sell_rate
 
 ## 整体重掷 6 个商品位；同一次刷新内不重复（design §3.4.3）。
+##
+## v3.45（审核 S1）：**抽取按稀有度加权**。旧版对所有 `price > 0` 的模块**均匀**抽，
+## `shop_rarity_weight` 完全不参与概率（只被当成价格倍率），于是 6 cr 的直管与 260 cr 的
+## `modifier_mk3` 出现概率完全相同 —— 「稀有商品」名不副实。现在按价格定档后按权重抽。
 func _roll_shop() -> void:
 	shop_slots.clear()
 	var pool: Array = []
@@ -947,33 +972,70 @@ func _roll_shop() -> void:
 	pool.sort()
 	if pool.is_empty():
 		return
+	## 预先按档分组（池子每次刷新重建，但模块目录只有 48 件，成本可忽略）。
+	var by_tier: Array = [[], [], []]
+	for module_id in pool:
+		var price := float(definitions.get_module(String(module_id)).get("price", 0.0))
+		by_tier[_rarity_tier(price)].append(String(module_id))
 	var chosen := {}
 	var guard := 0
 	while shop_slots.size() < _shop_slot_count and guard < _shop_slot_count * 16:
 		guard += 1
-		var module_id := String(pool[int(_next_unit() * float(pool.size())) % pool.size()])
-		if chosen.has(module_id):
+		var module_id := _weighted_pick(by_tier)
+		if module_id.is_empty() or chosen.has(module_id):
 			continue
 		chosen[module_id] = true
-		var def: Dictionary = definitions.get_module(module_id)
-		var price := float(def.get("price", 0.0)) * _rarity_multiplier(float(def.get("price", 0.0)))
+		## `get_module()` 每次深拷贝（审核 S5），所以只取一次复用。
+		var picked_price := float(definitions.get_module(module_id).get("price", 0.0))
+		var price := picked_price * _tier_price_multiplier(_rarity_tier(picked_price))
 		shop_slots.append({"kind": "module", "id": module_id, "price": price, "sold": false})
 
-## 稀有度按价格分档加权（design §14.8 `SHOP_RARITY_WEIGHT`）：
-## 普通 = 权重 0、稀有 = 权重 1、史诗 = 权重 2，取当前价所在档的倍率。
-func _rarity_multiplier(price: float) -> float:
-	var tier := 0
+## 按价格定档：0 = 普通、1 = 稀有、2 = 史诗。
+## 判据只有两个阈值（`shop_common_price_max` / `shop_rare_price_max`），与定价完全解耦。
+func _rarity_tier(price: float) -> int:
 	if price > _shop_rare_max:
-		tier = 2
-	elif price > _shop_common_max:
-		tier = 1
+		return 2
+	if price > _shop_common_max:
+		return 1
+	return 0
+
+## 按档权重抽一件；该档为空时向相邻档回退，全空返回空串。
+## **权重决定出现概率**：普通 60 / 稀有 30 / 史诗 10 ⇒ 三档被选中的比例 6:3:1。
+func _weighted_pick(by_tier: Array) -> String:
+	var tiers: Array = []
+	var weights: Array = []
+	for tier in range(by_tier.size()):
+		if (by_tier[tier] as Array).is_empty():
+			continue
+		tiers.append(tier)
+		weights.append(float(_shop_weights[mini(tier, _shop_weights.size() - 1)]))
+	if tiers.is_empty():
+		return ""
 	var total := 0.0
-	for raw in _shop_weights:
+	for raw in weights:
 		total += float(raw)
 	if total <= 0.0:
+		## 权重全为 0 时退回等概率，避免整层空转。
+		var flat: int = int(tiers[int(_next_unit() * float(tiers.size())) % tiers.size()])
+		var flat_pool: Array = by_tier[flat]
+		return String(flat_pool[int(_next_unit() * float(flat_pool.size())) % flat_pool.size()])
+	## 按累计权重抽一次（只抽一次随机数，确定性纪律不变）。
+	var roll := _next_unit() * total
+	var pick_tier: int = int(tiers[tiers.size() - 1])
+	var cursor := 0.0
+	for index in range(tiers.size()):
+		cursor += float(weights[index])
+		if roll < cursor:
+			pick_tier = int(tiers[index])
+			break
+	var picked: Array = by_tier[pick_tier]
+	return String(picked[int(_next_unit() * float(picked.size())) % picked.size()])
+
+## 各档的价格倍率（`shop_tier_price_multiplier`，默认 [1,1,1] = 原价）。
+func _tier_price_multiplier(tier: int) -> float:
+	if _shop_tier_price.is_empty():
 		return 1.0
-	var weight := float(_shop_weights[mini(tier, _shop_weights.size() - 1)])
-	return 1.0 + weight / total
+	return float(_shop_tier_price[mini(tier, _shop_tier_price.size() - 1)])
 
 ## 花 `credit` 重掷全部商品位；价格不随次数递增（Q30）。
 func reroll_shop() -> bool:

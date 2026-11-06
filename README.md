@@ -4,7 +4,7 @@
 
 玩家在网格上从零搭一台坦克：先铺**平台**，再挂**行进机构**，最后堆**功能模块**。炮弹不是凭空出现的——它要被**制造、被输送、被装填**，所以「内部物流布局」和「外形武器」同样重要。打掉对手一段甲板，可能让他的整条弹药管路失效。
 
-> **当前状态：可运行的实现原型，尚未发布。** 核心玩法（建造 / 物理 / 弹药网络 / 战斗结算 / AI / 波次生存）均已实现并有 23 项自动化 smoke 测试覆盖；**Windows release exe 已能一键构建并已 headless 实跑通过**（见「构建 release exe」）。**真人试玩由用户持续进行**（本项目几乎所有缺陷与需求都来自用户实机试玩）；**AI 侧的验证手段是 headless 测试 + 脚本驱动截图 + 像素比对**，不是人工试玩。**没有产出过任何 APK**。
+> **当前状态：可运行的实现原型，尚未发布。** 核心玩法（建造 / 物理 / 弹药网络 / 战斗结算 / AI / 波次生存）均已实现并有 26 项自动化 smoke 测试覆盖；**Windows release exe 已能一键构建并已 headless 实跑通过**（见「构建 release exe」）。**真人试玩由用户持续进行**（本项目几乎所有缺陷与需求都来自用户实机试玩）；**AI 侧的验证手段是 headless 测试 + 脚本驱动截图 + 像素比对**，不是人工试玩。**没有产出过任何 APK**。
 
 ---
 
@@ -161,7 +161,7 @@ build_release.bat
 
 ## 测试
 
-23 项 smoke，全部 headless、无外部依赖：
+26 项 smoke，全部 headless、无外部依赖：
 
 ```bash
 godot --headless --path . --script res://tests/ammo_combo_smoke.gd
@@ -180,6 +180,7 @@ godot --headless --path . --script res://tests/ammo_combo_smoke.gd
 | `runtime_build_smoke.gd` | `RUNTIME_OK` |
 | `data_smoke.gd` | `DATA_OK` |
 | `data_error_smoke.gd` | `DATA_ERROR_OK` |
+| `data_strict_smoke.gd` | `STRICT_OK` |
 | `combat_smoke.gd` | `COMBAT_OK` |
 | `match_smoke.gd` | `MATCH_OK` |
 | `expedition_smoke.gd` | `EXPEDITION_OK` |
@@ -192,8 +193,14 @@ godot --headless --path . --script res://tests/ammo_combo_smoke.gd
 | `conveyor_showcase_smoke.gd` | `SHOWCASE_OK` |
 | `cannon_view_smoke.gd` | `CANNONVIEW_OK` |
 | `camera_zoom_smoke.gd` | `CAMERA_OK` |
+| `blueprint_roundtrip_smoke.gd` | `BPROUND_OK` |
+| `selfcheck_smoke.gd` | `SELFCHECK_OK` |
 
-> `perf_smoke` 只断言 **p99 / max**，**刻意不断言平均**——平均会掩盖长尾卡顿。阈值由反向对照校准（关掉加速后 `PERF_FAIL count=3`），详见 `docs/design.md` §11.4.2.14。
+> `data_strict_smoke` 是**严格 JSON 门禁**：递归扫 `res://data` 下全部 26 个 `.json`，查**尾逗号 / `//` 行注释 / `NaN` / `Infinity` / 单引号**（判据来自 RFC 8259）。它**刻意不用 `JSON.parse_string()` 做严格性检查** —— 那个函数恰恰**容忍尾逗号**，用它复检等于自证（v3.39「测试与实现共谋」的教训）；尾逗号扫描显式维护 `in_string` / `escaped` 状态以跳过字符串内部。**它守的是一个真实缺陷**：`data/globals.json` 曾有一处尾逗号（闭合 `global` 块的那个 `},`），Godot 容忍、标准工具拒绝，v3.46 已删。
+>
+> `blueprint_roundtrip_smoke` 是**蓝图存盘圆程回归**：装两件改进装置并配好升级 → 序列化 → 反序列化 → 逐项断言读回值等于写入值、再次序列化**逐字节稳定**、存档**不含 `intrinsic`**、**旧存档（完全没有 `upgrades` 字段）照样能读且读成空配置**、未知 id 丢弃与超槽截断**不整条失败**。它守的是 v3.45 审核报告的唯一 **P0**：`_serialize_parts()` / `_parse_part()` 曾都不处理 `upgrades`，改装页配好的改进槽「存盘即静默丢失」。
+>
+> `selfcheck_smoke` 是**门禁而不是普通测试**：扫 `tests/*.gd` 的全部 `func _check_xxx(` 定义，逐行统计**调用点**（跳过空行、`#` 注释行、定义行），调用点为 0 即打 `SELFCHECK_UNCALLED <file>::<name>` 并计为失败；反向要求 `defs >= 120` 防止「一个都没扫到」假装全绿。**为什么需要它**：v3.44 一轮修了 9 个睡觉的验收、审核又查出 1 个、v3.46 门禁首跑又抓出 1 个 —— 两轮都靠「人手数一遍」才发现。当前 `defs=128 called=128`。
 >
 > `drive_feedback_smoke` 实例化真实 `main.tscn` 进试驾页，把坦克摆到贴边并给一个朝墙的速度，逐固定步长断言「撞墙产生伤害 / 命中闪光被置位 / 动效层出现 `-N` 承受语义的伤害数字」。**它存在的理由**：试驾页的弹丸永远打不到发射者自己，所以「命中反馈」这类改动若写错分支，静态截图完全看不出来。该测试已用**变异测试**证明非空转（删掉产品代码里的推入调用后立即失败），详见 `docs/design.md` §11.4.2.15。
 >
@@ -297,9 +304,16 @@ TankCraft/
 - **生存模式高波次仍偶发超预算**：wave12 有约 **36/900 步（4%）**单步超过 16.67 ms（p99 19.0 / max 21.7 ms）。碰撞层已从 O(n²) 改为空间分桶（`docs/design.md` §11.4.2.14），但补兵时 `spawn_enemy_us` 仍有 2.6–10.7 ms 的单帧尖峰；而且**只测了逻辑层，绘制层未测**。
 - **release exe 已能构建，但从未在真实桌面（带窗口）运行过。** `build\windows\TankCraft.exe` **109,825,632 B（104.74 MB）** / SHA256 `0528eb87…338de7`，`--debug` 版 103,733,856 B，连跑两次逐字节一致，PE 为 `PE32+` / `x86_64` / `SUBSYSTEM=2` 且尾部带 `GDPC`（单文件内嵌 pck）。实跑证据：`TankCraft.exe --headless --quit-after 600 -- --screen=survival --steps=200` → 5.5 s 正常退出、stderr 仅 `SURVIVAL_ENTERED wave=1 enemies=2 houses=4 debris=6`、**无 `SCRIPT ERROR`**。但**全部验证都是 `--headless`**（`WINDOW_MODE mode=1 size=(0, 0)` 就是 headless display server 的表现），**没有人双击运行过它、没有人看过它的画面**。另外 `build/` 被 `.gitignore` 忽略，**exe 不在仓库里**；`--install-templates` 的 **`-All` 整包分支从未跑通**（只验证了默认的「只取 Windows 条目」分支）。
 - **桌面 exe 没有任何人工启动验证**：它只在 `--headless` 下被跑过（且只跑到主菜单/生存模式初始化），Android 也没有 APK。**注意：这一条讲的是「exe 从未被双击启动」，不是「游戏没人玩」——游戏本身一直由用户实机试玩。**
+- **蓝图现在会保存改进槽配置（v3.46 修复）。** 此前 `_serialize_parts()` / `_parse_part()` 都不处理 `upgrades`，改装页配好的改进槽「存盘即静默丢失」（`Ctrl+S` 提示保存成功、`Ctrl+O` 提示读回成功，**但槽位是空的**）。现在序列化写出 `upgrades`（**空数组也写**，圆程逐字节稳定）、反序列化走与建造期**同源**的校验（未知 id 丢弃 / 超槽截断 / 按 `stack_limit` 去重，**非法项不整条失败**）。**尚未经过用户实机确认**，尤其「存盘 → 重启 → 读回，槽位还在」这条端到端链路目前只有 headless 证据。
+- **商店稀有度权重语义已纠正（v3.46）。** `shop_rarity_weight = [60, 30, 10]` 旧版被当成**价格倍率**用、而抽取是全池均匀的（「稀有商品」名不副实）；现在真的是**抽取权重**（实测占比 **0.602 / 0.301 / 0.098**）。**成交价没变**（新增 `shop_tier_price_multiplier` 默认全 1.0），变的是**哪些商品会出现** —— 低价普通件（尤其 6 cr 的六种 conveyor）明显更常见、史诗件更少见。要按档调价就改那个倍率数组，**不要改权重**。
+- **生存难度阈值已进 data（v3.46）。** 敌人升档波次不再写死在代码里，改读 `data/globals.json` 的 `survival.tier_wave_thresholds`（默认 `{"recruit":1,"veteran":5,"elite":10,"ace":15}`）。**默认值与旧的写死值完全等价**，所以本次搬进 data 没有顺手改难度；以后调难度只改 JSON，不动代码。
+- **`data/globals.json` 现在能被标准 JSON 工具直接解析（v3.46）。** 此前有一处尾逗号（闭合 `global` 块的那个 `},`），Godot 容忍、标准工具拒绝；已删除，并新增 `tests/data_strict_smoke.gd` 门禁（26 个 JSON，查尾逗号 / 注释 / `NaN` / `Infinity` / 单引号）。
+- **测试数已到 26 项（v3.46）。** 新增 `blueprint_roundtrip_smoke` / `data_strict_smoke` / `selfcheck_smoke`。其中 `selfcheck_smoke` 是**门禁**：扫全部 `tests/*.gd` 的 `_check_*` 定义并统计调用点（跳过注释行与定义行），**定义了没调用**直接判失败（`defs=128 called=128`）。同轮把两条睡觉的验收接上（`physics_smoke._check_performance` 与 `camera_zoom_smoke._check_negative_control`），后者使 `CAMERA_OK checks=594 → 600`。
+
 - `expedition_run.gd` / `runtime_builder.gd` 仍存在但**无任何玩法调用方**。
-- 若干旧缺口：`boss_armor` 未实现、`safe_radius` 从未被读取、商店稀有度权重方向反、竞技场障碍 `hp` 无人扣减（障碍不可摧毁）。
-- **实现设计审核结论见 `docs/audit_report.md`**（v3.45，8 节 / 509 行，**只审核不改码**）。唯一 **P0**：**蓝图不保存改进槽配置** —— `grid_builder._parse_part()` / `_serialize_parts()` 都不处理 `upgrades`，在改装页用 `Q/E` + `T` 配好的改进槽，`Ctrl+S` 会提示保存成功、`Ctrl+O` 会提示读回成功，**但槽位是空的**（静默丢失、无警告）。其余三条横切空白：**无 `[input]` 段**（95 处 `KEY_*` 硬编码、`Input.is_action_*` 0 处 ⇒ 键位不可重绑定，手柄与触屏无从下手）、**无音频**（仓库内 0 个 `.wav`/`.ogg`、0 处 `AudioStream`，但 `Duel.drain_events()` 已在产出 `muzzle`/`impact`/`destroyed`/`expire` 等事件，只缺消费者）、**单语言硬编码**（156 处中文文案、`tr()` 0 处；单语言是当前正确选择，只需在 design 里显式声明、不必强行引入 `tr()`）。审核同时确认**领域层（10 个模块、preload 单向 DAG、零反向引用）是项目最好的资产**，报告明确不建议为了「架构整洁」去动它。
+- 若干旧缺口：`boss_armor` 未实现、`safe_radius` 从未被读取、竞技场障碍 `hp` 无人扣减（障碍不可摧毁）。**商店稀有度权重方向已在 v3.46 修正**（见下条）。
+- **实现设计审核结论见 `docs/audit_report.md`**（v3.45，8 节 / 509 行，**只审核不改码**）。**v3.46 已执行报告 §7.1 + §7.2 的 6 项修复**（P0 蓝图槽配置 / 严格 JSON 门禁 / 两条睡觉验收 / 测试自检门禁 / 稀有度加权 / 难度阈值进 data）；**§7.3（有触发条件）与 §7.4（明确不建议）未做**。报告里仍**未修**的横切空白：**无 `[input]` 段**（95 处 `KEY_*` 硬编码、`Input.is_action_*` 0 处 ⇒ 键位不可重绑定，手柄与触屏无从下手）、**无音频**（仓库内 0 个 `.wav`/`.ogg`、0 处 `AudioStream`，但 `Duel.drain_events()` 已在产出 `muzzle`/`impact`/`destroyed`/`expire` 等事件，只缺消费者）、**单语言硬编码**（156 处中文文案、`tr()` 0 处；单语言是当前正确选择，只需在 design 里显式声明、不必强行引入 `tr()`）。审核同时确认**领域层（10 个模块、preload 单向 DAG、零反向引用）是项目最好的资产**，报告明确不建议为了「架构整洁」去动它。
+- **审核报告 §6 里的第三次事实更正（v3.46）**：我在 v3.45 报告里曾「自我更正」说 `camera_zoom_smoke._check_negative_control` 其实已被调用 —— **那个更正本身是错的**。该函数第 19 行是**注释**、第 278 行是**定义**，`_init()` 的 12 个调用里确实没有它。原判断是对的，「真未调用」应为 **2 个**而非 1 个。
 
 完整清单见 `agent_note.md` §8 与 `docs/design.md` §17。
 

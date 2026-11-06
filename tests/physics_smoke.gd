@@ -44,6 +44,11 @@ func _init() -> void:
 		return
 	if not _check_spin_stop(definitions):
 		return
+	## v3.45：这一条从 v3.30 起就定义在文件里，但**从未被 `_init()` 调用** ——
+	## doctor 一直没跑过。审核复查时通过独立探针确认它在当前代码下是绿的，
+	## 现在正式接入，让 `PHYSICS_OK` 名副其实。
+	if not _check_performance(definitions):
+		return
 	var turn_s := _measure_turn(definitions)
 	var spin_s := _measure_spin_stop(definitions)
 	print("PHYSICS_OK mass=%.1f inertia=%.0f v_max=%.1f turn180_s=%.2f spin_stop_s=%.2f" % [

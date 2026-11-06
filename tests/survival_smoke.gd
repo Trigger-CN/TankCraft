@@ -40,6 +40,8 @@ func _init() -> void:
 	_check_xp_and_levels()
 	_check_level_choices()
 	_check_shop()
+	_check_shop_rarity_weights()
+	_check_tier_thresholds_from_data()
 	_check_boss_wave()
 	_check_modification()
 	_check_player_fire_damage()
@@ -93,7 +95,8 @@ func _check_constants() -> void:
 			"enemy_count_max", "boss_every", "xp_base", "xp_step", "xp_per_kill",
 			"credit_per_kill", "house_hp", "house_armor", "shop_slot_count",
 			"shop_reroll_cost", "shop_sell_rate", "boss_credit_reward", "boss_xp_reward",
-			"boss_drop_count", "props_houses", "props_debris"]:
+			"boss_drop_count", "props_houses", "props_debris", "shop_rarity_weight",
+			"shop_tier_price_multiplier", "tier_wave_thresholds"]:
 		_expect(block.has(key), "constants_key_%s" % key)
 	## 旧 expedition 块必须已经退役——否则玩家会在两个数值源之间漂移。
 	_expect(not definitions.registry.globals.has("expedition"), "constants_expedition_retired")
@@ -497,6 +500,147 @@ func _check_shop() -> void:
 
 	## 无倒带：没有“重开本波”的入口。
 	_expect(not run_state.has_method("restart_wave"), "shop_no_restart_wave")
+
+# ─── 验收 8b：商店稀有度 = 按档加权抽取（v3.46 审核 S1）─────────────────────
+
+## 旧版把 `shop_rarity_weight` 当成**价格倍率**用，而 `_roll_shop()` 对所有 `price > 0` 的
+## 模块**均匀**抽 —— 于是 6 cr 的直管与 260 cr 的 `cockpit_armored` 出现概率完全相同，
+## 「稀有商品」名不副实，`shop_rarity_weight` 这个数据键对玩法毫无影响。
+##
+## 这一条必须能区分「加权」与「均匀」：把权重压成 `[1,0,0]` 后**每一格都必须是普通档**，
+## 压成 `[0,0,1]` 后**每一格都必须是史诗档**。均匀抽在这两种情况下都会照常混出三档。
+func _check_shop_rarity_weights() -> void:
+	var run_state := _make_run()
+	if run_state == null:
+		return
+	run_state.bind_player(_make_rig())
+	run_state.start_wave()
+	run_state._open_shop()
+
+	## 权重与档位边界必须来自 data，不是脚本里的魔数。
+	var block: Dictionary = definitions.registry.globals.get("survival", {})
+	var data_weights: Array = block.get("shop_rarity_weight", [])
+	_expect(data_weights.size() >= 3, "rarity_weight_len_%d" % data_weights.size())
+	if data_weights.size() >= 3:
+		for tier in range(3):
+			_expect_near(float(run_state._shop_weights[tier]), float(data_weights[tier]), "rarity_weight_%d_from_data" % tier)
+
+	## 默认档位倍率全 1.0 ⇒ 成交价就是 `price` 字段本身（与 v3.44 玩家看到的价格一致）。
+	run_state._shop_weights = [60, 30, 10]
+	run_state._shop_tier_price = [1.0, 1.0, 1.0]
+	run_state._rng_state = 4242
+	run_state._roll_shop()
+	var price_mismatch := 0
+	for raw in run_state.shop_slots:
+		var slot: Dictionary = raw
+		var base := float(definitions.get_module(String(slot["id"])).get("price", 0.0))
+		if absf(float(slot["price"]) - base) > 0.001:
+			price_mismatch += 1
+	_expect(price_mismatch == 0, "rarity_default_price_is_field_%d" % price_mismatch)
+
+	## 档位倍率可独立调价：普通档 ×2、其余不变。
+	run_state._shop_tier_price = [2.0, 1.0, 1.0]
+	run_state._rng_state = 4242
+	run_state._roll_shop()
+	var doubled_bad := 0
+	for raw in run_state.shop_slots:
+		var slot: Dictionary = raw
+		var base := float(definitions.get_module(String(slot["id"])).get("price", 0.0))
+		var want := base * (2.0 if run_state._rarity_tier(base) == 0 else 1.0)
+		if absf(float(slot["price"]) - want) > 0.001:
+			doubled_bad += 1
+	_expect(doubled_bad == 0, "rarity_tier_price_applied_%d" % doubled_bad)
+	run_state._shop_tier_price = [1.0, 1.0, 1.0]
+
+	## 权重只留普通档：**每一格都必须是普通档**。
+	run_state._shop_weights = [1, 0, 0]
+	run_state._rng_state = 4242
+	run_state._roll_shop()
+	var common_off := 0
+	for raw in run_state.shop_slots:
+		var slot: Dictionary = raw
+		var base := float(definitions.get_module(String(slot["id"])).get("price", 0.0))
+		if run_state._rarity_tier(base) != 0:
+			common_off += 1
+	_expect(run_state.shop_slots.size() == run_state._shop_slot_count, "rarity_forced_common_fills_%d" % run_state.shop_slots.size())
+	_expect(common_off == 0, "rarity_forced_common_off_tier_%d" % common_off)
+
+	## 权重只留史诗档：**每一格都必须是史诗档**。
+	run_state._shop_weights = [0, 0, 1]
+	run_state._rng_state = 4242
+	run_state._roll_shop()
+	var epic_off := 0
+	for raw in run_state.shop_slots:
+		var slot: Dictionary = raw
+		var base := float(definitions.get_module(String(slot["id"])).get("price", 0.0))
+		if run_state._rarity_tier(base) != 2:
+			epic_off += 1
+	_expect(epic_off == 0, "rarity_forced_epic_off_tier_%d" % epic_off)
+
+	## 默认 60/30/10 的长期分布：普通档必须显著多于史诗档。
+	## 这是「权重真的参与概率」的统计侧证据（上面两条是决定性证据）。
+	run_state._shop_weights = [60, 30, 10]
+	run_state._rng_state = 4242
+	var hits := [0, 0, 0]
+	for _i in range(120):
+		run_state._roll_shop()
+		for raw in run_state.shop_slots:
+			var slot: Dictionary = raw
+			var base := float(definitions.get_module(String(slot["id"])).get("price", 0.0))
+			var tier: int = run_state._rarity_tier(base)
+			hits[tier] = int(hits[tier]) + 1
+	var total: int = int(hits[0]) + int(hits[1]) + int(hits[2])
+	_expect(total > 0, "rarity_sample_nonempty")
+	if total > 0:
+		var common_share := float(hits[0]) / float(total)
+		var epic_share := float(hits[2]) / float(total)
+		_expect(common_share > 0.50, "rarity_common_share_%.3f" % common_share)
+		_expect(epic_share < 0.15, "rarity_epic_share_%.3f" % epic_share)
+		_expect(int(hits[0]) > int(hits[2]), "rarity_common_beats_epic_%d_%d" % [hits[0], hits[2]])
+
+# ─── 验收 1b：敌人升档阈值来自 data（v3.46 审核 S2）────────────────────────
+
+## 旧版把 `4 / 9 / 14` 写死在 `tier_for()` 里，而同一个 `survival` 块里的 `wave_time_s` /
+## `enemy_count_*` / `boss_every` 全都从 data 读 —— 这是全项目「数据驱动」纪律的唯一系统性
+## 破口，而且恰好是最需要反复调参的那一处。
+##
+## 这一条必须能区分「读表」与「写死魔数」：换一张表后 `tier_for()` 必须跟着变。
+func _check_tier_thresholds_from_data() -> void:
+	var run_state := _make_run()
+	if run_state == null:
+		return
+	var block: Dictionary = definitions.registry.globals.get("survival", {})
+	_expect(block.has("tier_wave_thresholds"), "tier_thresholds_in_data")
+	var data_table: Dictionary = block.get("tier_wave_thresholds", {})
+	for tier in BotAI.TIERS:
+		_expect(data_table.has(String(tier)), "tier_thresholds_key_%s" % tier)
+		_expect_near(float(run_state._tier_thresholds.get(String(tier), -1)), float(data_table.get(String(tier), -2)), "tier_threshold_%s_from_data" % tier)
+
+	## 默认值必须与 v3.44 写死的 4/9/14 等价（第 5 波老兵、第 10 波精英、第 15 波王牌），
+	## 否则这次「搬进 data」会顺手改掉难度。
+	_expect(run_state.tier_for(1) == BotAI.TIER_RECRUIT, "tier_data_w1_recruit")
+	_expect(run_state.tier_for(4) == BotAI.TIER_RECRUIT, "tier_data_w4_recruit")
+	_expect(run_state.tier_for(6) == BotAI.TIER_VETERAN, "tier_data_w6_veteran")
+	_expect(run_state.tier_for(11) == BotAI.TIER_ELITE, "tier_data_w11_elite")
+	_expect(run_state.tier_for(16) == BotAI.TIER_ACE, "tier_data_w16_ace")
+
+	## 换一张表：第 2 波就老兵、第 3 波精英、第 4 波王牌。
+	## **写死 4/9/14 的实现会在这里全部报错** —— 这就是本条断言的区分力来源。
+	run_state._tier_thresholds = {"recruit": 1, "veteran": 2, "elite": 3, "ace": 4}
+	_expect(run_state.tier_for(1) == BotAI.TIER_RECRUIT, "tier_custom_w1")
+	_expect(run_state.tier_for(2) == BotAI.TIER_VETERAN, "tier_custom_w2")
+	_expect(run_state.tier_for(3) == BotAI.TIER_ELITE, "tier_custom_w3")
+	_expect(run_state.tier_for(4) == BotAI.TIER_ACE, "tier_custom_w4")
+
+	## 把阈值推远：第 2、3 波都还应该是新兵。
+	run_state._tier_thresholds = {"recruit": 1, "veteran": 100, "elite": 200, "ace": 300}
+	_expect(run_state.tier_for(1) == BotAI.TIER_RECRUIT, "tier_late_w1")
+	_expect(run_state.tier_for(2) == BotAI.TIER_RECRUIT, "tier_late_w2")
+	_expect(run_state.tier_for(3) == BotAI.TIER_RECRUIT, "tier_late_w3")
+
+	## Boss 波「至少精英」是独立规则，不能被阈值表覆盖掉。
+	_expect(run_state.tier_for(5) == BotAI.TIER_ELITE, "tier_late_boss_w5_floor")
+	_expect(run_state.tier_for(10) == BotAI.TIER_ELITE, "tier_late_boss_w10_floor")
 
 # ─── 验收 9：Boss 波 —— 专用蓝图、更大结构、必掉 3 件 ──────────────────────
 

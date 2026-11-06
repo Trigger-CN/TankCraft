@@ -152,6 +152,11 @@ palette / fx_layer / data_registry / battle_viewport     ← 叶子，无出边
 
 ### S1【P1】稀有度系统语义与命名脱节
 
+### S1【P1】稀有度系统语义与命名脱节
+
+> **✅ 已修复（v3.46）**。`_rarity_multiplier()` 已删除；拆成 `_rarity_tier(price)`（按两个阈值定档，与定价解耦）+ `_weighted_pick(by_tier)`（按累计权重抽档，再在档内抽件）。`shop_rarity_weight` **回归「抽取权重」**语义（实测 1200 样本占比 **0.602 / 0.301 / 0.098**），价格改由新增的 `shop_tier_price_multiplier`（默认 `[1.0, 1.0, 1.0]` ⇒ 成交价与 v3.44 相同）控制。每次抽取**固定 2 次 `_next_unit()`**，确定性纪律未破。补了 `_check_shop_rarity_weights()`（权重压成 `[1,0,0]` → 每格必须普通档、`[0,0,1]` → 每格必须史诗档）；负向对照 `negctl46d.py` 退回全池均匀抽 → 精确报 4 条。**玩家可感知的变化**：价格没变，变的是**哪些商品会出现**（低价普通件明显更常见）。下文保留为缺陷现场记录。
+
+**事实**（`survival_run.gd:939-976`）：
 **事实**（`survival_run.gd:939-976`）：
 
 ```gdscript
@@ -177,6 +182,11 @@ func _rarity_multiplier(price: float) -> float:
 
 ### S2【P1】难度曲线是魔数，与「数据驱动」纪律直接冲突
 
+### S2【P1】难度曲线是魔数，与「数据驱动」纪律直接冲突
+
+> **✅ 已修复（v3.46）**。`tier_for()` 不再写死 `4 / 9 / 14`，改为遍历 `BotAI.TIERS` 读 `_tier_thresholds`，来源是 `data/globals.json` 的 `survival.tier_wave_thresholds`（默认 `{"recruit":1,"veteran":5,"elite":10,"ace":15}` —— **与旧值完全等价**，所以搬进 data 没顺手改难度）。Boss 波「至少精英」的下限规则**独立保留**。`main.gd` 的 `MATCH_DIFFICULTY` 改用 `BotAI.TIERS`，消除字面量副本。补了 `_check_tier_thresholds_from_data()`（换表 `{1,2,3,4}` → w2/w3/w4 必须跟着变）；负向对照 `negctl46e.py` 退回写死 → 精确报 `tier_custom_w2/w3/w4`。下文保留为缺陷现场记录。
+
+**事实**（`survival_run.gd:354-362`）：
 **事实**（`survival_run.gd:354-362`）：
 
 ```gdscript
@@ -287,9 +297,26 @@ func _draw() -> void:
 
 ### B2【P1】测试装置没有自检
 
+> **✅ 已修复（v3.46）**。新增 `tests/selfcheck_smoke.gd`：扫 `tests/*.gd` 的 `func _check_xxx(` 定义并逐行统计**调用点**（跳过空行 / `#` 注释行 / 定义行），调用点为 0 即报 `SELFCHECK_UNCALLED` 并计失败；反向要求 `defs >= 120`。当前 `SELFCHECK_OK defs=128 called=128`。`physics_smoke._check_performance(definitions)` 已接入 `_init()`（先用探针确认它在当前代码下是绿的，**只接调用、不改阈值**）。**下文 §292 那段「审核后更正」本身是错的，已在下方就地更正。**
+
 见 §2.4。**128 个 `_check_*` 中 1 个确定从未被调用**：`physics_smoke._check_performance(definitions)`（`physics_smoke.gd` 全文仅出现 1 次）。
 
-> **审核后更正**：原本我写的是「2 个」，因为 `camera_zoom_smoke._check_negative_control` 被我的判定脚本误报。用 `File_Search` 逐条核实后：该名字在 `camera_zoom_smoke.gd` 里出现 **2 次**（定义 + 调用），**它是被调用的**。所以我最初写的判定脚本（按「同名出现 < 2 次」判未调用）在「有定义、有调用」时会给 2、在「有定义、无调用」时给 1，原理上可用；我误报的真正原因是没有逐条读输出。**这条教训与 §6 第 3 条同一根源。**
+> **⚠️ 就地更正（v3.46，第三次事实更正）**：下面这段「审核后更正」**本身是错的**。
+>
+> 它写「`camera_zoom_smoke._check_negative_control` 出现 **2 次**（定义 + 调用），**它是被调用的**」。**实测不是。** `Select-String` 逐行列出全文只有两处：
+>
+> ```
+> 19  | ## 内部的夹取写法无关。配套的 `_check_negative_control` 把旧 0.5× 公式**独立重算**
+> 278 | func _check_negative_control() -> void:
+> ```
+>
+> 即 **一行注释 + 一行定义**。`_init()` 第 56–67 行调用的 12 个 `_check_*` 里**没有它**。
+>
+> **错在哪里**：我用「同名出现 2 次 ⇒ 有一次调用」这个**原始判据**去复核另一个原始判据，把**注释里的一次提及**当成了调用点，于是把一个**正确的发现推翻了**。
+>
+> **正确的结论**：**128 个 `_check_*` 里确有 2 个从未被调用** —— `physics_smoke._check_performance` **与** `camera_zoom_smoke._check_negative_control`。两者均已在 v3.46 接入 `_init()`（后者使 `CAMERA_OK checks=594 → 600`，+6 条断言）。
+>
+> **教训**：判「是否被调用」必须看**那一行是什么**（定义 / 注释 / 调用），不能只数次数。这条已写进 `agent_note.md` §8。
 
 **同类/通用做法**：测试清单的「定义 - 调用」一致性应由**测试框架自身**保证，而不是靠人肉 review。GDScript 没有反射枚举函数，但可以用**极简源码扫描**实现。
 
@@ -309,6 +336,8 @@ func _draw() -> void:
 **这条的价值**：v3.44 刚花了一整轮发现并修 9 处同类问题；一个 30 行的门禁可以让它**永不复发**。
 
 ### B3【P2】数据文件不是合法标准 JSON
+
+> **✅ 已修复（v3.46）**。唯一一处真尾逗号已从 `git show HEAD:` 的原始字节用正则 `,(\s*[}\]])` 精确删除（断言「严格 JSON 能解析」+「**语义完全相同**」+「字节增量 −1」）。另新增 `tests/data_strict_smoke.gd`（28 条 / 26 个 JSON）作为**门禁**：查尾逗号 / `//` 行注释 / `NaN` / `Infinity` / 单引号；**刻意不用 `JSON.parse_string()` 做严格性检查** —— 它恰恰容忍尾逗号，用它复检等于自证。下文保留为缺陷现场记录。
 
 `data/globals.json` 第 53 行 `"tank_collision_coefficient": 0.04,` 后面紧跟 `},` —— **尾逗号**。
 
@@ -372,6 +401,11 @@ func _draw() -> void:
 
 ### C2【P2】蓝图不保存改进槽配置（**本报告唯一的 P0 级玩法缺陷**）
 
+### C2【P2】蓝图不保存改进槽配置（**本报告唯一的 P0 级玩法缺陷**）
+
+> **✅ 已修复（v3.46）**。`_serialize_parts()` 现在对带 `upgrade_slots` 的模块写出 `upgrades`（空数组也写），`_parse_part()` 读回，新增 `_parse_upgrades()` 走与 `set_modifier_upgrades()` 同源的校验（未知 id 丢弃 / 超槽截断 / 按 `stack_limit` 去重，**非法项不整条失败**）；`data_validator.validate_blueprint()` 新增第 5 参 `upgrade_ids`、`data_registry` 传参。新增回归 `tests/blueprint_roundtrip_smoke.gd`（20 条）；负向对照 `negctl46.py` 撤掉序列化后精确报 3 条。**尚未经过用户实机确认**（存盘 → 重启 → 读回的端到端链路只有 headless 证据）。下文保留为缺陷现场记录。
+
+**事实**（`grid_builder.gd`）：
 **事实**（`grid_builder.gd`）：
 
 - `set_modifier_upgrades(cell, upgrades)` 把升级写进 `part["upgrades"]`；
@@ -396,6 +430,8 @@ func _draw() -> void:
 - 加一条 smoke：构造带 2 个槽配置的车 → 序列化 → 反序列化 → 断言 `modifier_upgrades_at()` 逐项相等。
 
 ### C3【P2】无音频层
+
+> **⏸ 未修复（v3.46 刻意不做）**：报告 §7.3 给它的触发条件是「素材到位」。仓库内仍 0 个 `.wav` / `.ogg`，建事件层也没有东西可放。下文保留。
 
 `AudioStream` / `.wav` / `.ogg` 全为 0。
 
@@ -449,6 +485,21 @@ func _draw() -> void:
 ---
 
 ## 7. 优先级与执行建议
+
+> **执行状态（v3.46，用户指令「按照建议开始修复」）**：§7.1 的 3 项 + §7.2 的 3 项，**共 6 项已全部落地并验证**；§7.3（触发条件未到）与 §7.4（明确不建议）**刻意未做**。
+>
+> | # | 项 | 状态 |
+> | --- | --- | --- |
+> | 1 | 蓝图保存改进槽配置（C2 / P0） | ✅ 已修（`BPROUND_OK checks=20`；负向 `NEGCTL46_PASS`） |
+> | 2 | 删 `globals.json` 尾逗号（B3） | ✅ 已修（`SEMANTIC_IDENTICAL True` / `DELTA -1` 字节；`STRICT_OK`） |
+> | 3 | 补未调用的验收（B2） | ✅ 已修（`physics_smoke` 接入 `_check_performance`，数值与基线逐字相同） |
+> | 4 | 测试自检门禁（B2） | ✅ 已修（`SELFCHECK_OK defs=128 called=128`） |
+> | 5 | 稀有度按档加权抽取（S1） | ✅ 已修（实测占比 0.602/0.301/0.098；负向 `NEGCTL46D_PASS`） |
+> | 6 | 难度曲线进 data（S2） | ✅ 已修（默认值与旧 4/9/14 完全等价；负向 `NEGCTL46E_PASS`） |
+>
+> 全量回归 `s46_all.txt` **26 项全绿**，`PHYSICS_OK` / `CANNON_OK` / `BUILD_OK` / `RUNTIME_OK` / `DATA_OK` / `DATA_ERROR_OK` / `CANNONVIEW_OK` / `PERF_OK` 与 v3.45 基线**逐字相同**；唯一数值变化是 **`CAMERA_OK checks=594 → 600`**（接入 `camera_zoom_smoke._check_negative_control`，+6 条断言）。
+>
+> **本次改动尚未经过用户实机确认**；全部证据为 headless smoke + 负向对照 + 探针断言，**没有做 profile**。
 
 ### 7.1 立即做（1–2 小时内可完成，风险极低）
 
@@ -507,3 +558,11 @@ func _draw() -> void:
 
 > 报告生成于提交 `be376fc`（v3.44）。审核过程未修改任何产品代码。
 > 所有行号/计数均可用 `.me/tmp/main/audit_*.py` 五个探针脚本重新复现。
+>
+> **v3.46 执行轮更新**：报告正文（§0–§6）**保留为快照，未重写**；只就地加注「已修复 / 未修复」并补上第三次事实更正（见 §4 B2）。报告里的行号仍对应 `be376fc` 的 `File.Read` 口径。执行后的代码状态见 `docs/design.md` §11.4.2.25 与 `docs/roadmap.md` §0/§5 的 v3.46 行。
+>
+> **本报告里我自己写错、并在执行轮发现的三处，已全部就地更正且不得隐去**：
+>
+> 1. §4 B2 的「审核后更正」**本身是错的** —— `camera_zoom_smoke._check_negative_control` 确实**从未被调用**（第 19 行是注释、第 278 行是定义），「真未调用」应为 **2 个**而非 1 个。
+> 2. 原文把「尾逗号」的位置指向 `tank_collision_coefficient` 那一行 —— 那个逗号是**正常的成员分隔符**，真正的尾逗号是**下一行闭合 `global` 块的那个 `},`**。
+> 3. 本报告「唯一 P0」的修法估计（约 20 行）**偏低**：实际改动 4 个脚本 + 1 个新测试（含数据层校验参数透传）。

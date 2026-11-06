@@ -65,6 +65,10 @@ func _init() -> void:
 	_check_aim_wiring()
 	_check_battle_viewport_geometry()
 	_check_battle_viewport_wiring()
+	## v3.45：这一条从 v3.40 重写时就定义在文件里，但 **从未被 `_init()` 调用**。
+	## 它是全文件唯一「对旧缺陷敏感度」的证明（独立重算 v3.38 的旧 0.5× 公式并断言它必须溢出），
+	## 不接入的话，「本测试对旧缺陷真的敏感」就只是注释里的一句话。
+	_check_negative_control()
 
 	if _failures == 0:
 		print("CAMERA_OK checks=%d" % _checks)

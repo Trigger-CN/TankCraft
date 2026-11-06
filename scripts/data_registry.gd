@@ -108,7 +108,8 @@ func _load_blueprint_dir(directory: String, validator: Validator) -> void:
 		var data: Variant = _read_json(path)
 		if data == null:
 			continue
-		var validation := validator.validate_blueprint(path, data, modules, ammo)
+		## v3.45：把 `upgrades` 也传进去 —— 蓝图现在会携带改进槽配置，校验器必须能验证这些 id。
+		var validation := validator.validate_blueprint(path, data, modules, ammo, upgrades)
 		_append_errors(validation)
 		if validation.is_empty():
 			var blueprint_id := path.get_file().get_basename()

@@ -68,7 +68,10 @@ const BUILD_TOOL_Y := 800.0
 const LAYER_DIM_ALPHA := 0.22
 const MENU_ITEM_COUNT := 6
 ## M6：对战难度档（对应 design §10.3 四档）。
-const MATCH_DIFFICULTY := ["recruit", "veteran", "elite", "ace"]
+## v3.45（审核 S5）：不再写死字面量 —— 直接引用 `BotAI.TIERS` 单一来源。
+## 旧版这里是一个独立的 `["recruit","veteran","elite","ace"]` 副本，
+## 将来加档位时两边不同步就会**静默错档**（不报错、只是选到错的敌人）。
+const MATCH_DIFFICULTY := BotAI.TIERS
 const MATCH_DIFFICULTY_LABEL := ["新兵", "老兵", "精英", "王牌"]
 const DRIVE_VIEW := Rect2(320.0, 168.0, 1216.0, 684.0)
 const DRIVE_HUD_LEFT := Rect2(48.0, 168.0, 248.0, 684.0)

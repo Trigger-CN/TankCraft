@@ -697,19 +697,58 @@ func _parse_part(raw: Variant) -> Dictionary:
 		return {}
 	var module_id := String(raw.get("id", ""))
 	var pos: Variant = raw.get("pos", [0, 0])
-	if not pos is Array or pos.size() != 2 or definitions.get_module(module_id).is_empty():
+	var module_def: Dictionary = definitions.get_module(module_id)
+	if not pos is Array or pos.size() != 2 or module_def.is_empty():
 		return {}
 	var part := {"id": module_id, "start": Vector2i(int(pos[0]), int(pos[1])), "rot": int(raw.get("rot", 0))}
 	if module_id.begins_with("cannon_"):
 		part["aim"] = int(raw.get("aim", 0))
+	if module_def.has("upgrade_slots"):
+		part["upgrades"] = _parse_upgrades(raw.get("upgrades", []), module_def)
 	return part
+
+## v3.45：把存档里的 `upgrades` 读回 `part["upgrades"]`。
+## **非法项丢弃而不是整条蓝图失败** —— 旧存档 / 被改坏的单一条目不该让
+## 整台坦克打不开。校验规则与 `set_modifier_upgrades()` 同源（id 必须存在、
+## 不超 `upgrade_slots`、按 `stack_limit` 逐 effect 截断），所以建造期配出来的
+## 配置读回来一定还是合法的。
+func _parse_upgrades(raw: Variant, module_def: Dictionary) -> Array:
+	var result: Array = []
+	if not raw is Array:
+		return result
+	var slots := maxi(int(module_def.get("upgrade_slots", 1)), 1)
+	var per_effect: Dictionary = {}
+	for entry in raw:
+		if result.size() >= slots:
+			break
+		var upgrade_id := String(entry)
+		var upgrade_def: Dictionary = definitions.registry.get_upgrade(upgrade_id)
+		if upgrade_def.is_empty():
+			continue
+		var effect := String(upgrade_def.get("effect", upgrade_id))
+		var limit := maxi(int(upgrade_def.get("stack_limit", 1)), 1)
+		var used := int(per_effect.get(effect, 0))
+		if used >= limit:
+			continue
+		per_effect[effect] = used + 1
+		result.append(upgrade_id)
+	return result
 
 func _serialize_parts(parts: Array) -> Array:
 	var result: Array = []
 	for part in parts:
-		var item := {"id": part["id"], "pos": [part["start"].x, part["start"].y], "rot": part["rot"]}
-		if String(part["id"]).begins_with("cannon_"):
+		var module_id := String(part["id"])
+		var item := {"id": module_id, "pos": [part["start"].x, part["start"].y], "rot": part["rot"]}
+		if module_id.begins_with("cannon_"):
 			item["aim"] = part.get("aim", 0)
+		## v3.45：改进槽配置必须进存档，否则改装页配好的管线「存盘即静默丢失」。
+		## **空数组也写**，这样圆程（serialize → parse → serialize）逐字节稳定，
+		## 也让「这个装置本来就没配」与「这个装置配了但字段丢了」在存档里可区分。
+		## **不写 `intrinsic`** —— 它是模块类型的属性，运行期由 `AmmoNetwork._make_part()`
+		## 从 `definitions` 读，写盘会造出第二真源（v3.41 已定过结论）。
+		## `get_module()` 每次深拷贝，所以只取一次（审核 S5：绘制/序列化路径不做重复拷贝）。
+		if definitions != null and definitions.get_module(module_id).has("upgrade_slots"):
+			item["upgrades"] = (part.get("upgrades", []) as Array).duplicate()
 		result.append(item)
 	return result
 

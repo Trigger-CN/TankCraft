@@ -4288,6 +4288,123 @@ frame_events.append({"kind": "wave_cleared", "wave": wave, "credit": last_wave_c
 - 过波奖金只验到「发到了 `credit` 上、事件字段一致」；**不证明玩家在商店页真的注意到了那行文案**。
 - `_boss_credit_reward` 的代码缺省值也一并从 320 改到 460，与 data 保持一致（data 缺失时不会回退到旧值）。
 
+#### 11.4.2.25 执行审核建议的六项修复（v3.46）
+
+**用户原话**：「按照建议开始修复」。指向上一次交付的 `docs/audit_report.md` §7。
+**范围**：§7.1「立即做」3 项 + §7.2「下一轮做」3 项，共 **6 项**。
+**§7.3「有明确触发条件时再做」4 项与 §7.4「明确不建议」4 项刻意未做**（触发条件均未到，理由见报告原文）。
+
+##### 一、P0：蓝图保存改进槽配置（报告 C2）
+
+**缺陷**：`grid_builder._serialize_parts()` 与 `_parse_part()` **都不处理 `upgrades`**，而
+`set_modifier_upgrades()` 确实把升级写进 `part["upgrades"]`。于是改装页用 `Q/E` 选升级、`T` 装槽、`Ctrl+S`
+提示「蓝图已保存到用户存档」、`Ctrl+O` 提示读回成功，**但槽位是空的，无任何警告**。
+
+**修法**（四处代码 + 一个回归）：
+
+| 位置 | 改动 |
+| --- | --- |
+| `_serialize_parts()` | 对「定义里 `has("upgrade_slots")`」的模块写出 `item["upgrades"]`；**空数组也写**；**不写 `intrinsic`** |
+| `_parse_part()` | 读回 `part["upgrades"] = _parse_upgrades(...)`；`module_def` 只取一次复用 |
+| `_parse_upgrades()`（新增） | 与 `set_modifier_upgrades()` **同源**校验：未知 id 丢弃 / 超 `upgrade_slots` 截断 / 按 `stack_limit` 逐 effect 去重；**非法项丢弃而不整条蓝图失败** |
+| `data_validator` / `data_registry` | `validate_blueprint()` 第 5 参 `upgrade_ids := {}`（向后兼容默认值）；`upgrades` 字段可选，出现则必须是字符串数组且 id 存在 |
+
+**两个关键取舍**：
+
+- **空数组也写** —— 让圆程（serialize → parse → serialize）逐字节稳定，也让「这个装置本来就没配」与
+  「这个装置配了但字段丢了」在存档里**可区分**。
+- **绝不写 `intrinsic`** —— 它是模块**类型**的属性，运行期由 `AmmoNetwork._make_part()` 从 `definitions` 读进
+  `part["intrinsic"]`；写盘会造出第二真源（v3.41 已定过结论）。
+
+**回归**：新增 `tests/blueprint_roundtrip_smoke.gd`（20 条断言）——圆程逐字节稳定 / 读回后逐项等于写入值 /
+存档不含 `intrinsic` / **旧存档（无 `upgrades` 字段）照样能读且读成空配置** / 未知 id 丢弃与超槽截断不整条失败 /
+真实蓝图目录零错误。
+
+##### 二、B3：`globals.json` 尾逗号 + 严格 JSON 门禁
+
+`data/globals.json` 存在**唯一一处真尾逗号**（闭合 `global` 块的那个 `},`），被 Godot 容忍、被标准 JSON 工具拒绝。
+已从 `git show HEAD:` 的原始字节用正则 `,(\s*[}\]])` 精确删除，写盘前断言「严格 JSON 能解析」+「**语义完全相同**」
++「字节增量 −1」。
+
+新增 `tests/data_strict_smoke.gd`（28 条，扫 26 个 JSON）：尾逗号 / `//` 行注释 / `NaN` / `Infinity` / 单引号。
+**刻意不用 `JSON.parse_string()` 做严格性检查** —— 那个函数恰恰容忍尾逗号，用它复检等于自证（v3.39「测试与实现共谋」的教训）；
+扫描必须显式维护 `in_string` / `escaped` 状态以跳过字符串内部。
+
+##### 三、B2：两条「睡觉的验收」接上 + 自动门禁
+
+| 未调用的函数 | 定义自 | 处置 |
+| --- | --- | --- |
+| `physics_smoke._check_performance(definitions)` | v3.30 | 接入 `_init()`（探针先确认当前代码下是绿的，**只接调用、不改阈值**） |
+| `camera_zoom_smoke._check_negative_control()` | v3.40 | 接入 `_init()` → **`CAMERA_OK checks=594 → 600`** |
+
+新增 `tests/selfcheck_smoke.gd`：扫 `tests/*.gd` 的 `func _check_xxx(` 定义，逐行统计调用点（**跳过空行、`#` 注释行、定义行**），
+调用点为 0 即报 `SELFCHECK_UNCALLED` 并计失败；反向要求 `defs >= 120` 防止「一个都没扫到」假装全绿。
+当前 `defs=128 called=128`。
+
+##### 四、S1：商店稀有度改成按档加权抽取
+
+**旧版错在语义**：`shop_rarity_weight = [60, 30, 10]` 被当成**价格倍率**用（`1.0 + weight/total` ⇒ ×1.6 / ×1.3 / ×1.1），
+而 `_roll_shop()` 对所有 `price > 0` 的模块**均匀**抽 —— 于是 6 cr 的直管与 260 cr 的 `cockpit_armored` 出现概率完全相同，
+「稀有商品」名不副实，该数据键对玩法毫无影响。
+
+**修法**：
+
+| 函数 / 字段 | 作用 |
+| --- | --- |
+| `_shop_weights` | **回归「抽取权重」**：[60,30,10] ⇒ 60% / 30% / 10% |
+| `_shop_tier_price`（新增，键 `shop_tier_price_multiplier`） | 各档价格倍率，**默认 [1,1,1] ⇒ 成交价就是 `price` 字段本身**（与 v3.44 一致） |
+| `_rarity_tier(price)` | 按 `shop_common_price_max` / `shop_rare_price_max` 定档，**与定价解耦** |
+| `_weighted_pick(by_tier)` | 按累计权重抽一次，再在选中档内抽一次 |
+| `_tier_price_multiplier(tier)` | 返回该档倍率 |
+| `_rarity_multiplier()` | **已删除** |
+
+**确定性纪律**：每次抽取**固定 2 次 `_next_unit()`**（一次选档、一次选件），调用次数与档位内容无关。
+
+**实测分布**（探针 `probe46_shop.gd`，固定种子 200 次刷新 × 6 格 = 1200 样本）：池子 common=22 / rare=17 / epic=9，
+抽取占比 **0.602 / 0.301 / 0.098**（理论 60/30/10）；强制 `[1,0,0]` → 6 格全普通、`[0,0,1]` → 6 格全史诗。
+
+**玩家可感知的变化边界**：**价格没变**，变的是**哪些商品会出现** —— 低价普通件（尤其 6 cr 的六种 conveyor）
+明显更常见，史诗件更少见。
+
+##### 五、S2：难度曲线进 data
+
+`tier_for()` 原本把 `4 / 9 / 14` 写死在代码里，而同一个 `survival` 块里的 `wave_time_s` / `enemy_count_*` / `boss_every`
+全都从 data 读 —— 这是全项目「数据驱动」纪律的**唯一**系统性破口，而且恰好是最需要反复调参的那一处。
+
+改为遍历 `BotAI.TIERS` 读 `tier_wave_thresholds`；默认 `{"recruit": 1, "veteran": 5, "elite": 10, "ace": 15}`
+**与旧值完全等价**（第 5 波老兵、第 10 波精英、第 15 波王牌），所以这次「搬进 data」**没有顺手改难度**。
+Boss 波「至少精英」的下限规则独立保留。`main.gd` 的 `MATCH_DIFFICULTY` 改用 `BotAI.TIERS`，消除字面量副本。
+
+##### 六、验证与负向对照（全部实测）
+
+`run_smoke46.ps1` → `s46_all.txt`，**26 项全绿**。8 个既有数值项与 v3.45 基线**逐字相同**；
+唯一数值变化是 `CAMERA_OK checks=594 → 600`（一个睡觉的验收终于被接上）。
+
+| 负向对照 | 注入的缺陷 | 结果 |
+| --- | --- | --- |
+| `negctl46.py` | 序列化不写 `upgrades` | 精确 3 条；写回逐字节一致 |
+| `negctl46b.py` | 放回尾逗号 | 精确 2 条 |
+| `negctl46c.py` | 撤掉两处 `_check_*` 调用 | `called=126`，2 条 `SELFCHECK_UNCALLED` |
+| `negctl46d.py` | 商店退回全池均匀抽 | 4 条（`rarity_forced_common_off_tier_3` 等） |
+| `negctl46e.py` | `tier_for()` 退回写死 4/9/14 | 3 条（`tier_custom_w2/w3/w4`） |
+
+**补了两个有区分力的验收**（原 `survival_smoke` 对 S1/S2 **零覆盖** —— 它只查格数 / 去重 / 买卖价，以及
+`tier_for()` 的**结果**，写死 4/9/14 也能过）：`_check_shop_rarity_weights()` 与 `_check_tier_thresholds_from_data()`。
+
+##### 七、一处行为变化必须说明
+
+`editor_bounds_smoke` 的 premise 行从 `PREVIEW_PREMISE_OK inventory=6 > options=4` 变为
+`PREVIEW_PREMISE_WEAK inventory=6 <= options=6`。**不是缺陷、不是断言失败**（`PREVIEW_OK` 照常、`index_clamped_to_options`
+仍通过），根因就是 S1 让 6 种 6 cr 的 conveyor 更常被抽到，于是 6 件全是 module 层。
+测试区分力**未损**（`_selected_index = 6` 对 6 元素数组**仍越界**），**故意不改测试** —— 为凑前提改测试会降低场景真实性。
+
+##### 八、已知边界
+
+- **本次改动尚未经过用户实机确认。**
+- 全部证据为 headless smoke + 负向对照 + 探针断言；**没有做 profile**。
+- **未在 Android 上验证，任何 APK 均不存在。**
+
+
 #### 11.4.3 两个 SETUP 界面
 
 **`EXPEDITION_SETUP`（单人远征）**
@@ -5299,6 +5416,8 @@ M3 的物理验收基准（`M 61.0 u` / `I 104 064 u·px²` / `T 9000` / `v_max 
 | 精英 | 10–14 | `bot_elite_*` | 装甲驾驶舱、重型引擎、板块护盾、大型弹药库，会用割点分析 |
 | 王牌 | 15+ | `bot_ace_*` | 最复杂结构：双炮 / 穹顶护盾 / 区域维修，最高火力与防御 |
 
+> **v3.46：上表的 1–4 / 5–9 / 10–14 / 15+ 已从代码魔数搬进 data** —— `survival.tier_wave_thresholds`（`{"recruit":1,"veteran":5,"elite":10,"ace":15}`，阈值语义是「达到该波次即升档」）。默认值与旧写死的 `4/9/14` **完全等价**，所以搬进 data 没有顺手改难度；以后调难度只改 JSON。Boss 波「至少精英」的下限规则**独立于该表**，不因改表而失效。详见 §11.4.2.25。 |
+
 **同档三张必须是三种不同轮廓**（v3.15）。旧版同档三张是同一块矩形换一门炮，玩家看不出区别；现在每档用不同的车身长宽比与履带布局区分：新兵十字/方块/楔形（14/20/12 格），老兵长车身/方车/四履带（24/32/20），精英宽四履带/重甲方车/楔形四履带（33/36/23），王牌双炮/穹顶/重甲堡垒（44/40/40）。`_blueprint_for()` 的 `posmod` 轮换保持不变，同波多台敌人仍拿到不同蓝图。
 
 **经验与升级**
@@ -5348,7 +5467,8 @@ M3 的物理验收基准（`M 61.0 u` / `I 104 064 u·px²` / `T 9000` / `v_max 
 | `SHOP_SLOT_COUNT` | 6 | 商品位数量 |
 | `SHOP_REROLL_COST` | 60 cr | 刷新全部商品的价格（**不递增**） |
 | `SHOP_SELL_RATE` | 0.5 | 出售回收比例（× `price`） |
-| `SHOP_RARITY_WEIGHT` | `[60, 30, 10]` | 普通 / 稀有 / 史诗的权重，按 `price` 分档 |
+| `SHOP_RARITY_WEIGHT` | `[60, 30, 10]` | 普通 / 稀有 / 史诗的**抽取权重**（越高越常出现），按 `price` 定档。**v3.46 纠正**：旧版把这个数组当成价格倍率用、而抽取是全池均匀的，于是「稀有商品」名不副实；现在真的按权重抽（实测占比 0.602 / 0.301 / 0.098） |
+| `SHOP_TIER_PRICE_MULTIPLIER` | `[1.0, 1.0, 1.0]` | **v3.46 新增**：各档价格倍率。**默认全 1.0 ⇒ 成交价就是 `price` 字段本身**（与 v3.44 一致）。要按档调价只改这个数组，不要改权重 |
 | `SHOP_COMMON_PRICE_MAX` | 80 cr | **实现新增**：稀有度分档下界（`price ≤ 80` 为普通，`≤ 160` 为稀有，更高为史诗）。设计稿只给了权重没给分档阀值，因此由实现补上 |
 | `SHOP_RARE_PRICE_MAX` | 160 cr | **实现新增**：稀有的上界 |
 
@@ -5648,3 +5768,5 @@ M3 的物理验收基准（`M 61.0 u` / `I 104 064 u·px²` / `T 9000` / `v_max 
 | 2026-10-24 | v3.41 | **弹药改进模块：从「无效容器」到「有实际功能的模块」**（用户原话：「弹药改进模块目前似乎没有实际效果，将这些模块改为有实际功能的模块，例如爆破模块、火焰模块、增伤模块等等」）。① **先查清「为什么没效果」，再动手**——用户报的是现象不是诊断。两个根因，一真一假：**根因 A（真产品缺陷）** 生存模式的 `survival_run.STARTER_MODULES` 里**五件模块没有一件带 `upgrade_slots`**，而 `_install_upgrade()` 是「按 `module_parts` 顺序找第一件还有空槽的改进装置」，找不到就把 id 推进 `collected_upgrades` 暂存。探针实测 `starter modifiers=0 total_slots=0`、`_install_upgrade("up_damage")` 返回「没有空槽的改进装置，升级已暂存」、`installed_upgrades=[]` —— **玩家升到满级也装不进任何升级**。这就是「没有实际效果」的直接根因，不是引擎失效，是玩家根本没有容器。（这个问题在 v3.24「升级载荷实体化」时就已存在，但那一轮只验了「载荷能不能随弹药流动」——用自己搭的车，**没验玩家的起始车装不装得上**。）**根因 B（探针缺陷，不是产品缺陷）** 上一轮报的 `dmg_delta=0.000` 是**弹药 id 写错**：探针传 `ammo_76`，而 `calibers.json` 的真实 id 是 **`cal_76`**，`get_ammo()` 返回 `{}` → `base=0.0` → `apply_hit()` 在最前面 `if base <= 0.0: return result` 就早退 → `result["damage"]` 恒 0。**那个数字什么也没证明。** 换成真实 id 实测 `cal_76 + up_damage` 从 **52.0 → 61.8（+9.8）**、`cal_155 + up_damage` 从 **237.0 → 280.2（+43.2）**；`_final_damage()` 的护甲是**减法**（`maxf(damage * 0.15, damage - armor_eff)`），所以「护甲把 +18% 差异削平」这个假设被**证伪**。② **修法：两族改进模块并存**。第一族**保留**通用的 `modifier_mk1/mk2/mk3`（只差 `upgrade_slots` 1/2/3 与 `processing_time_s`，槽里配什么由玩家决定，是「自由组合」的高级玩法，也是既有测试依赖的 id，不删）。第二族**新增**三件**功能固定的模块**，定义里带 `intrinsic_upgrades`：`modifier_blast`（爆破模块，1 格，130 cr，`up_explosive`）、`modifier_flame`（火焰模块，1 格，120 cr，`up_burn`）、`modifier_power`（增伤模块，1 格，110 cr，`up_damage`）；三者各带 1 个槽，固有升级**不占槽、永远生效**。③ **一个刻意的实现选择：固有升级不写进 `part["upgrades"]`**。它是模块**类型**的属性而不是实例状态，写进 part 会在蓝图反序列化、撤销、复制处多出一条可能漂移的副本。运行期由 `AmmoNetwork._make_part()` 从 `definitions.get_module()` 读进 `part["intrinsic"]`，加工完成时 `payload = 原载荷 + intrinsic + 槽配置`（顺序固定，保证确定性）。④ **起始坦克改造**：`STARTER_MODULES` 变成 `factory_76(0,1) → 直管(2,1) → modifier_power(3,1) → cannon_76(4,1)`，车体仍是 `6×4`、「不放弹药库」的原理由（殉爆在 6×4 的车里等于自杀）不变。开局就有 **+18% 伤害**，玩家第一次开火就能看到比白板更高的数字。⑤ **验证（数值层 + 玩家路径层 + 像素层三层都有证据）**。**端到端探针**（走真实 `SurvivalRun.build_starter()` + 真实 `AmmoNetwork`）：`starter cannon payloads = ["up_damage"]`、`modifier_blast/flame/power → cannon payloads = ["up_explosive"]/["up_burn"]/["up_damage"]`、`modifier_power slots after player config = ["up_damage"]`（固有升级不占槽）、**`PROBE41V3_DONE checks=25 failures=0`**。**永久回归**（`tests/upgrade_flow_smoke.gd` 10,256 → **15,385 B**）新增两段：`_check_function_modules_carry_intrinsic()`（三种模块 × 数据层声明 + 流程层真的流到炮管）与`_check_starter_can_install_upgrade()`（起始车有容器 → 装得上且**不靠暂存** → 弹药链真的把它带到炮管）。**负向验证**（`.me/tmp/main/negctl41.py` apply/restore）同时退回两处修复 → 立刻 **`UPGRADE_FAIL count=7`**，其中前 3 条只来自 `ammo_network`、后 4 条只来自 `survival_run` —— **两处修复各自都有独立的失败项**，证明断言有真实区分力；`restore` 后回到 `UPGRADE_OK`。**全量回归**：**23 项 smoke 全绿**（`s41a.txt` 1,086 B / `73e2a81e`），`physics_smoke` 数值与 v3.40 基线**逐字相同**（mass=61.0 / inertia=104064 / v_max=192.1 / turn180_s=1.70 / spin_stop_s=0.43）。**真实窗口截图 + `Image_View` 亲自看过**：`v41_surv.png`（1920×1080 / 202,833 B）的镜像面板「部件状态」里出现 **增伤模块 加工 100%**；`v41_modify.png`（270,554 B）上能看到「增」模块位于弹药链中段、`体积 7×4`、`结构合法，可以部署。`；6× 放大 `crop41_tank.png`（1320×780）里 **「76 → 直管 → 增 → 炮管」与青 in / 琥珀 out 箭头一眼可读**。两次 capture 均含 `WINDOW_MODE mode=2 size=(1842, 1057)` 与 `CAPTURE_OK`、**无 `SCRIPT ERROR`**。⑥ **一处自伤（已修）**：收尾时想追加本行，`File.Edit` 误把 v3.40 那一整行**截断成了一个标题**；立即用 `git show HEAD:docs/design.md` 取出原始行按字符数（4,653）逐字节写回并校验 `LAST_IS_V340 True`，然后才追加本行。**这是「`File.Edit` 范围算错会静默破坏历史行」的又一次印证，append-only 的变更表绝对不能用手写长行。****如实声明**：**本次改动尚未经过用户实机确认**（上一版的弧管与炮管偏移都是用户实机发现的）；**截图证明的是「装得上 / 在流水线里被加工 / 箭头可读」，不证明「开火后肉眼能看出伤害数字变大」**——那需要真实对局里同口径带/不带 `up_damage` 的伤害对比，本轮**没有做**，只有 `probe41b.txt` 的数值链（52.0 → 61.8）作间接证据；**改进槽的配置入口仍然只有键盘**（改装页 `Q/E` 选升级、`T` 装槽、`Shift+T` 清空），无鼠标路径，本次修法**绕开了这个可用性问题但没有解决它**；**`processing_multiplier` 仍是死字段**（`upgrades.json` 每条都有，零代码读取）；`data_smoke modules=45 → 48` 是新增三件模块的预期结果；**未在 Android 上验证，任何 APK 均不存在**。 | §6.4 §11.4.2.21 §17 |
 | 2026-10-30 | v3.43 | **生存模式掉落与房屋机制：机制一直在，缺的是「看得见」**（用户原话：「完善生存模式的机制，敌人击杀也掉落模块和金钱，房屋生命值过高，房屋摧毁也会掉落金币和模块」）。① **先核事实，不按字面改**：读码确认三件事里有两件**本来就已实现** —— 普通敌人击杀给 `credit_per_kill = 40` + `xp_per_kill = 25` + `enemy_drop_chance = 0.25` 掉它蓝图里已有的一件（Boss 更给 320 cr / 200 xp / **必掉 3 件**）；房屋摧毁给 `credit_per_house = 55` + `xp_per_house = 12` + `house_drop_chance = 0.30` 掉一件并留残骸可再碾一次得 18 cr。② **真正的缺陷是反馈链断了**：`main.gd::_survival_step()` 的 `if/elif` 链里**根本没有 `enemy_defeated` 分支**，`_reap_enemies()` 产生的事件被直接丢弃；`house_destroyed` 也只有一句没数字的「房屋被摧毁」。于是玩家击毁敌人、拆掉房子时，屏幕上什么都不发生，金钱只在外侧 HUD 静默跳一下。**这与 v3.20 修掉的「打上去没反应」同源：函数算对了、事件也发了，但页面层没接。机制存在 ≠ 可感知。**③ **事件带出收益**：`enemy_defeated` / `house_destroyed` 都补 `credit` / `xp` / `module` 三个字段；`main.gd` 新增 `enemy_defeated` 分支、重写 `house_destroyed` 分支，写文案并推一条绿色「+N cr」漂浮数字。漂浮数字**不复用** `CombatView.push_damage()` —— 它的符号语义写死了 `dealt → +N`、`received`/`shield` → `-N`，金钱没有正负之分；改为直接 `_survival_fx.push(kind="damage", …)` 并自己给 `text`、把 `mode` 标成 `"credit"` 参与限流。④ **数值下调 + 保底**：`house_hp` 260 → **120**、`house_armor` 5 → **3**（`cal_76` 由 6 发降到 3 发、`cal_40` 由 16 发降到 7 发；每波只 4 栋、波时限 45 s，260 HP 确实过高）；`house_drop_chance` 0.30 → **0.70**、`enemy_drop_chance` 0.25 → **0.35**；新增 `house_drop_pity = 3` / `enemy_drop_pity = 4` —— 纯概率时代「连着四五个敌人都没掉」频繁出现，而当时又没有任何提示，这才是「敌人不掉模块」的另一半原因。⑤ **`_roll_drop(chance, stream)` 的四个约束**：两条 stream（`house`/`enemy`）干次数**必须独立**，否则拆房会顺手抵掉敌人的保底；**保底分支不抽随机数**，所以同一 seed 的序列长度仍只取决于调用次数、确定性不破；干次数**跨波保留**、只有 `close_run()` 清零；Boss 走必掉路径**不参与** pity。⑥ **验证**：`tests/survival_smoke.gd` 新增两条验收（事件字段逐值等于 data、`module` 非空必已进库存、对纯函数 `_roll_drop(0.0, stream)` 的确定性阶梯断言、两 stream 隔离、真实拆房/击杀路径），全量 23 项 smoke 全绿（`s43_all.txt`）；负向验证 `negctl43.py`（备份文件而非 `git checkout`）摘掉保底分支后精确报 6 条 `*_pity_*` 失败、写回后 `NEGCTL43_PASS`。**本次改动尚未经过用户实机确认**；「房屋 120 HP 是否合适」是按弹药伤害与波时限算出的估计，不是实测手感。 | §3.4.4 §11.4.2.23 §14.8 §17 |
 | 2026-11-05 | v3.44 | **金钱收入提高：先补「下行螺旋」，再谈单价**（用户原话：「增加金钱收入，目前战斗消耗的模块想补上来有些困难」）。① **先量缺口**（探针 `probe44.gd` → `p44a.txt`，逐项实测）：模块价格 48 件中位 **90 cr** / 最高 **260 cr**（`cannon_76`=120、`ammo_factory_76`=140、`modifier_power`=110）；改前单波**理论最高**收入 wave1/3 = **542 cr**（敌人 160 + 房屋 292 + 残骸 90）、wave5/8 = **702 cr**，而那要求「配额敌人全杀 + 4 栋房全拆 + 10 处残骸全碾」同时达成。重建 2–3 件典型模块要 **240–400 cr**，缺口成立且与用户描述一致。② **根因是两层，不是「单价偏低」一层**：总量不足之外，原先收入**全部**来自「打中东西」（击杀 / 拆房 / 碾残骸），而打中东西本身要求坦克完好 —— **坦克一残，收入能力同步下降**，越残越穷，这才是「补不回来」的真机制，光调单价治不了。③ **修法（全部数据驱动）**：`credit_per_kill` 40→**60**、`credit_per_house` 55→**85**、`house_debris_credit` 18→**28**、`debris_credit_min/max` 15/45→**22/65**、`boss_credit_reward` 320→**460**；**新增过波结算奖金** `wave_clear_credit_base = 120` / `wave_clear_credit_per_wave = 40`，`wave_clear_credit_award(w) = base + per_wave × (w − 1)`（随波增长：模块价格 6–260 cr、后期被拆的件也更贵；固定额到中后期等于没涨）。发放点在 `step_battle()` 的过波分支并 append `{"kind": "wave_cleared", "wave", "credit"}`；**绝不能放进 `_enter_intermission()`** —— 测试与升级页返回路径会直接调它，放里面会多拿一份。`default_build_credits` 与商店价格本轮不动。改后理论上限 wave1 ≈ **942**、wave5 ≈ **1182 cr**。④ **玩家看得见**：`_survival_step()` 新增 `wave_cleared` 分支写「第 N 波通过 · 结算 +M cr」；商店页标题行追加「本波结算 +N cr」（`last_wave_credit`，`start_wave()` / `close_run()` 归零）。⑤ **验证**：新增 `_check_wave_clear_credit()`（公式三点 + 随波递增 + 真实过波路径 + `credit` 增量 `>=` 奖金 + 事件金额 + 生命周期）；`_check_boss_wave()` 的金钱断言改为 `boss_credit_reward + wave_clear_credit_award(本波)`（**行为变更导致的测试更新，不是放宽**）；负向验证 `negctl44.py`（备份文件式）摘掉 `credit += last_wave_credit` → 精确报 `boss_credit_reward 460.0000 != 740.0000`（460 + award(5)=280）与 `wave_credit_paid_0.00_of_120.00`，写回后 `NEGCTL44_PASS`；**23 项 smoke 全绿**（`s44_all.txt` 1086 B）。⑥ **顺带修掉既有测试装置缺陷**：`survival_smoke._init()` 只调用 19 个 `_check_*` 里的 **10 个**，另外 9 个从未执行（`git show HEAD:` 版本同样只有 10 个 → **既有缺陷**，`SURVIVAL_OK` 长期只盖 10/19）；接上后只有 1 条真红 `level_upgrade_collected` —— 旧断言只看 `collected_upgrades`，而 `_install_upgrade()` 在**车上有空槽时会直接写进 `part[\"upgrades\"]`**，改为断言 `staged or fitted` 并精确比对 `pick[\"id\"]`。**如实声明**：**本次改动尚未经过用户实机确认**；「真人实得 470–570 cr/波」是**按理论上限折扣的估计，不是实测**；「新数值够不够用」headless 无法验证；**未在 Android 上验证，任何 APK 均不存在**。 | §3.4.3 §11.4.2.24 §14.8 §17 |
+| 2026-11-05 | v3.46 | **执行 v3.45 审核报告 §7.1/§7.2 的 6 项修复**（用户原话：「按照建议开始修复」）；**§7.3 / §7.4 刻意未做**（触发条件未到 / 明确不建议）。① **P0 蓝图保存改进槽配置（报告 C2）**：`grid_builder._serialize_parts()` 对「定义里 `has("upgrade_slots")`」的模块写出 `item["upgrades"]`（**空数组也写** —— 圆程逐字节稳定 + 「本来没配」与「配了但丢字段」可区分；**不写 `intrinsic`** —— 模块类型属性，写盘会造第二真源）；`_parse_part()` 读回；新增 `_parse_upgrades()`，与 `set_modifier_upgrades()` **同源**校验（未知 id 丢弃 / 超 `upgrade_slots` 截断 / 按 `stack_limit` 逐 effect 去重），**非法项丢弃而不整条蓝图失败**。`data_validator.validate_blueprint()` 第 5 参 `upgrade_ids := {}`（向后兼容默认值）、`data_registry` 传参。新增 `tests/blueprint_roundtrip_smoke.gd`（20 条）。② **B3 尾逗号 + 严格 JSON 门禁**：`data/globals.json` 唯一一处真尾逗号已删（**从 `git show HEAD:` 原始字节用正则 `,(\s*[}\]])` 删，断言 `SEMANTIC_IDENTICAL True`、`DELTA -1` 字节、行数不变**）；新增 `tests/data_strict_smoke.gd`（28 条 / 26 个 JSON，查尾逗号 / `//` 注释 / `NaN` / `Infinity` / 单引号；**刻意不用 `JSON.parse_string()` 做严格性检查** —— 它恰恰容忍尾逗号，用它复检等于自证）。③ **B2 两条睡觉的验收接上**：`physics_smoke._check_performance(definitions)` 与 `camera_zoom_smoke._check_negative_control()` 接入 `_init()`，后者使 **`CAMERA_OK checks=594 → 600`**（+6 条断言）；接入前先用独立探针确认二者在当前代码下是绿的，**只接调用、不放宽也不收紧阈值**。④ **B2 门禁**：新增 `tests/selfcheck_smoke.gd` —— 扫 `tests/*.gd` 的 `func _check_xxx(` 定义并逐行统计调用点（**跳过空行 / `#` 注释行 / 定义行**），调用点为 0 即报 `SELFCHECK_UNCALLED` 并计失败；反向要求 `defs >= 120`。`SELFCHECK_OK defs=128 called=128`。⑤ **S1 商店稀有度改成按档加权抽取**：`shop_rarity_weight` 的语义**回归「抽取权重」**（[60,30,10] ⇒ 60%/30%/10%），不再被当成价格倍率（旧版 `1.0 + weight/total` ⇒ ×1.6/×1.3/×1.1）；价格改由新增 `shop_tier_price_multiplier` 控制（**默认 [1,1,1] ⇒ 成交价与 v3.44 相同**）。新增 `_rarity_tier()` / `_weighted_pick()` / `_tier_price_multiplier()`，重写 `_roll_shop()`，删除 `_rarity_multiplier()`。**每次抽取固定 2 次 `_next_unit()`**（一次选档、一次选件），确定性纪律未破。⑥ **S2 难度曲线进 data**：`tier_for()` 不再写死 `4/9/14`，改为遍历 `BotAI.TIERS` 读 `tier_wave_thresholds`（默认 `{1,5,10,15}`，**与旧值完全等价**，未顺手改难度）；`main.gd` 的 `MATCH_DIFFICULTY` 改用 `BotAI.TIERS` 消除字面量副本。⑦ **验证（全部实测）**：`run_smoke46.ps1` → `s46_all.txt` **26 项全绿**；`PHYSICS_OK` / `CANNON_OK` / `BUILD_OK` / `RUNTIME_OK` / `DATA_OK` / `DATA_ERROR_OK` / `CANNONVIEW_OK` / `PERF_OK` 与 v3.45 基线**逐字相同**，只有 `CAMERA_OK checks=600`；`omega_max` 实测仍为 **3.0**；**5 组负向对照全部 PASS 且写回逐字节一致**（`negctl46` → 3 条；`negctl46b` → 2 条；`negctl46c` → `called=126`；`negctl46d` → 4 条；`negctl46e` → 3 条）。⑧ **补了 2 个有区分力的验收**（原 `survival_smoke` 对 S1/S2 **零覆盖**）：`_check_shop_rarity_weights()`（权重压成 `[1,0,0]` → 每格必须普通档、`[0,0,1]` → 每格必须史诗档；探针实测默认权重 1200 样本占比 **0.602/0.301/0.098**）与 `_check_tier_thresholds_from_data()`（换表 `{1,2,3,4}` → w2/w3/w4 必须跟着变）。⑨ **必须如实记录的两件事**：**（a）我的自伤**——用 `File.Edit` 改 `data/globals.json` 时**误删 `tank_collision_coefficient` 整行**并破坏对象闭合，已用 HEAD 原始字节 + 正则还原（`SEMANTIC_IDENTICAL True`）；本轮共发生 **5 次**「`File.Edit` 替换范围与 `new_lines` 边界重叠」同类事故（均被后续 `--check-only` / 测试抓到，无一流入提交）。**（b）我上一轮审核里的「自我更正」本身是错的**——`camera_zoom_smoke._check_negative_control` 第 19 行是**注释**、第 278 行是**定义**，`_init()` 的 12 个调用里**确实没有它**；原判断是对的，「真未调用」应为 **2 个**而非 1 个，报告 §6 需第三次更正。⑩ **一处行为变化必须说明**：`editor_bounds_smoke` 的 premise 行从 `PREVIEW_PREMISE_OK inventory=6 > options=4` 变为 `PREVIEW_PREMISE_WEAK inventory=6 <= options=6` —— **不是缺陷、不是断言失败**（`PREVIEW_OK` 照常、`index_clamped_to_options` 仍通过），根因是 S1 让普通档 22 件里那 **6 种 6 cr 的 conveyor** 更常被抽到，于是 6 件全是 module 层。测试区分力未损（`_selected_index=6` 对 6 元素数组**仍越界**），**故意不改测试**。**玩家可感知的变化边界**：商店**价格没变**（档位倍率全 1.0），变的是**哪些商品会出现**（普通件更常见、史诗件更少见）；难度阈值与旧值**完全等价**，改的只是「以后调难度只需改 JSON」。**如实声明**：**本次改动尚未经过用户实机确认**；全部证据为 headless smoke + 负向对照 + 探针断言，**没有做 profile**；**未在 Android 上验证，任何 APK 均不存在**。 | §3.4.3 §6.4 §11.4.2.25 §14.8 §17 |
+

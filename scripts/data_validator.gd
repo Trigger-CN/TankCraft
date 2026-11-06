@@ -170,7 +170,9 @@ func validate_arena(path: String, data: Variant) -> PackedStringArray:
 						_validate_spawn(path, "$.expedition_spawns.waves[%d][%d]" % [wave_index, spawn_index], wave[spawn_index], errors)
 	return errors
 
-func validate_blueprint(path: String, data: Variant, known_ids: Dictionary, ammo_ids: Dictionary) -> PackedStringArray:
+## v3.45：新增 `upgrade_ids`。`upgrades` 字段是**可选**的（旧存档没有它照样能读），
+## 但一旦出现就必须是「合法升级 id 组成的数组」，否则玩家会得到一份能读、却静默少了配置的蓝图。
+func validate_blueprint(path: String, data: Variant, known_ids: Dictionary, ammo_ids: Dictionary, upgrade_ids: Dictionary = {}) -> PackedStringArray:
 	var errors := PackedStringArray()
 	if not _require_dictionary(path, "$", data, errors):
 		return errors
@@ -193,7 +195,7 @@ func validate_blueprint(path: String, data: Variant, known_ids: Dictionary, ammo
 			var item_path := "$.modules[%d]" % index
 			if not _require_dictionary(path, item_path, item, errors):
 				continue
-			_validate_blueprint_part(path, item_path, item, known_ids, errors)
+			_validate_blueprint_part(path, item_path, item, known_ids, ammo_ids, upgrade_ids, errors)
 			var item_id: Variant = item.get("id")
 			if item_id is String and String(item_id).begins_with("cockpit_"):
 				cockpit_count += 1
@@ -204,7 +206,7 @@ func validate_blueprint(path: String, data: Variant, known_ids: Dictionary, ammo
 		if mobility.is_empty():
 			errors.append(_error(path, "$.mobility", "至少需要一个行进机构"))
 		for index in range(mobility.size()):
-			_validate_blueprint_part(path, "$.mobility[%d]" % index, mobility[index], known_ids, errors)
+			_validate_blueprint_part(path, "$.mobility[%d]" % index, mobility[index], known_ids, ammo_ids, upgrade_ids, errors)
 	var platform_cells: Variant = data.get("platform_cells")
 	if _require_array(path, "$.platform_cells", platform_cells, errors):
 		if platform_cells.is_empty():
@@ -242,7 +244,7 @@ func _validate_module_item(path: String, item_path: String, item: Dictionary, ca
 	if item.has("aim_steps") and item["aim_steps"] != 8:
 		errors.append(_error(path, item_path + ".aim_steps", "炮管 aim_steps 必须为 8"))
 
-func _validate_blueprint_part(path: String, item_path: String, item: Variant, known_ids: Dictionary, errors: PackedStringArray) -> void:
+func _validate_blueprint_part(path: String, item_path: String, item: Variant, known_ids: Dictionary, ammo_ids: Dictionary, upgrade_ids: Dictionary, errors: PackedStringArray) -> void:
 	if not _require_dictionary(path, item_path, item, errors):
 		return
 	var item_id: Variant = item.get("id")
@@ -256,6 +258,17 @@ func _validate_blueprint_part(path: String, item_path: String, item: Variant, kn
 		var aim: Variant = item.get("aim")
 		if not _enum_has_integer(AIM_ROTATIONS, aim):
 			errors.append(_error(path, item_path + ".aim", "炮管 aim 必须是 0–315 的 45° 步进"))
+	## v3.45：`upgrades` 可选；出现时逐个校验 id 存在且是字符串。
+	## 空数组是合法的「配了但空」（序列化一定会写它）。
+	if item.has("upgrades"):
+		var upgrades: Variant = item["upgrades"]
+		if _require_array(path, item_path + ".upgrades", upgrades, errors):
+			for slot in range(upgrades.size()):
+				var upgrade_id: Variant = upgrades[slot]
+				if not _require_string_at(path, "%s.upgrades[%d]" % [item_path, slot], upgrade_id, errors):
+					continue
+				if not upgrade_ids.is_empty() and not upgrade_ids.has(upgrade_id):
+					errors.append(_error(path, "%s.upgrades[%d]" % [item_path, slot], "引用不存在的升级 '%s'" % upgrade_id))
 
 func _validate_spawn(path: String, item_path: String, item: Variant, errors: PackedStringArray) -> void:
 	if not _require_dictionary(path, item_path, item, errors):

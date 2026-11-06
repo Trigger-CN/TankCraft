@@ -49,7 +49,7 @@
     "engine_explosion_damage": 25.0,
     "debris_lifetime_s": 3.0,
     "pierce_cap": 0.8,
-    "tank_collision_coefficient": 0.04,
+    "tank_collision_coefficient": 0.04
   },
   "survival": {
     "wave_time_s": 45.0,
@@ -88,10 +88,12 @@
     "boss_drop_count": 3,
     "wave_clear_credit_base": 120,
     "wave_clear_credit_per_wave": 40,
+    "tier_wave_thresholds": {"recruit": 1, "veteran": 5, "elite": 10, "ace": 15},
     "shop_slot_count": 6,
     "shop_reroll_cost": 60,
     "shop_sell_rate": 0.5,
     "shop_rarity_weight": [60, 30, 10],
+    "shop_tier_price_multiplier": [1.0, 1.0, 1.0],
     "shop_common_price_max": 80,
     "shop_rare_price_max": 160
   },
