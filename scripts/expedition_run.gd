@@ -217,14 +217,6 @@ func choose_reward(index: int) -> bool:
 	stage = STAGE_INTERMISSION
 	return true
 
-## 从 inventory 取出一件（装上时才计入 M / mass_cap 校验，由建造侧保证）。
-func take_from_inventory(module_id: String) -> bool:
-	var index := inventory.find(module_id)
-	if index < 0:
-		return false
-	inventory.remove_at(index)
-	return true
-
 ## 远征结束：credit / scrap / inventory 全部清零（§3.4「不跨局」）。
 func summary() -> Dictionary:
 	var result := {

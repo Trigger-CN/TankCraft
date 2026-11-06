@@ -329,7 +329,9 @@ func module_states() -> Array:
 				var work: Dictionary = state["work"]
 				var pending := (state["queue"] as Array).size() + (state["output"] as Array).size()
 				if not work.is_empty():
-					var work_total := maxf(float(part["processing_time_s"]) * _processing_factor(String(work["ammo_id"])), 0.001)
+					## v3.48（P1-3）：进度条的分母必须与 `_module_advance()` 的**起跑值同源**，
+					## 否则带升级的弹药在进度条上会显示到 100% 后继续等 —— 那看起来就像卡住了。
+					var work_total := maxf(float(part["processing_time_s"]) * _processing_factor(String(work["ammo_id"]), work.get("upgrades", [])), 0.001)
 					entry["ratio"] = clampf(1.0 - float(state["work_remaining"]) / work_total, 0.0, 1.0)
 					pending += 1
 				entry["detail"] = "%d" % pending
@@ -1084,7 +1086,7 @@ func _module_advance(index: int, dt: float) -> void:
 		if work.is_empty() and not queue.is_empty():
 			var next: Dictionary = queue.pop_front()
 			state["work"] = next
-			state["work_remaining"] = float(part["processing_time_s"]) * _processing_factor(String(next["ammo_id"]))
+			state["work_remaining"] = float(part["processing_time_s"]) * _processing_factor(String(next["ammo_id"]), next.get("upgrades", []))
 			work = next
 		if not work.is_empty():
 			state["work_remaining"] = float(state["work_remaining"]) - dt
@@ -1238,10 +1240,53 @@ func _slot_of(ammo_id: String) -> int:
 		return 1
 	return maxi(int(definitions.get_ammo(ammo_id).get("slot", 1)), 1)
 
-func _processing_factor(ammo_id: String) -> float:
+## 加工时间因子。**两个独立来源相乘**：
+##
+## ① `processing_factor`（**弹药口径**，`data/ammo/calibers.json`）：口径越小越快
+##    （`cal_20` = 0.7 … `cal_155` = 1.5）。这是「制造/改进一门大炮弹更费时」的表达。
+## ② `processing_multiplier`（**已携带的升级**，`data/upgrades/upgrades.json`）：
+##    同一发弹药每多一层升级，过下一件改进器就更费（或更省）时。
+##
+## v3.48（P1-3）：② 之前是**死字段** —— 9 条升级每条都写了它，全仓只有
+## `data_validator.gd` 在**校验**它，零运行时读取。玩家在改装页看到「加工速度 0.9」，
+## 那个数字对游戏没有任何影响。现在接在这里：`_processing_factor()` 是**加工时间的
+## 唯一乘数入口**（`_module_advance()` 与 `module_states()` 都走它），所以接入点只有一处。
+##
+## **这是本轮唯一会改变玩法数值的修改**：已经带升级的弹药过改进器会变快/变慢。
+## 白弹药（载荷为空）的时间不变 —— 所以开局体验与 v3.47 完全一致。
+func _processing_factor(ammo_id: String, upgrades: Array = []) -> float:
 	if definitions == null:
 		return 1.0
-	return maxf(float(definitions.get_ammo(ammo_id).get("processing_factor", 1.0)), 0.01)
+	var ammo_factor := maxf(float(definitions.get_ammo(ammo_id).get("processing_factor", 1.0)), 0.01)
+	return ammo_factor * _upgrade_processing_multiplier(upgrades)
+
+## 载荷里每条升级的 `processing_multiplier` 相乘。
+##
+## **去重规则与 `DamageSystem._upgrade_profile()` 同源**：按 `effect` 计 `stack_limit`，
+## 超过上限的层数不再参与 —— 否则同一升级堆满后会把加工时间拉到离谱的值，
+## 而伤害侧却按上限封顶，两边对「堆了几层」的理解就不一致了。
+##
+## 夹取区间是**安全界而不是平衡旋钮**：乘积可能很极端（多件升级叠加），
+## 不夹的话一件改进器可能变成永远做不完的黑洞。要调手感请改 data 里的倍率。
+func _upgrade_processing_multiplier(upgrades: Array) -> float:
+	if definitions == null or definitions.registry == null or upgrades.is_empty():
+		return 1.0
+	var counts: Dictionary = {}
+	var total := 1.0
+	for raw in upgrades:
+		var upgrade_id := String(raw)
+		var def: Dictionary = definitions.registry.get_upgrade(upgrade_id)
+		if def.is_empty():
+			continue
+		var effect := String(def.get("effect", upgrade_id))
+		var limit := maxi(int(def.get("stack_limit", 1)), 1)
+		var count := int(counts.get(effect, 0))
+		if count >= limit:
+			continue
+		counts[effect] = count + 1
+		## 字段缺失时按 1.0（不影响时间）—— 旧存档 / 未来新增升级不会因为漏写这个字段而炸。
+		total *= maxf(float(def.get("processing_multiplier", 1.0)), 0.01)
+	return clampf(total, 0.1, 4.0)
 
 func _caliber_of(ammo_id: String) -> String:
 	if definitions == null:

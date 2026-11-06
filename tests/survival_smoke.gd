@@ -50,6 +50,7 @@ func _init() -> void:
 	_check_house_reward_feedback()
 	_check_enemy_drop_reward()
 	_check_wave_clear_credit()
+	_check_survival_pause()
 	if failures > 0:
 		printerr("SURVIVAL_FAIL count=%d" % failures)
 		quit(1)
@@ -1204,3 +1205,87 @@ func _run_signature(seed_value: int) -> String:
 		float(panel["experience"]),
 		pattern,
 	]
+
+# ─── 验收（v3.48）：生存模式暂停 ───────────────────────────────────────
+
+## 用户 2026-11-05 的计划项 P0-2：生存是**一局几十分钟**的模式，却是唯一不能暂停的。
+##
+## 本节验收四件事（与计划里列的四条一一对应）：
+##   ① `toggle_pause()` 只在 `STAGE_BATTLE` 生效，且返回切换后的状态；
+##   ② 暂停时 `step_battle()` 不推进 —— **`wave_time_left` 必须一毫秒都不走**；
+##   ③ 暂停时敌人位置不变（用真实 `duel` 的坦克坐标比）；
+##   ④ `setup()` 与 `close_run()` 都把 `paused` 归零（否则新一局卡在暂停态）。
+##
+## 第 ② 条是核心：它是「暂停」这个词的全部含义。只断言 `paused == true` 是不够的 ——
+## 那只能证明标志位被设了，证明不了模拟真的停了。
+func _check_survival_pause() -> void:
+	var run_state := _make_run(11)
+	if run_state == null:
+		return
+	run_state.bind_player(_make_rig())
+	_expect(run_state.start_wave(), "pause_start_wave")
+	## ① 初始未暂停。
+	_expect(run_state.paused == false, "pause_initially_false")
+	## 先跑几帧让敌人动起来、计时走一点，这样后面的「不变」才有区分力。
+	var dt := 1.0 / 60.0
+	for _step in range(30):
+		run_state.step_battle(dt)
+	var time_before := run_state.wave_time_left
+	_expect(time_before < run_state.wave_time_limit, "pause_time_has_ticked_%.3f" % time_before)
+	## ② 暂停。
+	_expect(run_state.toggle_pause() == true, "pause_toggle_on_returns_true")
+	_expect(run_state.paused == true, "pause_flag_on")
+	## ③ 记录敌人坐标（暂停期间必须一个像素都不动）。
+	var enemy_before := _enemy_positions(run_state)
+	_expect(not enemy_before.is_empty(), "pause_has_enemies_%d" % enemy_before.size())
+	## 跑 120 帧 = 2 秒模拟时间。如果暂停没生效，`wave_time_left` 会少 2.0 s。
+	for _step in range(120):
+		run_state.step_battle(dt)
+	_expect_near(run_state.wave_time_left, time_before, "pause_time_frozen_%.3f" % run_state.wave_time_left)
+	var enemy_after := _enemy_positions(run_state)
+	_expect(enemy_after == enemy_before, "pause_enemies_frozen")
+	## `paused_time` 应该在累计（它只做统计，不参与结算）。
+	_expect(run_state.paused_time > 0.0, "pause_paused_time_accumulates_%.3f" % run_state.paused_time)
+	## 暂停中仍是 STAGE_BATTLE —— 暂停是正交标志，不是状态机的一档。
+	_expect(run_state.stage == SurvivalRun.STAGE_BATTLE, "pause_stage_unchanged_%s" % run_state.stage)
+	## ④ 恢复。
+	_expect(run_state.toggle_pause() == false, "pause_toggle_off_returns_false")
+	_expect(run_state.paused == false, "pause_flag_off")
+	## 恢复后计时必须**重新开始走** —— 否则「暂停」变成了「永久停表」。
+	var time_resume := run_state.wave_time_left
+	for _step in range(30):
+		run_state.step_battle(dt)
+	_expect(run_state.wave_time_left < time_resume, "pause_time_resumes_%.3f_%.3f" % [run_state.wave_time_left, time_resume])
+	## ⑤ 非战斗阶段不允许暂停（与 `MatchState.toggle_pause()` 的 `phase != PHASE_BATTLE` 同源）。
+	var idle := _make_run(12)
+	if idle != null:
+		_expect(idle.toggle_pause() == false, "pause_rejected_outside_battle")
+		_expect(idle.paused == false, "pause_not_set_outside_battle")
+	## ⑥ 生命周期：`setup()` 与 `close_run()` 都归零。
+	var fresh := _make_run(13)
+	if fresh != null:
+		_expect(fresh.paused == false, "pause_cleared_by_setup")
+		_expect(fresh.paused_time == 0.0, "pause_time_cleared_by_setup")
+	run_state.close_run()
+	_expect(run_state.paused == false, "pause_cleared_by_close_run")
+	## `summary()` 暴露 `paused_time`（页面层与统计都靠它）。
+	var panel := run_state.summary()
+	_expect(panel.has("paused_time"), "pause_summary_has_field")
+
+## 当前全部存活敌人的位置（`tag -> Vector2`）。用**排序后的 tag 列表**遍历，
+## 保证两次调用得到可逐项比较的同一顺序（Dictionary 迭代顺序不可靠）。
+func _enemy_positions(run_state: SurvivalRun) -> Dictionary:
+	var result := {}
+	if run_state == null or run_state.duel == null:
+		return result
+	var tags: Array = run_state.enemy_ai.keys()
+	tags.sort()
+	for raw_tag in tags:
+		var tag := String(raw_tag)
+		## 不写 `TankBody` 类型标注 —— 本测试没有 preload 它，GDScript 会报「找不到类型」。
+		## 为了一个类型标注去加一条 preload 会让依赖图多一条无意义的边。
+		var hull = run_state.duel.tank_of(tag)
+		if hull == null:
+			continue
+		result[tag] = hull.position
+	return result

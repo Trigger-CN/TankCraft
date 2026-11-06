@@ -51,12 +51,6 @@ func module_ids(layer: String) -> PackedStringArray:
 	ids.sort()
 	return ids
 
-func modules_for_layer(layer: String) -> Array[Dictionary]:
-	var result: Array[Dictionary] = []
-	for module_id in module_ids(layer):
-		result.append(get_module(module_id))
-	return result
-
 func global_number(key: String, fallback: float = 0.0) -> float:
 	return float(global_data.get(key, fallback))
 

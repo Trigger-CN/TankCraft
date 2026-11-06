@@ -4405,6 +4405,259 @@ Boss 波「至少精英」的下限规则独立保留。`main.gd` 的 `MATCH_DIF
 - **未在 Android 上验证，任何 APK 均不存在。**
 
 
+#### 11.4.2.26 待完善清单排查（v3.47，只排查不改码）
+
+**用户原话**：「检查那些地方还需要完善」。
+**性质**：**只诊断、不改任何代码** —— `scripts/` / `tests/` / `data/` 一行未动。结论写入 `docs/roadmap.md` §4.5（清单本体）与本文件本节（技术背景）。
+**与 v3.45 报告的关系**：§7.3（有明确触发条件）与 §7.4（明确不建议）的结论**全部仍然有效，本节不重复也不推翻**；本节列的是那两份清单**没有覆盖到**的项。
+
+##### 一、方法与基线
+
+- 基线 `HEAD = df82bd8a`（v3.46，已推送），`git status --porcelain -uall` = 0 行。
+- `scripts/*.gd` **22** 个、`tests/*.gd` **26** 个。
+- **8 个独立扫描脚本**（`.me/tmp/main/scan47_*.py`）：`scan47_keys.py`（数据键读取）、`scan47_coverage.py`（脚本测试覆盖）、`scan47_content.py` / `scan47_content2.py`（内容量）、`scan47_upgrades.py`（升级效果空转）、`scan47_gaps.py`（功能完整性）、`scan47_debt.py`（规模与死代码）、`scan47_exact.py`（零引用函数二次核实）。
+
+##### 二、扫描器自身的两类误报（**必须记，否则结论不可信**）
+
+**误报 A：「零引用函数」28 个里 13 个是误报。** 第一版用「名字后跟 `(`」判调用，漏掉了三种**不带括号**的引用形式：
+1. `entries.sort_custom(_order_before)` —— 传 `Callable` 而不调用；
+2. `_match_part_colour.bind(base)` —— `.bind()` 后传入；
+3. `Callable(self, "_draw_text_on").bind(canvas)` —— 字符串形式。
+另有 `reset` / `ratio` 这类短名命中 `_reset_state` / `entry["ratio"]` 的**子串误报**。改用词边界正则 `(?<![A-Za-z0-9_])name(?![A-Za-z0-9_])` 并逐条打印命中行人工确认后，**真正的零引用是 15 个**。
+
+**误报 B：「零读取数据键」13 个里 8 个是误报。** `aim_error_deg_{recruit,veteran,elite,ace}` 与 `reaction_ms_{…}` 在 `bot_ai.gd:60-61` 是用 **`"aim_error_deg_%s" % tier`** 拼接读取的，字面量里没有完整键名。**真正零读取的 5 个键**：`menu_item_height_px` / `menu_safe_margin_px` / `menu_preview_spin_deg_s` / `boot_logo_time_s` / `executive_hz`；其中 `executive_hz` 是**刻意**（见 §14.8 的说明：「与 `physics_hz` 同值，执行层没有独立累加器」）。
+
+> **教训（已进 `agent_note.md` §8）**：扫「是否被调用 / 是否被读取」的结论，**必须能举出每一个被排除的误报形式**。这与 v3.46「判调用要看那一行是什么」是同一条教训的第二次出现。
+
+##### 三、P0（4 项）
+
+| # | 项 | 实测 | 为什么是 P0 |
+| --- | --- | --- | --- |
+| P0-1 | 设置不持久化 | `SETTINGS_SAVE` 在 `scripts/` 与 `tests/` **命中 0**；`_glow_enabled` / `_motion_enabled` 只改内存与 `WorldEnvironment`（`main.gd:575`） | 玩家每次开游戏都要重设，且**无任何提示说明它是临时的** |
+| P0-2 | 生存模式没有暂停 | `PAUSE_SURVIVAL` 命中 **0**；`survival_run.gd` 状态机只有 `STAGE_BATTLE/LEVEL_UP/SHOP/MODIFY/SUMMARY` | 生存是**一局几十分钟**的模式，对战模式有 `MatchState.toggle_pause()`（`match_state.gd:71`），生存没有 |
+| P0-3 | 设置页只有 3 行 | `main.gd:1794` `labels := ["辉光", "动效", "返回"]`；`_toggle_setting()` L570-580 只处理 index 0/1/else | **没有音量、分辨率、全屏、键位、语言** —— 加上 P0-1，设置页实际上只有两个开关 |
+| P0-4 | 退出无二次确认 | `_activate_main_menu()` 的 `else` 分支直接 `get_tree().quit()`（`main.gd:566-567`） | 误触即退出 |
+
+> **P0-3 的一个实现细节**：上下界**硬编码在 2 处** —— `main.gd:457` 的 `mini(_settings_index + 1, 2)` 与 `main.gd:498` 的 `range(3)`。加第 4 行必须同时改这两处，否则键盘与鼠标行为会不一致（这正是 v3.45 报告 B1「8 条 if/elif 链」问题的一个具体实例）。
+
+##### 四、P1（6 项）与 P2（6 项）
+
+完整表格见 `docs/roadmap.md` §4.5.2 / §4.5.3。这里只记三条**需要技术判断**的：
+
+**P1-3 `processing_multiplier` 是死字段。** `data/upgrades/upgrades.json` 9 条升级**每条都有**，但全仓只有 `data_validator.gd:144` 的 `_require_positive_number_at()` 在**校验**它，**零运行时读取**。也就是说：玩家在改装页看到一件「加工速度 0.9」的升级，**这个数字对游戏没有任何影响**。这与 §11.4.2.21 已登记的结论一致，但当时没有给出处置建议 —— **本节的建议是「要么实现、要么从 data 删掉，悬着最糟」**，因为一个「看起来有、实际没有」的字段会持续误导后续的平衡调整。
+
+**P1-4 15 个零引用函数里，有两个不能直接删。** `duel.remove_side` 与 `damage_system.reset` 是**将来要用的生命周期 API**（前者对应 `add_side` 的逆操作，后者对应一局结束后的状态复位）。其余 13 个（`main.gd` 的 5 个 `_*_to_screen` / `_option_window_start` / `_remove_part_under_mouse`、`module_defs.modules_for_layer`、`battle_viewport.set_painter`、`cannon_bank.ammo_for_caliber`、`grid_builder.validation_report_summary`、`fx_layer.ratio`）**可以直接删**；`runtime_builder` 的 5 个与 `expedition_run.take_from_inventory` 属于**零运行时调用方的脚本**，删它们等于删半个脚本，需要单独决策。
+
+**P2-4 深拷贝 155 处，但仍不能说它是性能问题。** `data_registry.gd:37-50` 的五个查询全部 `duplicate(true)`，调用点 `get_module` **104** / `get_ammo` 15 / `get_upgrade` 15 / `get_arena` 13 / `get_blueprint` 8。**本轮仍未做 profile** —— 所以只能说「是结构性成本」，**不能**说「是 wave12 超预算的成因」。这一点与 v3.45 报告 §2.7 的边界一致，不因本轮复查而升级为结论。
+
+##### 五、测试与证据缺口（本项目当前最大的盲区）
+
+**26 项 smoke 对 UI / 菜单层零覆盖。** 在 `tests/` 全目录搜索 `_draw_main_menu` / `_draw_settings` / `_handle_mouse` / `_activate_main_menu` / `_draw_build` / `_toggle_setting`，**只命中 9 条，全部是注释**：
+
+- `tests/editor_bounds_smoke.gd:8,18` —— 注释里提到 `_draw_build`，且明确写「**不调 `_draw_build()`**：在 `_draw()` 之外调绘制函数会刷屏 `Drawing is only allowed…`」。
+- `tests/mouse_input_smoke.gd:10,11,95,99,104,117,161` —— 注释里说明它守的是 `_handle_mouse` 的**栈溢出回归**，不是菜单交互。
+
+**这不是疏忽，是 `_draw` 在 headless 下根本不可执行的必然结果。** 但它的后果是：**UI 的正确性历史上完全依赖用户实机试玩发现** —— 「菜单元素重叠」「层级选择和标题重叠」「鼠标没适配」「生存模式 UI 需要优化」每一条都是用户实机玩出来的。
+
+**写边界时必须把这条说清楚**：可以说「有 26 项 headless 测试」，**不能**说「UI 有测试覆盖」。
+
+##### 六、已知边界
+
+- 全部为**静态扫描 + 源码直读**。
+- **无实机试玩**（AI 侧手段只有 headless 测试、脚本驱动截图、像素比对、探针断言；真人试玩一直由用户执行）。
+- **无 profile**（所以深拷贝与 wave12 超预算的因果关系**仍未建立**）。
+- **本轮未改任何代码，也未新增测试**。
+- **未在 Android 上验证，任何 APK 均不存在。**
+
+
+#### 11.4.2.27 设置持久化 / 设置页扩行 / 生存暂停 / 退出确认 / processing_multiplier 定性（v3.48）
+
+> 本节记录 v3.48 执行轮的六项改动。**待完善清单本体**在 `docs/roadmap.md` §4.5，**排查背景**在 §11.4.2.26。
+> 执行顺序按 §4.5.5 的建议：P0-1 + P0-3（共用同一处代码）→ P0-2 → P1-3 → P1-4/5/6。
+> **P0-4 是本轮补进顺序的** —— §4.5.5 的建议顺序漏了它，而它是 P0 项。
+
+##### 11.4.2.27.1 设置持久化（P0-1）
+
+**症状**：`_glow_enabled` / `_motion_enabled` 是纯内存字段，重启即丢，而界面上没有任何提示说明它是临时的。
+**根因**：设置项从引入起就没有持久化路径 —— 不是「坏了」，是「从未实现」。
+
+**新增 `scripts/user_settings.gd`**（`extends RefCounted`）：
+
+| 项 | 值 |
+| --- | --- |
+| 存储 | `ConfigFile` → `user://settings.cfg`，段名 `display` |
+| 键 | `glow_enabled` / `motion_enabled` / `window_mode` / `debug_readout` |
+| 构造 | `_init(settings_path := DEFAULT_PATH)` —— **路径可注入** |
+| `load_settings() -> bool` | 文件不存在 / 打不开 / 损坏 → 保留当前值并返回 `false`，**不报错** |
+| `save_settings() -> bool` | 父目录不存在时 `make_dir_recursive_absolute` |
+| `window_mode_label() -> String` | 越界**钳到合法范围**，绝不返回空串 |
+| `cycle_window_mode() -> int` | `(window_mode + 1) % WINDOW_MODES.size()` |
+
+四条设计决定：
+
+1. **只做「读 / 写一份键值」，不碰任何引擎节点、不读 `data/*.json`** —— 这样 headless 测试能在临时路径跑完整 round-trip 而不污染真实用户目录。**路径可注入是它唯一为可测性付出的接口成本。**
+2. **不认识的值一律退回默认，不报错。** 设置文件损坏绝不能让游戏打不开 —— 它只是一份偏好记录，不是玩法数据。缺键 / 缺段 / 类型不对全部按「用默认值」处理。`_read_bool()` 接受 `bool` 与 `int`/`float`（手改过的 `0`/`1`），**不接受字符串 `"true"`**（那说明文件被别的东西写坏了，宁可退回默认值）。
+3. **`WINDOW_MODES := ["最大化","全屏","窗口化"]` 留在代码里。** 它是**界面档位名**（与 `MATCH_DIFFICULTY_LABEL` 同一类），不是玩法数值；真正需要进 `data/*.json` 的是玩法常量与数值范围。
+4. **`window_mode` 的下标即存档值**，因此只能在末尾追加档位、**不得重排**。
+
+`main.gd` 侧的四个接入点：
+
+- **`_ready()` 先 `_load_settings()` 再确认窗口模式。** 顺序反了的话，玩家选的窗口模式会被启动流程覆盖一次。
+- **每次切换立即写盘**（`_toggle_setting()` 末尾 `_persist_settings()`），不攒到退出：设置项的语义就是「设一次就好」，攒到退出会在崩溃 / 强制关闭时丢掉；写入量只有 4 个键。
+- **「启动即最大化」的强制收窄为「只在没有设置文件时执行」**（`not FileAccess.file_exists(_settings.path)`）。这是对用户「游戏打开时默认最大化」要求的**有意识收窄**：首次运行仍最大化，玩家显式选择后尊重选择 —— 否则玩家选「窗口化」会被改回最大化，设置形同虚设。
+- **`_apply_window_mode()` 在 headless 下早退**：`window_set_mode()` 在 headless 是空操作，但显式早退能让截图 / 测试路径的行为可预期。
+
+> **`WINDOW_MODE_FULLSCREEN` 与 `project.godot` 的 `mode=2`（最大化）不是同一件事**：全屏是独占显示，最大化是带标题栏的最大窗口。**默认档仍是最大化。**
+
+##### 11.4.2.27.2 设置页扩行与单一来源常量（P0-3）
+
+**症状**：设置页只有 3 行（辉光 / 动效 / 返回）。**真正的隐患不是行数少，而是「3」被硬编码在两处**：`mini(_settings_index + 1, 2)`（键盘）与 `range(3)`（鼠标命中）。加第 4 行必须同时改两处，**漏一处就出现「键盘跳不到新行 / 鼠标能点但键盘越不过去」的不一致**。这是 §11.4.2.26 记的「8 条 if/elif 链」问题的**一个可复现实例**。
+
+**修法**：引入两个单一来源常量，同时驱动键盘上下界、鼠标命中循环、`_settings_row_rect()` 与 `_draw_settings()`：
+
+```gdscript
+const SETTINGS_ROW_COUNT := 5
+const SETTINGS_ROW_Y := 360.0
+```
+
+设置页扩到 5 行：**辉光 / 动效 / 窗口模式 / 调试读数 / 返回**。
+
+**几何**：5 行占 `360 … 360 + 4×56 + 48 = 632`，所以说明文字必须从 y=620 移到 **y=700 / 728** —— 这是**计算而非猜测**。
+
+**事实更正（必须如实说）**：`_focus_target_y()` 旧版写的是 `MENU_ROW_Y`、`_settings_row_rect()` 写的是 `360.0`，而 `MENU_ROW_Y` **恰好也是 360.0** —— 所以**历史上从来没有可见偏移**。我最初把它记成「焦点条纵向会偏的既有瑕疵」，**那个判断是错的**：那是数值巧合而不是约束。仍然把两处统一到 `SETTINGS_ROW_Y`（因为它确实该是单一来源），但**不沿用「修掉了一个偏移」的说法**。
+
+**新增 `debug_readout`（默认关）**：一个调试叠加层，默认开启会污染所有历史截图基线。它**画在淡入遮罩之后**（全页面最顶层）—— 一个「被其他 UI 盖住的调试信息」等于没有。
+
+##### 11.4.2.27.3 生存模式暂停（P0-2）
+
+**症状**：生存是**一局几十分钟**的模式，却**唯一不能暂停**；对战模式可以（`MatchState` 有 `toggle_pause()`）。两个模式的状态机各自独立实现，生存侧漏了这一项。
+
+**核心设计决定：暂停不进入状态机，它是 `STAGE_BATTLE` 上的正交标志。** 三条理由：
+
+1. 暂停不是「一种玩法阶段」，它不该被 `stage` 的分支遍历；
+2. 若把暂停做成 `STAGE_PAUSED`，**所有 `stage == STAGE_BATTLE` 的判据都要改**，而「漏改一处」正是 v3.23 `expire` 事件被静默丢弃的同类事故；
+3. 正交标志让「暂停中仍是战斗阶段」这个事实保持为真，`_survival_simulate()` 只需在入口拦一下，**`step_battle()` 的时序结构一行未动**（保住确定性）。
+
+**镜像 `match_state.gd` 的三件套**（签名与语义完全一致）：
+
+```gdscript
+var paused: bool = false
+var paused_time: float = 0.0
+
+func toggle_pause() -> bool:
+	if stage != STAGE_BATTLE or duel == null:
+		return false
+	paused = not paused
+	return paused
+```
+
+`toggle_pause()` 返回**切换后**的状态。返回 `false` 有两种含义（当前阶段不允许暂停 / 本次调用把它恢复了），**调用方判「现在是不是暂停」应读 `paused`，不是读返回值**。**只允许在 `STAGE_BATTLE` 里暂停** —— 升级页 / 商店页 / 改装页本身就是「不推进」的交互态，在那里再叠一个暂停只会让按键意义模糊。
+
+**两层拦截，缺一不可**：
+
+- `SurvivalRun.step_battle()` 入口 `if paused: paused_time += dt; return` —— 保证「即使有人直接调 `step_battle()`（测试、探针、将来的其它入口）也不会在暂停中推进」。**`dt` 根本没被用掉，所以 `wave_time_left` 自然不走** —— 那是「暂停」这个词的全部含义。
+- `main.gd::_survival_simulate()` 的 `if survival.paused: _survival_accumulator = 0.0; return` —— 复用既有的「清零累加器 + return」模式。**不清零的话暂停 3 分钟恢复后累加器里躺着 180 秒，会一次跑满 `DRIVE_MAX_STEPS` 步，坦克瞬移。**
+
+**UI 侧的单一拦截点**：`_is_battle_screen()` 的生存分支加 `and not survival.paused`。左键开火、鼠标瞄准、空格开火都经它判一次，所以**一处加条件就把三条路径全部挡住** —— 写三遍就一定会漏一处（v3.23 的教训）。对局页早就这么做了（`not match_session.paused`），生存页只是补上同样的那一条。
+
+**其余六个细节**：
+
+- **`KEY_P`，与对局页 `_handle_match_key()` 的 `KEY_P` 同键同语义** —— 两个模式里「暂停」应该是同一个按键。放在 `KEY_R` 之前判，但**暂停中按 R 仍会重开**（重开是「放弃这一局」，与暂停正交，不该被暂停挡住）。
+- **暂停 / 恢复都要清按键集**（`_survival_held.clear()` + `_survival_apply_input()`）：暂停期间按下的 W/A/S/D 不会被消费，恢复后若不清理，坦克会带着「玩家早已松开的键」跑出去。
+- **空格开火前必须显式判 `survival.paused`**：`step_battle()` 不推进也拦不住 `duel.fire()` 这个**直接调用**。
+- **`setup()` 与 `close_run()` 都归零 `paused`。** 两处都写是刻意的 —— 两者可被独立调用（测试与「回主菜单再进生存」两条路径），任一处漏写都会把暂停态漏到下一局，玩家会以为游戏卡死。
+- **遮罩最后画**（`_draw_survival_hud()` 末尾），盖住战场与 HUD。**只用一层半透明黑 + 两行字，不加按钮** —— 恢复只需要按 P；加一个可点按钮会多一条需要单独测的鼠标路径（本项目 UI 测试对菜单层零覆盖）。
+- **右 HUD 键位块行距 30 → 26**：加入「P 暂停 / 继续」后共 5 行文字 + 1 行相机读数。`SURVIVAL_MIRROR_RECT` 从 y=436 开始；新布局 330/356/382/408/430，最后一行的**字顶**在 430 − 13 = 417 < 436。若继续用 30 px 行距，第 5 行会到 450 —— 直接压在镜像面板上。
+
+> **「战斗期禁止改装」这行提示不能删。** 它是本项目的核心玩法规则（用户明确要求「正常战斗时不允许改装」）。我第一版重排时为塞进按键提示把它删了，**这是错的**，已改为压缩行距、全部保留。**暂停不改变 `stage`，所以这条规则仍然成立。**
+
+##### 11.4.2.27.4 退出二次确认（P0-4）
+
+**症状**：主菜单选中「退出」按一次即退出，误触即丢失进度。
+
+**修法：改一行文案 + 一个布尔标志，不新建弹窗。** 本项目 UI 全部是 `_draw` 手绘、**没有通用弹窗组件**，新建一个弹窗层级（遮罩 / 按钮 / 焦点 / 鼠标命中）的成本远高于一个布尔标志。
+
+- 第一次激活：`_exit_armed = true`，末行文案变「确认退出？（再按一次）」；
+- 第二次激活：`get_tree().quit()`；
+- **选中任何其它项自动卸膛**（`if _menu_index != MENU_ITEM_COUNT - 1: _exit_armed = false`）；
+- **`KEY_ESCAPE` 卸膛**是取消路径 —— 没有它，玩家一旦上膛就只能真的退出或跑去点别的项；
+- 上膛状态**用红字**：它与其他五项的行为不同（再按一次会真的退出），只改文字不改颜色在霓虹配色下很容易被当成普通选中项；
+- 文案由 `_main_menu_label(index, label)` 单独决定，**不在 `_draw_main_menu()` 的局部 `labels` 数组里再写一遍状态判断**（会让「显示」与「实际状态」两处各写一份，迟早不同步）。
+
+##### 11.4.2.27.5 `processing_multiplier` 定性：实现，不是删（P1-3）
+
+**先区分两个同名字段**（这是决定「实现还是删」的关键）：
+
+| 字段 | 位置 | 语义 | 值 |
+| --- | --- | --- | --- |
+| `processing_factor` | `data/ammo/calibers.json` | **弹药口径**属性 | `cal_20`=0.7 / `cal_40`=0.85 / `cal_76`=1.0 / `cal_120`=1.25 / `cal_155`=1.5 |
+| `processing_multiplier` | `data/upgrades/upgrades.json` | **升级**属性 | `up_split` 1.2 / `up_velocity` 0.9 / `up_explosive` 1.3 / `up_delay` 1.5 … |
+
+两者语义不同、互不替代。hook 是 `AmmoNetwork._processing_factor()` —— 它是加工时间的**唯一乘数入口**（`_module_advance()` 与 `module_states()` 都走它），只是没接升级侧。
+
+**为什么选「实现」而不是「删」**：字段已有 9 条数据、语义明确（「同一发弹药每多一层升级，过下一件改进器就更费 / 更省时」），且玩家在改装页会看到这个数字。删掉会让 9 条升级同时少一个维度；实现只需一处乘法。
+
+**实现**：
+
+```gdscript
+func _processing_factor(ammo_id: String, upgrades: Array = []) -> float:
+	if definitions == null:
+		return 1.0
+	var ammo_factor := maxf(float(definitions.get_ammo(ammo_id).get("processing_factor", 1.0)), 0.01)
+	return ammo_factor * _upgrade_processing_multiplier(upgrades)
+```
+
+`_upgrade_processing_multiplier(upgrades)` 按 `effect` 计 `stack_limit` 逐条相乘，**去重规则与 `DamageSystem._upgrade_profile()` 同源** —— 否则同一升级堆满后会把加工时间拉到离谱的值，而伤害侧却按上限封顶，两边对「堆了几层」的理解就不一致了。
+
+- **第二参默认空数组 ⇒ 旧调用点语义不变。**
+- **`clampf(total, 0.1, 4.0)` 是安全界而不是平衡旋钮**：不夹的话多件升级叠加会造出「永远做不完的黑洞」。要调手感请改 data 里的倍率。
+- **字段缺失时按 `1.0`**：旧存档 / 未来新增升级不会因为漏写这个字段而炸。
+
+**两个调用点都必须传载荷**：`_module_advance()` 传 `next.get("upgrades", [])`；`module_states()` 传 `work.get("upgrades", [])`。**进度条分母必须与 `_module_advance()` 的起跑值同源**，否则带升级的弹药在进度条上会显示到 100% 后继续等 —— 那看起来就像卡住了。
+
+**一条必须记住的实现语义（决定测试怎么写）**：**加工时间用的是「进来那发弹药」的载荷**（`_module_advance()` 的 `next.get("upgrades", [])`），而**改进器的槽配置只影响输出载荷**（`payload = 原载荷 + intrinsic + 槽配置`）。因此：
+
+- **测 `processing_multiplier` 必须用两级改进器**：第一级负责把升级「染」进弹药载荷，第二级才是被测量者。单级布局下被测量的改进器永远收到工厂产出的白弹药，三种情况的 tick 数**必然相同** —— 那不是实现失效，是**测错了对象**（我第一版就是这么写的）。
+- 实测：`tick_dt() = 1.0 / maxf(net_hz, 1.0)`，`net_hz = 10` ⇒ 每 tick 0.1 s；`modifier_mk1` 的 `processing_time_s = 0.6`，`cal_20` 的 `processing_factor = 0.7` ⇒ base = 0.42 s = **5 tick**；fast（×0.9）= 0.378 s = **4 tick**；slow（×1.5）= 0.63 s = **7 tick**。
+
+> **玩家可感知的变化（本轮唯一改变玩法数值的修改）**：已经带升级的弹药过改进器会变快 / 变慢。**白弹药（载荷为空）时间完全不变**，所以开局体验与 v3.47 一致。
+
+##### 11.4.2.27.6 清理与验证（P1-4/5/6）
+
+**P1-4 删 13 个零引用函数**（判据：词边界正则 `(?<![A-Za-z0-9_])name(?![A-Za-z0-9_])`，逐文件统计**非定义行**的命中数并打印每一处命中行人工确认）：
+
+`fx_layer.ratio` / `module_defs.modules_for_layer` / `battle_viewport.set_painter` / `cannon_bank.ammo_for_caliber` / `grid_builder.validation_report_summary` / `runtime_builder.seed_from_blueprint` + `add_scrap` + `can_afford` / `expedition_run.take_from_inventory` / `main._drive_to_screen` + `_match_to_screen` + `_survival_to_screen` + `_option_window_start` + `_remove_part_under_mouse`。
+
+**保留两个**：`duel.remove_side`（`add_side` 的逆操作）、`damage_system.reset`（一局结束后的状态复位）—— 它们是**将来要用的生命周期 API**。
+
+**误报形式（必须能举出）**：① 不带括号的引用（`sort_custom(_order_before)`、`_match_part_colour.bind(base)`、`Callable(self, "_draw_text_on")`）；② 短名子串（`reset` 命中 `_reset_state`，`ratio` 命中 `entry["ratio"]`）。
+
+**P1-5 删 4 个零读取数据键**：`menu_item_height_px` / `menu_safe_margin_px` / `menu_preview_spin_deg_s` / `boot_logo_time_s`（`globals.json` 的 `menu` 块）。**保留 `executive_hz`** —— §14.8 与 L1498 明确记载它是**刻意**的（与 `physics_hz` 同值，执行层没有独立累加器，多一层只会引入相位抖动）。JSON 一律用 Python 脚本改（逐行匹配键定义 + 语义等价断言：`V348_SEMANTIC_OK True` / `delta -129 B` / `global` 与 `survival` 块逐层相同），**不用 `File.Edit` 手改行** —— v3.46 因此误删过 `tank_collision_coefficient` 整行。
+
+**P1-6 `arena_pit` / `arena_corridor` 本轮不删**：删掉等于放弃「多地图」的现成素材，而保留成本只有 2 个 JSON 的字节数；且删会让 `data_smoke arenas=3` 变化，需要额外解释。改为在文档里标注「**纯数据、零加载**」。
+
+**验证（全部为 headless 证据）**：
+
+- **27 项 smoke 全绿、零 `SCRIPT ERROR`**（`s48_progress.txt`，26 → 27，唯一新增 `user_settings_smoke`）。**与 v3.46 基线逐项对照：所有敏感数字（`files=26` / `arenas=3` / `mass=61.0` / `cells=43` / `scrap=751.0` / `errors=34` / `checks=57` / `checks=600`）全部逐字相同。**
+- **三组负向对照**（备份文件式：复制原文件 → 注入缺陷 → 跑测试 → 从备份写回 → 断言逐字节一致；**全程未用 `git checkout` / `git restore`**）：暂停早退 / 加工倍率 / 设置写入各命中预期失败标签，三组 `RESTORED_IDENTICAL=True`。
+- **五项硬约束**：`omega_max` 仍 3.0；`scripts/tank_body.gd` **零改动**（`v_max=192.1` 未变 ⇒ `max_speed()` 闭式仍精确成立）；`_next_unit()` 调用次数 `HEAD=21` == 工作区 `21`；暂停不改变 `stage`（「战斗期禁止改装」仍成立）；单场景架构未动。
+- **11 个被改脚本全部 `--check-only` 干净。**
+
+**三处我自己造成的真实产品回归（全部被 `--check-only` / 全量 smoke 抓到并修好，无一流入提交，必须完整陈述）**：
+
+1. **`runtime_builder.part_at_module()` 被误删** —— 它是 `tests/runtime_build_smoke.gd` 的**唯一观测手段**（6 处调用），缺失后该测试的 `_init()` 在 `SCRIPT ERROR` 处中断，`quit(0)` / `quit(1)` 一个都执行不到，**进程永久挂起**。根因是删除核实脚本**只扫了 `scripts/`，没扫 `tests/`** —— 这正是 v3.46 已记过的「删公共 API 后要搜整个仓库」教训。已补回 `part_at_module` / `part_at_mobility` / `pending_info` 三个查询接口。
+2. **`_battle_viewport.configure(...)` 被误删** —— 插入 `_load_settings()` 时 `File.Edit` 的 `replace` 把紧邻的下一行吞掉了。后果是 `viewport` / `camera` / `world` 全为 null ⇒ **整个战场完全不渲染**。这是本轮最严重的一处自伤。
+3. **`build_cost()` 被连带删除** —— 删 `can_afford()` 时选中范围过大，而 `build_cost()` 是 `request_build()` 的依赖。
+
+另有 **5 次 `File.Edit` 边界事故 + 1 处 preload 四行重复 + 3 处把测试文件改坏**（`survival_smoke` 少一个格式化参数 / `TankBody` 未 preload / `upgrade_flow_smoke` 转义引号），全部已修。**教训：`replace` 选中的行数必须等于 `new_lines` 里覆盖的完整行数；唯一可靠的补救是每次改完都跑 `--check-only` 并跑全量 smoke。**
+
+**两个测试装置的真实弱点（本轮发现，必须记入后续审核）**：
+
+1. **运行时 `SCRIPT ERROR` 不等于断言失败，而且会让 `extends SceneTree` 进程永久挂起。** `_init()` 被中断后 `quit()` 执行不到，进程停在事件循环里；`Terminal` 只报 `output_idle` / `changed_rows: 0`，看起来和「命令还在跑」完全一样。**规则：跑 smoke 一律带 `--quit-after` 兜底；判断完成只看工件文件与提示符。**
+2. **反向用例对「默认值为 `false` 的布尔字段」没有区分力。** `debug_readout` 默认 `false`，「压根没写这个键」读回也是 `false`，所以 `reverse_debug` 恒成立。**反向用例的期望值必须与「缺键时的默认值」不同。** 已知覆盖缺口，本轮不修。
+
+**证据边界**：全部为 headless smoke + 负向对照 + 源码直读。**本次改动尚未经过用户实机确认**；`main.gd::_survival_simulate()` 的累加器清零分支**在 headless 下测不到**（`--script` 模式下 `_process()` 不跑，只有代码审读证据）；**UI 改动（设置页 5 行 / 退出确认文案 / 暂停遮罩 / 调试叠加层）没有任何自动化测试覆盖**（`_draw` 在 headless 下不执行，`tests/` 对 UI 层零覆盖）；**没有做 profile**；**未在 Android 上验证，任何 APK 均不存在**。
+
 #### 11.4.3 两个 SETUP 界面
 
 **`EXPEDITION_SETUP`（单人远征）**
@@ -5483,14 +5736,18 @@ M3 的物理验收基准（`M 61.0 u` / `I 104 064 u·px²` / `T 9000` / `v_max 
 | --- | --- | --- |
 | `MENU_TRANSITION_TIME` | 0.18 s | 菜单界面切换淡入淡出时长 |
 | `MENU_FOCUS_TIME` | 0.12 s | 焦点竖条展开时长 |
-| `MENU_ITEM_HEIGHT` | 56 px | 主菜单列表行高 |
-| `MENU_SAFE_MARGIN` | 160 px | 菜单左右安全边距（1920 基准） |
-| `MENU_PREVIEW_SPIN` | 15 °/s | 主菜单预览坦克自转速度 |
-| `BOOT_LOGO_TIME` | 0.8 s | 启动画面最短显示时长（可跳过） |
+| `MENU_ITEM_HEIGHT` | 56 px | 主菜单列表行高。**v3.48 已从 `data/globals.json` 删除**（`menu_item_height_px` 零读取）—— 行高现由代码常量 `MENU_ROW_STEP` / `MENU_ROW_HEIGHT` 决定 |
+| `MENU_SAFE_MARGIN` | 160 px | 菜单左右安全边距（1920 基准）。**v3.48 已删除**（`menu_safe_margin_px` 零读取）—— 边距现由代码常量 `MENU_ROW_X` 决定 |
+| `MENU_PREVIEW_SPIN` | 15 °/s | 主菜单预览坦克自转速度。**v3.48 已删除**（`menu_preview_spin_deg_s` 零读取）—— 预览自转由 `sin(_time * …)` 驱动，无独立常量 |
+| `BOOT_LOGO_TIME` | 0.8 s | 启动画面最短显示时长。**v3.48 已删除**（`boot_logo_time_s` 零读取）—— 本项目**没有启动画面**，该键从未被读取 |
 | `UI_SCALE_MIN` | 0.80 | UI 缩放下限（对应 §11.3 的 80%） |
 | `UI_SCALE_MAX` | 1.50 | UI 缩放上限（对应 §11.3 的 150%） |
+| `SETTINGS_ROW_COUNT` | 5 | **v3.48 新增**（代码常量）。设置页行数 —— 键盘上下界 / 鼠标命中循环 / 绘制循环 / `_settings_row_rect()` **共用的唯一来源**。它取代了旧版硬编码在两处的 `2` 与 `3` |
+| `SETTINGS_ROW_Y` | 360.0 | **v3.48 新增**（代码常量）。设置页行起点，与 `_settings_row_rect()` **同源**。旧版 `_focus_target_y()` 读的是 `MENU_ROW_Y`，两者**数值恰好都是 360.0**，所以历史上没有可见偏移（巧合，不是约束） |
 
-> 本节八个常量同样属于**唯一权威数值**，代码禁止内联（§14 总则）。
+> 本节**当前有效**的常量同样属于**唯一权威数值**，代码禁止内联（§14 总则）。
+>
+> **v3.48 的净变化**：`data/globals.json` 的 `menu` 块删掉 4 个零读取键后，只剩 `menu_transition_time_s` / `menu_focus_time_s` / `ui_scale_min` / `ui_scale_max` **四个键真正被读取**；同时**新增两个代码常量** `SETTINGS_ROW_COUNT` / `SETTINGS_ROW_Y`（它们是界面布局的单一来源，按既有惯例留在代码，不进 data）。
 
 ### 14.10 触屏与移动端参数
 
@@ -5769,4 +6026,6 @@ M3 的物理验收基准（`M 61.0 u` / `I 104 064 u·px²` / `T 9000` / `v_max 
 | 2026-10-30 | v3.43 | **生存模式掉落与房屋机制：机制一直在，缺的是「看得见」**（用户原话：「完善生存模式的机制，敌人击杀也掉落模块和金钱，房屋生命值过高，房屋摧毁也会掉落金币和模块」）。① **先核事实，不按字面改**：读码确认三件事里有两件**本来就已实现** —— 普通敌人击杀给 `credit_per_kill = 40` + `xp_per_kill = 25` + `enemy_drop_chance = 0.25` 掉它蓝图里已有的一件（Boss 更给 320 cr / 200 xp / **必掉 3 件**）；房屋摧毁给 `credit_per_house = 55` + `xp_per_house = 12` + `house_drop_chance = 0.30` 掉一件并留残骸可再碾一次得 18 cr。② **真正的缺陷是反馈链断了**：`main.gd::_survival_step()` 的 `if/elif` 链里**根本没有 `enemy_defeated` 分支**，`_reap_enemies()` 产生的事件被直接丢弃；`house_destroyed` 也只有一句没数字的「房屋被摧毁」。于是玩家击毁敌人、拆掉房子时，屏幕上什么都不发生，金钱只在外侧 HUD 静默跳一下。**这与 v3.20 修掉的「打上去没反应」同源：函数算对了、事件也发了，但页面层没接。机制存在 ≠ 可感知。**③ **事件带出收益**：`enemy_defeated` / `house_destroyed` 都补 `credit` / `xp` / `module` 三个字段；`main.gd` 新增 `enemy_defeated` 分支、重写 `house_destroyed` 分支，写文案并推一条绿色「+N cr」漂浮数字。漂浮数字**不复用** `CombatView.push_damage()` —— 它的符号语义写死了 `dealt → +N`、`received`/`shield` → `-N`，金钱没有正负之分；改为直接 `_survival_fx.push(kind="damage", …)` 并自己给 `text`、把 `mode` 标成 `"credit"` 参与限流。④ **数值下调 + 保底**：`house_hp` 260 → **120**、`house_armor` 5 → **3**（`cal_76` 由 6 发降到 3 发、`cal_40` 由 16 发降到 7 发；每波只 4 栋、波时限 45 s，260 HP 确实过高）；`house_drop_chance` 0.30 → **0.70**、`enemy_drop_chance` 0.25 → **0.35**；新增 `house_drop_pity = 3` / `enemy_drop_pity = 4` —— 纯概率时代「连着四五个敌人都没掉」频繁出现，而当时又没有任何提示，这才是「敌人不掉模块」的另一半原因。⑤ **`_roll_drop(chance, stream)` 的四个约束**：两条 stream（`house`/`enemy`）干次数**必须独立**，否则拆房会顺手抵掉敌人的保底；**保底分支不抽随机数**，所以同一 seed 的序列长度仍只取决于调用次数、确定性不破；干次数**跨波保留**、只有 `close_run()` 清零；Boss 走必掉路径**不参与** pity。⑥ **验证**：`tests/survival_smoke.gd` 新增两条验收（事件字段逐值等于 data、`module` 非空必已进库存、对纯函数 `_roll_drop(0.0, stream)` 的确定性阶梯断言、两 stream 隔离、真实拆房/击杀路径），全量 23 项 smoke 全绿（`s43_all.txt`）；负向验证 `negctl43.py`（备份文件而非 `git checkout`）摘掉保底分支后精确报 6 条 `*_pity_*` 失败、写回后 `NEGCTL43_PASS`。**本次改动尚未经过用户实机确认**；「房屋 120 HP 是否合适」是按弹药伤害与波时限算出的估计，不是实测手感。 | §3.4.4 §11.4.2.23 §14.8 §17 |
 | 2026-11-05 | v3.44 | **金钱收入提高：先补「下行螺旋」，再谈单价**（用户原话：「增加金钱收入，目前战斗消耗的模块想补上来有些困难」）。① **先量缺口**（探针 `probe44.gd` → `p44a.txt`，逐项实测）：模块价格 48 件中位 **90 cr** / 最高 **260 cr**（`cannon_76`=120、`ammo_factory_76`=140、`modifier_power`=110）；改前单波**理论最高**收入 wave1/3 = **542 cr**（敌人 160 + 房屋 292 + 残骸 90）、wave5/8 = **702 cr**，而那要求「配额敌人全杀 + 4 栋房全拆 + 10 处残骸全碾」同时达成。重建 2–3 件典型模块要 **240–400 cr**，缺口成立且与用户描述一致。② **根因是两层，不是「单价偏低」一层**：总量不足之外，原先收入**全部**来自「打中东西」（击杀 / 拆房 / 碾残骸），而打中东西本身要求坦克完好 —— **坦克一残，收入能力同步下降**，越残越穷，这才是「补不回来」的真机制，光调单价治不了。③ **修法（全部数据驱动）**：`credit_per_kill` 40→**60**、`credit_per_house` 55→**85**、`house_debris_credit` 18→**28**、`debris_credit_min/max` 15/45→**22/65**、`boss_credit_reward` 320→**460**；**新增过波结算奖金** `wave_clear_credit_base = 120` / `wave_clear_credit_per_wave = 40`，`wave_clear_credit_award(w) = base + per_wave × (w − 1)`（随波增长：模块价格 6–260 cr、后期被拆的件也更贵；固定额到中后期等于没涨）。发放点在 `step_battle()` 的过波分支并 append `{"kind": "wave_cleared", "wave", "credit"}`；**绝不能放进 `_enter_intermission()`** —— 测试与升级页返回路径会直接调它，放里面会多拿一份。`default_build_credits` 与商店价格本轮不动。改后理论上限 wave1 ≈ **942**、wave5 ≈ **1182 cr**。④ **玩家看得见**：`_survival_step()` 新增 `wave_cleared` 分支写「第 N 波通过 · 结算 +M cr」；商店页标题行追加「本波结算 +N cr」（`last_wave_credit`，`start_wave()` / `close_run()` 归零）。⑤ **验证**：新增 `_check_wave_clear_credit()`（公式三点 + 随波递增 + 真实过波路径 + `credit` 增量 `>=` 奖金 + 事件金额 + 生命周期）；`_check_boss_wave()` 的金钱断言改为 `boss_credit_reward + wave_clear_credit_award(本波)`（**行为变更导致的测试更新，不是放宽**）；负向验证 `negctl44.py`（备份文件式）摘掉 `credit += last_wave_credit` → 精确报 `boss_credit_reward 460.0000 != 740.0000`（460 + award(5)=280）与 `wave_credit_paid_0.00_of_120.00`，写回后 `NEGCTL44_PASS`；**23 项 smoke 全绿**（`s44_all.txt` 1086 B）。⑥ **顺带修掉既有测试装置缺陷**：`survival_smoke._init()` 只调用 19 个 `_check_*` 里的 **10 个**，另外 9 个从未执行（`git show HEAD:` 版本同样只有 10 个 → **既有缺陷**，`SURVIVAL_OK` 长期只盖 10/19）；接上后只有 1 条真红 `level_upgrade_collected` —— 旧断言只看 `collected_upgrades`，而 `_install_upgrade()` 在**车上有空槽时会直接写进 `part[\"upgrades\"]`**，改为断言 `staged or fitted` 并精确比对 `pick[\"id\"]`。**如实声明**：**本次改动尚未经过用户实机确认**；「真人实得 470–570 cr/波」是**按理论上限折扣的估计，不是实测**；「新数值够不够用」headless 无法验证；**未在 Android 上验证，任何 APK 均不存在**。 | §3.4.3 §11.4.2.24 §14.8 §17 |
 | 2026-11-05 | v3.46 | **执行 v3.45 审核报告 §7.1/§7.2 的 6 项修复**（用户原话：「按照建议开始修复」）；**§7.3 / §7.4 刻意未做**（触发条件未到 / 明确不建议）。① **P0 蓝图保存改进槽配置（报告 C2）**：`grid_builder._serialize_parts()` 对「定义里 `has("upgrade_slots")`」的模块写出 `item["upgrades"]`（**空数组也写** —— 圆程逐字节稳定 + 「本来没配」与「配了但丢字段」可区分；**不写 `intrinsic`** —— 模块类型属性，写盘会造第二真源）；`_parse_part()` 读回；新增 `_parse_upgrades()`，与 `set_modifier_upgrades()` **同源**校验（未知 id 丢弃 / 超 `upgrade_slots` 截断 / 按 `stack_limit` 逐 effect 去重），**非法项丢弃而不整条蓝图失败**。`data_validator.validate_blueprint()` 第 5 参 `upgrade_ids := {}`（向后兼容默认值）、`data_registry` 传参。新增 `tests/blueprint_roundtrip_smoke.gd`（20 条）。② **B3 尾逗号 + 严格 JSON 门禁**：`data/globals.json` 唯一一处真尾逗号已删（**从 `git show HEAD:` 原始字节用正则 `,(\s*[}\]])` 删，断言 `SEMANTIC_IDENTICAL True`、`DELTA -1` 字节、行数不变**）；新增 `tests/data_strict_smoke.gd`（28 条 / 26 个 JSON，查尾逗号 / `//` 注释 / `NaN` / `Infinity` / 单引号；**刻意不用 `JSON.parse_string()` 做严格性检查** —— 它恰恰容忍尾逗号，用它复检等于自证）。③ **B2 两条睡觉的验收接上**：`physics_smoke._check_performance(definitions)` 与 `camera_zoom_smoke._check_negative_control()` 接入 `_init()`，后者使 **`CAMERA_OK checks=594 → 600`**（+6 条断言）；接入前先用独立探针确认二者在当前代码下是绿的，**只接调用、不放宽也不收紧阈值**。④ **B2 门禁**：新增 `tests/selfcheck_smoke.gd` —— 扫 `tests/*.gd` 的 `func _check_xxx(` 定义并逐行统计调用点（**跳过空行 / `#` 注释行 / 定义行**），调用点为 0 即报 `SELFCHECK_UNCALLED` 并计失败；反向要求 `defs >= 120`。`SELFCHECK_OK defs=128 called=128`。⑤ **S1 商店稀有度改成按档加权抽取**：`shop_rarity_weight` 的语义**回归「抽取权重」**（[60,30,10] ⇒ 60%/30%/10%），不再被当成价格倍率（旧版 `1.0 + weight/total` ⇒ ×1.6/×1.3/×1.1）；价格改由新增 `shop_tier_price_multiplier` 控制（**默认 [1,1,1] ⇒ 成交价与 v3.44 相同**）。新增 `_rarity_tier()` / `_weighted_pick()` / `_tier_price_multiplier()`，重写 `_roll_shop()`，删除 `_rarity_multiplier()`。**每次抽取固定 2 次 `_next_unit()`**（一次选档、一次选件），确定性纪律未破。⑥ **S2 难度曲线进 data**：`tier_for()` 不再写死 `4/9/14`，改为遍历 `BotAI.TIERS` 读 `tier_wave_thresholds`（默认 `{1,5,10,15}`，**与旧值完全等价**，未顺手改难度）；`main.gd` 的 `MATCH_DIFFICULTY` 改用 `BotAI.TIERS` 消除字面量副本。⑦ **验证（全部实测）**：`run_smoke46.ps1` → `s46_all.txt` **26 项全绿**；`PHYSICS_OK` / `CANNON_OK` / `BUILD_OK` / `RUNTIME_OK` / `DATA_OK` / `DATA_ERROR_OK` / `CANNONVIEW_OK` / `PERF_OK` 与 v3.45 基线**逐字相同**，只有 `CAMERA_OK checks=600`；`omega_max` 实测仍为 **3.0**；**5 组负向对照全部 PASS 且写回逐字节一致**（`negctl46` → 3 条；`negctl46b` → 2 条；`negctl46c` → `called=126`；`negctl46d` → 4 条；`negctl46e` → 3 条）。⑧ **补了 2 个有区分力的验收**（原 `survival_smoke` 对 S1/S2 **零覆盖**）：`_check_shop_rarity_weights()`（权重压成 `[1,0,0]` → 每格必须普通档、`[0,0,1]` → 每格必须史诗档；探针实测默认权重 1200 样本占比 **0.602/0.301/0.098**）与 `_check_tier_thresholds_from_data()`（换表 `{1,2,3,4}` → w2/w3/w4 必须跟着变）。⑨ **必须如实记录的两件事**：**（a）我的自伤**——用 `File.Edit` 改 `data/globals.json` 时**误删 `tank_collision_coefficient` 整行**并破坏对象闭合，已用 HEAD 原始字节 + 正则还原（`SEMANTIC_IDENTICAL True`）；本轮共发生 **5 次**「`File.Edit` 替换范围与 `new_lines` 边界重叠」同类事故（均被后续 `--check-only` / 测试抓到，无一流入提交）。**（b）我上一轮审核里的「自我更正」本身是错的**——`camera_zoom_smoke._check_negative_control` 第 19 行是**注释**、第 278 行是**定义**，`_init()` 的 12 个调用里**确实没有它**；原判断是对的，「真未调用」应为 **2 个**而非 1 个，报告 §6 需第三次更正。⑩ **一处行为变化必须说明**：`editor_bounds_smoke` 的 premise 行从 `PREVIEW_PREMISE_OK inventory=6 > options=4` 变为 `PREVIEW_PREMISE_WEAK inventory=6 <= options=6` —— **不是缺陷、不是断言失败**（`PREVIEW_OK` 照常、`index_clamped_to_options` 仍通过），根因是 S1 让普通档 22 件里那 **6 种 6 cr 的 conveyor** 更常被抽到，于是 6 件全是 module 层。测试区分力未损（`_selected_index=6` 对 6 元素数组**仍越界**），**故意不改测试**。**玩家可感知的变化边界**：商店**价格没变**（档位倍率全 1.0），变的是**哪些商品会出现**（普通件更常见、史诗件更少见）；难度阈值与旧值**完全等价**，改的只是「以后调难度只需改 JSON」。**如实声明**：**本次改动尚未经过用户实机确认**；全部证据为 headless smoke + 负向对照 + 探针断言，**没有做 profile**；**未在 Android 上验证，任何 APK 均不存在**。 | §3.4.3 §6.4 §11.4.2.25 §14.8 §17 |
+| 2026-11-05 | v3.47 | **待完善清单排查（只排查、不改码）**（用户原话：「检查那些地方还需要完善」）。**`scripts/` / `tests/` / `data/` 一行未动**；新增 §11.4.2.26 与 `docs/roadmap.md` §4.5。**8 个独立扫描脚本**（`.me/tmp/main/scan47_*.py`）实测：**数据** 125 个 JSON 键中真正零读取 **5 个**（`menu_item_height_px` / `menu_safe_margin_px` / `menu_preview_spin_deg_s` / `boot_logo_time_s` / `executive_hz`）；**升级** 9 条 `effect` 全被读取，但 `processing_multiplier` **零运行时读取**（只在 `data_validator.gd:144` 被校验）；**模块** 48 件全可售但 **17 件未出现在任何出厂蓝图**；**蓝图** 17 份（每档仅 3 种敌人、Boss 仅 1 种）；**竞技场** 3 个但代码只加载 `arena_standard`；**功能** 音频 API 0 / `tr(` 0 / 设置持久化 0 / **生存模式暂停 0** / 教程 0 / `KEY_*` 95 处 28 键 / `Input.is_action_*` 0；`project.godot` 无 `[input]` / `[audio]` / `[locale]` / `[autoload]` 段；`.wav`/`.ogg`/`.mp3`/`.png`/`.tres` **全 0**、`.tscn` 1；**规模** `main.gd` **193,936 B / 4,595 行**（占全部脚本约 **37%**，是第二名的 **4.1 倍**）；**死代码** 22 脚本无死脚本，但精确边界匹配后 **15 个函数零引用**（第一版报 28 个，**13 个是 `sort_custom` / `.bind()` / `Callable(self, "…")` 与短名子串的误报**）；**测试** 26 项 smoke 对主菜单 / 设置页 / 页面跳转 **零覆盖**（只命中 9 条注释）；**深拷贝** 查询 **155 处**（`get_module` 104）。**分级**：P0 ×4（设置不持久化 / 生存无暂停 / 设置页仅 3 行 / 退出无二次确认）、P1 ×6、P2 ×6。**§7.3 / §7.4 的结论全部仍有效，不重复不推翻**。详见 §11.4.2.26 与 roadmap §4.5。**如实声明**：全部为**静态扫描 + 源码直读**，**无实机试玩、无 profile、未在 Android 上验证**；本轮**未改任何代码，也未新增测试**。 | §11.4.2.26 §17 |
+| 2026-11-05 | v3.48 | **执行 v3.47 待完善清单的 P0/P1 六项**（用户原话：「按计划开始」，指 `docs/roadmap.md` §4.5.5 的建议执行顺序）。① **P0-1 设置持久化**：新增 `scripts/user_settings.gd`（`extends RefCounted`，`ConfigFile` → `user://settings.cfg`，段 `display`，四键 `glow_enabled` / `motion_enabled` / `window_mode` / `debug_readout`，**路径可注入**以便 headless 跑临时路径）。**四条设计决定**：只做「读 / 写一份键值」不碰引擎节点与 `data/*.json`；**不认识的值一律退回默认不报错**（设置文件损坏绝不能让游戏打不开，它不是玩法数据；`_read_bool` 接受 `bool` 与 `int/float` 但**不接受字符串 `"true"`**）；`WINDOW_MODES` 是**界面档位名**按既有惯例留在代码；`window_mode` 下标即存档值**只能追加不得重排**。`main.gd` 侧：`_ready()` **先 `_load_settings()` 再确认窗口模式**（顺序反了玩家选择会被覆盖一次）、**每次切换立即写盘**（不攒到退出，崩溃即丢）、**「启动即最大化」收窄为「只在没有设置文件时执行」**（对用户「默认最大化」要求的**有意识收窄**：首次仍最大化，显式选择后尊重选择，否则设置形同虚设）、`_apply_window_mode()` 在 headless 早退。② **P0-3 设置页 3 行 → 5 行**：引入 `SETTINGS_ROW_COUNT := 5` / `SETTINGS_ROW_Y := 360.0` 两个**单一来源常量**，消除硬编码在**两处**的上下界（键盘 `mini(_settings_index + 1, 2)` 与鼠标 `range(3)`）—— 加一行必须同时改两处、漏一处就「键盘跳不到新行 / 鼠标能点但键盘越不过去」，这是 §11.4.2.26「8 条 if/elif 链」的**可复现实例**。说明文字按几何从 y=620 移到 **700/728**（5 行占 360…632）。新增 `debug_readout`（默认关，**画在淡入遮罩之后**——被 UI 盖住的调试信息等于没有）。**事实更正**：`_focus_target_y()` 旧版读 `MENU_ROW_Y` 而 `_settings_row_rect()` 读 `360.0`，**两者数值恰好相同、历史上从来没有可见偏移**；我最初记成「焦点条会偏的既有瑕疵」，**那个判断是错的**，已如实写成「数值巧合而非约束」。③ **P0-2 生存模式暂停**：`SurvivalRun` 新增 `paused` / `paused_time` / `toggle_pause()`（镜像 `MatchState` 三件套，同签名同语义）。**核心决定：暂停不进入状态机，是 `STAGE_BATTLE` 上的正交标志** —— ① 暂停不是玩法阶段；② 做成 `STAGE_PAUSED` 要改所有 `stage == STAGE_BATTLE` 判据，「漏改一处」正是 v3.23 `expire` 事件被静默丢弃的同类事故；③ 正交标志让 `step_battle()` **时序结构一行未动**（保住确定性）。**两层拦截缺一不可**：`step_battle()` 入口 `if paused: paused_time += dt; return`（**`dt` 根本没被用掉 ⇒ `wave_time_left` 自然不走**）；`_survival_simulate()` 的 `if survival.paused: _survival_accumulator = 0.0; return`（**不清零则暂停 3 分钟恢复后累加器里躺着 180 秒，一次跑满 `DRIVE_MAX_STEPS` 步，坦克瞬移**）。**UI 单一拦截点** `_is_battle_screen()` 加 `and not survival.paused`（左键 / 鼠标瞄准 / 空格三条路径一处挡全）。另六个细节：`KEY_P` 与对局页**同键同语义**（暂停中按 R 仍重开）；**暂停 / 恢复都清按键集**（否则恢复后坦克带着早已松开的键跑出去）；**空格开火前显式判 `paused`**（`duel.fire()` 是直接调用，`step_battle()` 不推进拦不住）；`setup()` 与 `close_run()` **双归零**；遮罩最后画、**不加按钮**；右 HUD 行距 **30 → 26**（5 行文字 + 1 行相机读数，最后一行字顶 417 < `SURVIVAL_MIRROR_RECT` 的 436）。**自我纠正**：第一版重排为塞按键提示**删掉了「战斗期禁止改装」**，那是核心玩法规则（用户明确要求），**已改为压缩行距、全部保留**。④ **P0-4 退出二次确认**（§4.5.5 的建议顺序漏了它，本轮补进）：**改一行文案 + 一个布尔标志，不新建弹窗**（本项目 UI 全 `_draw` 手绘、无通用弹窗组件，新建弹窗层级成本远高于一个标志）。上膛 → 确认两步、**选中任何其它项自动卸膛**、**`KEY_ESCAPE` 卸膛**（取消路径）、上膛**红字**、文案由 `_main_menu_label()` 单独决定（不在绘制处再写一遍状态判断）。⑤ **P1-3 `processing_multiplier` 定性为实现**（不是删）：先区分两个同名字段 —— `processing_factor` 是**弹药口径**属性（`cal_20`=0.7 … `cal_155`=1.5），`processing_multiplier` 是**升级**属性，语义不同互不替代；hook 是 `AmmoNetwork._processing_factor()`（加工时间的**唯一乘数入口**），只是没接升级侧。`_processing_factor(ammo_id, upgrades := [])` = 口径因子 × `_upgrade_processing_multiplier(upgrades)`，后者按 `effect` 计 `stack_limit`（**与 `DamageSystem._upgrade_profile()` 同源**）逐条相乘并 `clampf(total, 0.1, 4.0)`（**安全界不是平衡旋钮**）。**两个调用点都传载荷**，**进度条分母与起跑值同源**（否则带升级的弹药在 100% 后继续等，看起来像卡住）。**一条决定测试写法的语义**：加工时间用「**进来那发**」的载荷，而槽配置只影响**输出**载荷 —— 所以**必须用两级改进器测**（第一级染色、第二级被测量）；单级布局下被测量者永远收到白弹药，三种 tick 数必然相同，**那不是实现失效是测错了对象**（我第一版就是这么写的）。实测 base=**5** / fast=**4** / slow=**7** tick（`net_hz=10` ⇒ 0.1 s/tick，mk1 `0.6 s` × `cal_20` `0.7` = 0.42 s）。**玩家可感知变化（本轮唯一改变玩法数值的修改）**：带升级的弹药过改进器变快 / 变慢；**白弹药时间完全不变**，开局体验与 v3.47 一致。⑥ **P1-4/5/6 清理**：删 **13 个**零引用函数（`fx_layer.ratio` / `module_defs.modules_for_layer` / `battle_viewport.set_painter` / `cannon_bank.ammo_for_caliber` / `grid_builder.validation_report_summary` / `runtime_builder.seed_from_blueprint`+`add_scrap`+`can_afford` / `expedition_run.take_from_inventory` / `main._drive_to_screen`+`_match_to_screen`+`_survival_to_screen`+`_option_window_start`+`_remove_part_under_mouse`），**保留 `duel.remove_side` / `damage_system.reset`**（将来要用的生命周期 API）；删 **4 个**零读取数据键（`menu_item_height_px` / `menu_safe_margin_px` / `menu_preview_spin_deg_s` / `boot_logo_time_s`），**保留 `executive_hz`**（§14.8 与 L1498 记载它是刻意的）；`arena_pit` / `arena_corridor` **本轮不删**（删掉等于放弃多地图素材，保留成本只有 2 个 JSON 的字节数，且删会让 `data_smoke arenas=3` 变化需额外解释）—— 改为标注「**纯数据、零加载**」。⑦ **验证（全部 headless）**：`run_smoke48.ps1` → **27 项全绿**（26 → 27，唯一新增 `user_settings_smoke`，`USERSET_OK checks=36 failures=0`），**零 `SCRIPT ERROR`**；与 v3.46 基线逐项对照，`files=26` / `arenas=3` / `mass=61.0` / `cells=43` / `scrap=751.0` / `errors=34` / `checks=57` / `checks=600` **全部逐字相同**；**三组负向对照**（备份文件式，**全程未用 `git checkout` / `git restore`**）各命中预期失败标签且三组 `RESTORED_IDENTICAL=True`；五项硬约束成立（`omega_max` 3.0 / `tank_body.gd` 零改动 / `_next_unit()` 21→21 / `max_speed()` 闭式 / 暂停不改 `stage`）；11 个被改脚本全部 `--check-only` 干净。⑧ **三处我自己造成的真实产品回归（全部被 `--check-only` / 全量 smoke 抓到并修好，无一流入提交）**：**（a）`runtime_builder.part_at_module()` 被误删** —— 它是 `runtime_build_smoke` 的**唯一观测手段**（6 处调用），缺失后 `_init()` 在 `SCRIPT ERROR` 处中断、`quit()` 永不执行、**进程永久挂起**（`Terminal` 只报 `output_idle`，看起来和「还在跑」一样）；根因是删除核实脚本**只扫 `scripts/` 没扫 `tests/`** —— 这正是 v3.46 已记过的教训，我违反了它；已补回 `part_at_module` / `part_at_mobility` / `pending_info`。**（b）`_battle_viewport.configure(...)` 被误删** —— 插入 `_load_settings()` 时 `File.Edit` 的 `replace` 吞掉紧邻的下一行，`viewport` / `camera` / `world` 全为 null ⇒ **整个战场完全不渲染**（本轮最严重的一处自伤）。**（c）`build_cost()` 被连带删除** —— 删 `can_afford()` 时选中范围过大，而它是 `request_build()` 的依赖。另有 **5 次 `File.Edit` 边界事故 + 1 处 preload 四行重复 + 3 处把测试文件改坏**（少一个格式化参数 / `TankBody` 未 preload / 转义引号），全部已修。⑨ **两个测试装置的真实弱点（须记入后续审核）**：**（a）运行时 `SCRIPT ERROR` 不等于断言失败，而且会让 `extends SceneTree` 进程永久挂起**（规则：跑 smoke 一律带 `--quit-after`，判断完成只看工件文件与提示符）；**（b）反向用例对「默认值为 `false` 的布尔字段」没有区分力**（`debug_readout` 缺键读回也是 `false`，`reverse_debug` 恒成立；**反向用例的期望值必须与缺键默认值不同**）—— 已知覆盖缺口，本轮不修。**如实声明**：全部证据为 **headless smoke + 负向对照 + 源码直读**；**本次改动尚未经过用户实机确认**；`main.gd::_survival_simulate()` 的累加器清零分支**在 headless 下测不到**（`--script` 模式下 `_process()` 不跑，只有代码审读证据）；**UI 改动（设置页 5 行 / 退出确认文案 / 暂停遮罩 / 调试叠加层）没有任何自动化测试覆盖**（`_draw` 在 headless 下不执行，`tests/` 对 UI 层零覆盖）；**没有做 profile**；**未在 Android 上验证，任何 APK 均不存在**。 | §11.4.2.27 §14.9 §17 |
 

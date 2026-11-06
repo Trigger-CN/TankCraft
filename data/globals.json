@@ -100,10 +100,6 @@
   "menu": {
     "menu_transition_time_s": 0.18,
     "menu_focus_time_s": 0.12,
-    "menu_item_height_px": 56,
-    "menu_safe_margin_px": 160,
-    "menu_preview_spin_deg_s": 15.0,
-    "boot_logo_time_s": 0.8,
     "ui_scale_min": 0.8,
     "ui_scale_max": 1.5
   },

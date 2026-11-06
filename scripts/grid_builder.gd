@@ -603,12 +603,6 @@ func cockpit_cells() -> Array[Vector2i]:
 			result.append_array(part_cells(part))
 	return result
 
-func validation_report_summary() -> String:
-	var report := validation_report()
-	if report["ok"]:
-		return "结构合法，可以部署。"
-	return String(report["errors"][0])
-
 func to_blueprint(name: String = "未命名蓝图") -> Dictionary:
 	var sorted_cells: Array = []
 	var cell_list: Array[Vector2i] = []

@@ -35,6 +35,18 @@ var definitions: ModuleDefs
 var arena_id: String = "arena_standard"
 
 var stage: String = STAGE_BATTLE
+## v3.48（P0-2）：生存模式暂停。**镜像 `match_state.gd` 的三件套**（`paused` / `paused_time` /
+## `toggle_pause()`）—— 生存是一局几十分钟的模式，之前却是唯一不能暂停的模式。
+##
+## 关键设计决定：**暂停不进入状态机**，它是 `STAGE_BATTLE` 上的一个正交标志。
+## 理由：① 暂停不是「一种玩法阶段」，它不该被 `stage` 的分支遍历；
+## ② 若把暂停做成 `STAGE_PAUSED`，所有 `stage == STAGE_BATTLE` 的判据都要改，
+## 而「漏改一处」正是 v3.23 `expire` 事件被静默丢弃的同类事故；
+## ③ 正交标志让「暂停中仍是战斗阶段」这个事实保持为真，`_survival_simulate()` 只需
+## 在入口拦一下，**完全不用碰 `step_battle()`**（保住确定性）。
+var paused: bool = false
+## 累计暂停时长（秒）。只用于统计 / 显示，**不参与任何结算**。
+var paused_time: float = 0.0
 ## 当前波次，从 1 开始。
 var wave: int = 1
 var wave_time_left: float = 0.0
@@ -187,7 +199,25 @@ func setup(module_defs: ModuleDefs, arena_name: String = "arena_standard", seed_
 	stage = STAGE_BATTLE
 	run_over = false
 	wave_passed = false
+	## v3.48：新一局从「未暂停」开始。不归零的话，上一局暂停后退出，
+	## 新一局会直接卡在暂停态 —— 玩家会以为游戏卡死了。
+	paused = false
+	paused_time = 0.0
 	return true
+
+## v3.48（P0-2）：切换暂停，返回**切换后**的状态（与 `MatchState.toggle_pause()` 同签名同语义）。
+##
+## 只允许在 `STAGE_BATTLE` 里暂停 —— 升级页 / 商店页 / 改装页本身就是「不推进」的
+## 交互态，在那里再叠一个暂停只会让按键意义模糊（玩家分不清「我停了」还是「我本来就在选卡」）。
+## 与 `MatchState.toggle_pause()` 的 `if phase != PHASE_BATTLE: return false` 完全一致。
+##
+## 返回 `false` 有两种含义，调用方不需要区分：① 当前阶段不允许暂停；② 当前处于暂停，
+## 而本次调用把它**恢复**了。所以调用方判「现在是不是暂停」应读 `paused`，不是读返回值。
+func toggle_pause() -> bool:
+	if stage != STAGE_BATTLE or duel == null:
+		return false
+	paused = not paused
+	return paused
 
 func _read_config() -> void:
 	_wave_time_s = definitions.block_number("survival", "wave_time_s", 45.0)
@@ -548,9 +578,23 @@ func _sync_house_obstacles() -> void:
 # ─── 战斗推进 ─────────────────────────────────────────────────────────────────
 
 ## 单帧推进。返回本帧事件（供 HUD 与统计）。
+##
+## v3.48（P0-2）：暂停时**在入口就返回**，不做任何模拟。
+## 为什么放在这里而不是 `main.gd`：两层都要有。`main.gd::_survival_simulate()` 负责
+## 清零固定步长累加器（否则恢复时会一次性补跑一大段）；这里负责「即使有人直接调
+## `step_battle()`（测试、探针、将来的其它入口）也不会在暂停中推进」。
+## 两层缺一：只做 main 侧，直接调 step_battle 的代码会绕过暂停；只做这里，
+## 累加器不清零，恢复后的第一帧会按暂停时长补跑。
+##
+## **暂停不改变 `wave_time_left`**：`dt` 根本没被用掉，计时自然不走。
 func step_battle(dt: float) -> Array[Dictionary]:
 	var frame_events: Array[Dictionary] = []
 	if stage != STAGE_BATTLE or duel == null or dt <= 0.0:
+		return frame_events
+	if paused:
+		## 暂停时长只做统计。注意这里**不用 `dt` 去推进任何东西**，
+		## 包括 `wave_time_left` —— 那是「暂停」这个词的全部含义。
+		paused_time += dt
 		return frame_events
 	_sync_house_obstacles()
 	var tags: Array = enemy_ai.keys()
@@ -1274,6 +1318,8 @@ func summary() -> Dictionary:
 		"inventory": inventory.size(),
 		"damage": total_damage,
 		"boss_wave": is_boss_wave(),
+		## v3.48：暂停累计时长。只做统计 —— 结算里没有任何东西以它为输入。
+		"paused_time": paused_time,
 	}
 
 ## run 结束：`credit`、`experience`、`inventory`、等级与质量上限等级**全部清零**（Q14 / Q20）。
@@ -1292,7 +1338,10 @@ func close_run() -> void:
 	modify_spent_total = 0.0
 	last_wave_credit = 0.0
 	shop_slots.clear()
-	shop_slots.clear()
+	## v3.48：暂停状态属于单局状态，跨局必须归零。
+	## `setup()` 也归零了一次 —— 两处都归零是刻意的：`close_run()` 与 `setup()` 可以被
+	## 独立调用（测试与「回主菜单再进生存」两条路径），任一处漏写都会把暂停态漏到下一局。
+	paused = false
 	## 保底干次数属于单局状态，跨局必须归零——否则新一局的第一击就可能是「白送的必掉」。
 	_house_drop_dry = 0
 	_enemy_drop_dry = 0

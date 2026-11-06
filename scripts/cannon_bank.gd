@@ -204,13 +204,3 @@ func _fire_one(index: int, cannon: Dictionary, ammo_id: String) -> Dictionary:
 		"recoil_px": float(cannon["recoil_px"]),
 		"world_r": origin - body.position,
 	}
-
-func ammo_for_caliber(cannon_index: int) -> String:
-	if cannon_index < 0 or cannon_index >= cannons.size():
-		return ""
-	var caliber := String(cannons[cannon_index]["caliber"])
-	if caliber.is_empty():
-		return ""
-	if definitions != null and not definitions.get_ammo(caliber).is_empty():
-		return caliber
-	return ""

@@ -120,16 +120,6 @@ func apply(camera_rect: Rect2) -> void:
 func set_active(active: bool) -> void:
 	viewport.render_target_update_mode = SubViewport.UPDATE_ALWAYS if active else SubViewport.UPDATE_DISABLED
 
-
-## 每帧更新绘制回调（绘制内容由页面层现算）。
-##
-## `configure()` 只在启动时设一次；这里重复设置是为了让 `painter` 永远指向
-## 当前页面的闭包 —— 页面层改自己的绘制逻辑时不需要重新 `configure`。
-func set_painter(painter: Callable) -> void:
-	if world != null:
-		world.painter = painter
-
-
 ## 把离屏纹理贴到 `canvas` 的 `rect` 位置上。
 ##
 ## **必须由 `Main._draw()` 在「原来画竞技场」的同一个位置调用**，这样它之后的

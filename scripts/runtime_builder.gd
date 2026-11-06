@@ -48,12 +48,6 @@ func setup(module_defs: ModuleDefs) -> bool:
 	_seconds_per_cell = float(expedition.get("build_time_per_cell_s", 0.6))
 	return true
 
-func seed_from_blueprint(data: Dictionary) -> String:
-	if builder == null:
-		return "拒绝：运行期建造尚未初始化。"
-	pending = {}
-	return builder.load_blueprint(data)
-
 func reset_demo() -> void:
 	if builder != null:
 		builder.reset_demo()
@@ -67,9 +61,6 @@ func set_mode(next_mode: String) -> void:
 
 func set_scrap(value: float) -> void:
 	scrap = maxf(value, 0.0)
-
-func add_scrap(amount: float) -> void:
-	scrap = maxf(scrap + amount, 0.0)
 
 func movement_locked() -> bool:
 	return in_build_mode
@@ -103,11 +94,10 @@ func price_of(layer: String, module_id: String) -> float:
 			return definitions.global_number("platform_cell_price", 4.0)
 	return 0.0
 
+## 实际施工花费 = 模块价 × 建造倍率（`scrap_build_rate`，来自 globals 的 expedition 块）。
+## `can_afford()` 被删了（v3.48 清理），但**这个函数不能删** —— `request_build()` 用它。
 func build_cost(layer: String, module_id: String) -> float:
 	return price_of(layer, module_id) * _build_rate
-
-func can_afford(layer: String, module_id: String) -> bool:
-	return scrap + 0.0001 >= build_cost(layer, module_id)
 
 func request_build(layer: String, module_id: String, start: Vector2i, rotation: int = 0, aim: int = 0) -> String:
 	if mode != MODE_EXPEDITION:
@@ -223,31 +213,6 @@ func purchase_mass_upgrade() -> String:
 	scrap -= price
 	return ""
 
-func part_at_module(cell: Vector2i) -> Dictionary:
-	if builder == null:
-		return {}
-	return builder.part_at(LAYER_MODULE, cell)
-
-func part_at_mobility(cell: Vector2i) -> Dictionary:
-	if builder == null:
-		return {}
-	return builder.part_at(LAYER_MOBILITY, cell)
-
-func pending_info() -> Dictionary:
-	if pending.is_empty():
-		return {}
-	var duration := maxf(float(pending["duration"]), 0.001)
-	return {
-		"layer": pending["layer"],
-		"module_id": pending["module_id"],
-		"start": pending["start"],
-		"cells": pending["cells"].duplicate(),
-		"cost": pending["cost"],
-		"elapsed": pending["elapsed"],
-		"duration": pending["duration"],
-		"progress": clampf(float(pending["elapsed"]) / duration, 0.0, 1.0),
-	}
-
 func _apply_to(target: GridBuilder, layer: String, module_id: String, start: Vector2i, rotation: int, aim: int) -> String:
 	if layer == LAYER_PLATFORM:
 		if module_id == PLATFORM_CELL_ID:
@@ -276,6 +241,34 @@ func _scratch_copy() -> GridBuilder:
 	scratch.credits_total = builder.credits_total
 	scratch.budget_enabled = false
 	return scratch
+## v3.48 回归修复：`part_at_module()` 在 P1-4 清理中被误删。
+## 它是 `tests/runtime_build_smoke.gd` 的**唯一观测手段**（6 处调用：验证施工未落地 /
+## 施工已落地 / 受击不落地 / 退出不落地 / 拆解后消失）。**删除核实脚本把它算成零引用，
+## 因为那个脚本只扫描了 `scripts/`，没扫 `tests/`** —— 这条已写进 agent_note 陷阱表。
+##
+## 同时补回 `part_at_mobility()` 与 `pending_info()`：前者是同一对查询接口的另一半，
+## 后者是 `pending` 字典的只读投影（`pending` 本身是 `var`，页面层不该直接读它）。
+func part_at_module(cell: Vector2i) -> Dictionary:
+	if builder == null:
+		return {}
+	return builder.part_at(LAYER_MODULE, cell)
+
+func part_at_mobility(cell: Vector2i) -> Dictionary:
+	if builder == null:
+		return {}
+	return builder.part_at(LAYER_MOBILITY, cell)
+
+func pending_info() -> Dictionary:
+	if pending.is_empty():
+		return {}
+	return {
+		"layer": String(pending["layer"]),
+		"module_id": String(pending["module_id"]),
+		"start": pending["start"],
+		"cost": float(pending["cost"]),
+		"elapsed": float(pending["elapsed"]),
+		"duration": float(pending["duration"]),
+	}
 
 func _module_at(layer: String, cell: Vector2i) -> String:
 	if builder == null:

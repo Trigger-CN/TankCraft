@@ -31,6 +31,7 @@ func _init() -> void:
 	_check_payload_flows_into_cannon()
 	_check_function_modules_carry_intrinsic()
 	_check_starter_can_install_upgrade()
+	_check_processing_multiplier_affects_time()
 	if failures > 0:
 		printerr("UPGRADE_FAIL count=%d" % failures)
 		quit(1)
@@ -42,6 +43,14 @@ func _expect(condition: bool, tag: String) -> void:
 	if not condition:
 		failures += 1
 		printerr("UPGRADE_FAIL %s" % tag)
+
+## 浮点近似比较。容差 1e-4 而不是 1e-6：`processing_multiplier` 是 JSON 里的十进制数，
+## 1.5 × 1.3 = 1.9500000000000002 这类误差必须容得下。
+func _expect_near(value: float, expected: float, tag: String) -> void:
+	if absf(value - expected) <= 0.0001:
+		return
+	failures += 1
+	printerr("UPGRADE_FAIL %s %.6f != %.6f" % [tag, value, expected])
 
 ## 与 `tests/ammo_net_smoke.gd` 的同名助手一致：按全部占位的外接矩形铺平台，再放件。
 ## 铺平台必须 4-连通，所以不能按件零散铺。
@@ -339,3 +348,129 @@ func _check_starter_can_install_upgrade() -> void:
 		if not payload.is_empty():
 			break
 	_expect(payload.has("up_damage"), "starter_payload_reaches_cannon_%s" % str(payload))
+
+# ─── 验收 6（v3.48）：`processing_multiplier` 真的影响加工时间 ───────────────
+
+## 背景（v3.47 排查轮 P1-3）：`upgrades.json` 9 条升级**每条都有** `processing_multiplier`，
+## 但全仓只有 `data_validator.gd` 在**校验**它，**零运行时读取**。
+## 玩家在改装页看到「加工速度 0.9」，那个数字对游戏没有任何影响。
+##
+## 本轮把它接进 `AmmoNetwork._processing_factor()`（加工时间的唯一乘数入口）。
+## 本节验收三层：
+##   ① **数据层**：9 条升级都有这个字段，且都是正数；
+##   ② **纯函数层**：`_upgrade_processing_multiplier()` 对已知载荷返回可算出的值；
+##   ③ **流程层**：同一发弹药带 / 不带升级，过改进器所需**真实 tick 数不同**。
+##
+## 第 ③ 层是关键 —— 前两层只证明「公式对了」，不证明「真的被用上了」。
+## 只有测到「跑起来耗时不同」才能区分「接了」与「接了但没人在乎」。
+func _check_processing_multiplier_affects_time() -> void:
+	## ① 数据层：9 条升级全部有正数 `processing_multiplier`。
+	var upgrade_ids: Array = definitions.registry.upgrades.keys()
+	upgrade_ids.sort()
+	_expect(upgrade_ids.size() >= 9, "pm_upgrade_count_%d" % upgrade_ids.size())
+	for raw_id in upgrade_ids:
+		var upgrade_id := String(raw_id)
+		var def: Dictionary = definitions.registry.get_upgrade(upgrade_id)
+		_expect(def.has("processing_multiplier"), "pm_field_present_%s" % upgrade_id)
+		_expect(float(def.get("processing_multiplier", 0.0)) > 0.0, "pm_field_positive_%s" % upgrade_id)
+
+	## ② 纯函数层：空载荷恒为 1.0（这是「白弹药时间不变」的根据）。
+	var network := AmmoNetwork.new()
+	network.setup(definitions)
+	_expect_near(network._upgrade_processing_multiplier([]), 1.0, "pm_empty_is_one")
+	## 单条 `up_delay` 的倍率是 1.5（data 里的值，不是测试自己算的）。
+	var delay_mult := float(definitions.registry.get_upgrade("up_delay").get("processing_multiplier", 1.0))
+	_expect_near(network._upgrade_processing_multiplier(["up_delay"]), delay_mult, "pm_single_delay_%.3f" % delay_mult)
+	## 未知 id 被忽略（不能因为载荷里有垃圾就把时间乘成 0）。
+	_expect_near(network._upgrade_processing_multiplier(["up_does_not_exist"]), 1.0, "pm_unknown_ignored")
+	## `stack_limit` 去重：`up_delay` 上限 1，装两次只能算一次。
+	_expect_near(network._upgrade_processing_multiplier(["up_delay", "up_delay"]), delay_mult, "pm_stack_limit_respected")
+	## 两条不同升级相乘：1.5 × 1.3（`up_explosive`）= 1.95。
+	var explosive_mult := float(definitions.registry.get_upgrade("up_explosive").get("processing_multiplier", 1.0))
+	var product := delay_mult * explosive_mult
+	_expect_near(network._upgrade_processing_multiplier(["up_delay", "up_explosive"]), product, "pm_product_%.3f" % product)
+	## 夹取上限：把同一件升级按超过上限的次数塞进去仍然不会超过 4.0。
+	var many: Array = []
+	for _repeat in range(20):
+		many.append("up_delay")
+	_expect(network._upgrade_processing_multiplier(many) <= 4.0, "pm_clamped_high")
+
+	## ③ 流程层：带 / 不带升级的加工 tick 数必须不同。
+	## 用 `up_delay`（×1.5）与 `up_velocity`（×0.9）两个方向相反的升级，
+	## 这样「变慢」与「变快」两个方向都有证据。
+	## 测量对象是**第二级**改进器 —— 第一级只负责把升级染进弹药载荷，
+	## 原因见 `_modifier_ticks_for()` 的注释（第一版写成单级，测错了对象）。
+	var slow_ticks := _modifier_ticks_for(["up_delay"])
+	var fast_ticks := _modifier_ticks_for(["up_velocity"])
+	var base_ticks := _modifier_ticks_for([])
+	_expect(base_ticks > 0, "pm_base_ticks_%d" % base_ticks)
+	_expect(slow_ticks > base_ticks, "pm_slow_ticks_%d_gt_%d" % [slow_ticks, base_ticks])
+	_expect(fast_ticks < base_ticks, "pm_fast_ticks_%d_lt_%d" % [fast_ticks, base_ticks])
+
+## 构造「工厂 → 直管 → 改进器 A（染色）→ 直管 → 改进器 B（被测量）→ 炮管」，
+## 返回**改进器 B 加工一发**所需的 tick 数。用真实 `AmmoNetwork`，不自己算时间。
+##
+## 为什么测 tick 数而不是测 `_processing_factor()` 的返回值：返回值只证明公式，
+## tick 数证明**这条链真的走到了模拟里**。两者都要。
+##
+## 为什么必须两级（第一版写成单级，三种情况 tick 数全是 6 → `pm_slow_ticks_6_gt_6`）：
+## 加工时间用的是「**进来那发弹药**的载荷」（`_module_advance()` 的 `next.get("upgrades", [])`），
+## 而槽配置只影响**输出**载荷。工厂产出的是白弹药，所以单级布局下被测量的改进器
+## 永远收到空载荷 —— 那不是实现没生效，是测错了对象。
+func _modifier_ticks_for(upgrades: Array) -> int:
+	var builder := _make_builder([
+		{"id": "ammo_factory_20", "cell": Vector2i(4, 4)},
+		{"id": "conveyor_straight", "cell": Vector2i(5, 4)},
+		{"id": "modifier_mk1", "cell": Vector2i(6, 4)},
+		{"id": "conveyor_straight", "cell": Vector2i(7, 4)},
+		{"id": "modifier_mk1", "cell": Vector2i(8, 4)},
+		{"id": "cannon_20", "cell": Vector2i(9, 4)},
+	])
+	if builder == null:
+		_expect(false, "pm_builder_null")
+		return 0
+	var network := AmmoNetwork.new()
+	network.setup(definitions)
+	network.rebuild(builder)
+	## 按首格 x 坐标排序：左边是染色器、右边是被测量者。
+	## 不依赖 `parts` 的枚举顺序 —— 那属于实现细节，不该被测试假设。
+	var modifiers: Array = []
+	for part in network.parts:
+		if String(part["role"]) != AmmoNetwork.ROLE_MODIFIER:
+			continue
+		var cells: Array = part["cells"]
+		var first_x := 0
+		if not cells.is_empty():
+			first_x = Vector2i(cells[0]).x
+		modifiers.append({"index": int(part["index"]), "x": first_x})
+	_expect(modifiers.size() == 2, "pm_modifier_count_%d" % modifiers.size())
+	if modifiers.size() < 2:
+		return 0
+	modifiers.sort_custom(func(a, b): return int(a["x"]) < int(b["x"]))
+	var dye_index := int(modifiers[0]["index"])
+	var observer_index := int(modifiers[1]["index"])
+	## 槽配置必须成功，否则观察者收到的是白弹药，测试会变成自证。
+	var configured := network.configure_modifier(dye_index, upgrades)
+	_expect(configured or upgrades.is_empty(), "pm_configure_%s" % str(upgrades))
+	## 逐 tick 推进，数**观察者处于加工状态**的连续 tick 数。
+	## 上限 2400 tick（20 Hz × 120 s）：足够走完任何合法倍率，也留足管道输送时间。
+	var started := false
+	var work_ticks := 0
+	for _step in range(2400):
+		network.tick_once()
+		var working := false
+		for raw_state in network.module_states():
+			var state: Dictionary = raw_state
+			if int(state["part"]) != observer_index:
+				continue
+			## `ratio >= 0` 表示这件改进器当前确实在加工（空转是 -1）。
+			working = float(state["ratio"]) >= 0.0
+			break
+		if working:
+			started = true
+			work_ticks += 1
+		elif started:
+			break
+	if not started:
+		return 0
+	return work_ticks

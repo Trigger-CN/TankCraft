@@ -58,9 +58,3 @@ func is_empty() -> bool:
 
 func size() -> int:
 	return entries.size()
-
-
-## 淡出比例：1.0 = 刚生成，0.0 = 即将消失。绘制端据此缩放半径与 alpha。
-func ratio(entry: Dictionary) -> float:
-	var life := maxf(float(entry["life"]), 0.001)
-	return clampf(float(entry["left"]) / life, 0.0, 1.0)

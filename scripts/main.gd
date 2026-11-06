@@ -22,6 +22,9 @@ const CombatView := preload("res://scripts/combat_view.gd")
 const PipeView := preload("res://scripts/pipe_view.gd")
 ## v3.37：炮管几何与绘制（建造/改装页与三个战斗页共用同一份，全静态）。
 const CannonView := preload("res://scripts/cannon_view.gd")
+## v3.48（P0-1）：用户设置的持久化载体。**不依赖任何引擎节点**，因此可在 headless
+## 测试里对临时路径跑完整 round-trip，而不碰真实用户目录。
+const UserSettings := preload("res://scripts/user_settings.gd")
 ## v3.42：战斗场地的引擎相机与视窗（`SubViewport` + `Camera2D`）。
 ## 三个战斗页的战场绘制全部搬进它的世界节点，**裁剪由视窗边界天然保证**。
 const BattleViewport := preload("res://scripts/battle_viewport.gd")
@@ -67,6 +70,14 @@ const BUILD_TOOL_Y := 800.0
 ## 这一条补的是**看得见**的那一半——之前三层同样亮度，玩家分不出在编哪一层。
 const LAYER_DIM_ALPHA := 0.22
 const MENU_ITEM_COUNT := 6
+## v3.48（P0-3）：设置页的行数与行起点收归常量。
+## 旧版把「3 行」硬编码在**两处**（键盘 `mini(_settings_index + 1, 2)` 与鼠标命中 `range(3)`），
+## 加一行就必须同时改两处 —— 漏一处就出现「键盘跳不到新行 / 鼠标能点但键盘越不过去」的不一致。
+const SETTINGS_ROW_COUNT := 5
+## 设置页行起点。`_settings_row_rect()` 与 `_focus_target_y()` **必须同源**：
+## 旧版后者写的是主菜单的 `MENU_ROW_Y`。两者当前数值恰好都是 360.0，所以**没有可见偏移**，
+## 但那是巧合而不是约束 —— 任一处单独改动都会让焦点条与行矩形错开。
+const SETTINGS_ROW_Y := 360.0
 ## M6：对战难度档（对应 design §10.3 四档）。
 ## v3.45（审核 S5）：不再写死字面量 —— 直接引用 `BotAI.TIERS` 单一来源。
 ## 旧版这里是一个独立的 `["recruit","veteran","elite","ace"]` 副本，
@@ -156,8 +167,21 @@ var _hover_menu_difficulty := false
 var _dragging := false
 var _drag_origin := Vector2i.ZERO
 var _erase_drag := false
+## v3.48（P0-1）：这两个开关**不再只是内存字段** —— 由 `scripts/user_settings.gd` 持久化到
+## `user://settings.cfg`，启动时读回。字段本身仍是权威副本（绘制每帧读它，不读文件）。
 var _glow_enabled := true
 var _motion_enabled := true
+## v3.48（P0-3）：设置页新增的两项。`debug_readout` 默认关 —— 它是一个调试叠加层，
+## 默认开启会污染所有历史截图基线。
+var _debug_readout := false
+## 窗口模式档位（`UserSettings.WINDOW_MODE_*`）。默认最大化，与 `project.godot` 一致。
+var _window_mode: int = 0
+## 设置载体。**永不为 null**（`_ready()` 里建；测试/截图路径也一样），
+## 这样 `_toggle_setting()` 不需要到处判空。
+var _settings := UserSettings.new()
+## v3.48（P0-4）：主菜单「退出」的二次确认状态。
+## 第一次激活只是「上膛」，第二次才真的 `quit()`；光标移开或 Esc 立刻卸膛。
+var _exit_armed := false
 var _time := 0.0
 var _screen_opacity := 0.0
 var _focus_rail_y := MENU_ROW_Y
@@ -309,12 +333,21 @@ func _ready() -> void:
 	## v3.42：战场视窗与引擎相机。挂在 `Main` 下面（普通 `Node`，无视觉输出），
 	## 纹理由 `_paint_battle_world()` 在 `Main._draw()` 里 blit。
 	_battle_viewport = BattleViewport.new()
+	## v3.48 回归修复：插入 `_load_settings()` 时这一行被意外删掉了。
+	## **没有 `configure()` 就没有 `viewport` / `camera` / `world`** —— `set_active()` 与 `blit()`
+	## 会对着 null 报 SCRIPT ERROR，**整个战场不渲染**。这是本轮最严重的一处自伤。
 	_battle_viewport.configure(DRIVE_VIEW, Callable(self, "_draw_battle_world"))
 	add_child(_battle_viewport)
+	## v3.48（P0-1）：先读回用户设置，**再**做下面的窗口模式确认。
+	## 顺序很关键：`_load_settings()` 可能把窗口切成全屏 / 窗口化，
+	## 如果先跑「强制最大化」再读设置，玩家的选择会被启动流程覆盖一次。
+	_load_settings()
 	## 用户要求启动即最大化。`project.godot` 里已写 `window/size/mode=2`（MAXIMIZED），
 	## 但项目配置只在启动时读一次且可被覆盖；这里再显式确认一次并打印实际结果，
 	## 不靠“配置写了就算做到了”。
-	if DisplayServer.window_get_mode() != DisplayServer.WINDOW_MODE_MAXIMIZED and DisplayServer.window_get_mode() != DisplayServer.WINDOW_MODE_FULLSCREEN:
+	## v3.48：只在**没有**保存过设置时才强制最大化 —— 否则玩家选了「窗口化」
+	## 会被这里改回最大化，设置就形同虚设。
+	if not FileAccess.file_exists(_settings.path) and DisplayServer.window_get_mode() != DisplayServer.WINDOW_MODE_MAXIMIZED and DisplayServer.window_get_mode() != DisplayServer.WINDOW_MODE_FULLSCREEN:
 		DisplayServer.window_set_mode(DisplayServer.WINDOW_MODE_MAXIMIZED)
 	print("WINDOW_MODE mode=%d size=%s" % [DisplayServer.window_get_mode(), str(DisplayServer.window_get_size())])
 	_status_message = "正式数据蓝图已载入：可用 A/D 选件，Enter 放置。"
@@ -448,13 +481,17 @@ func _handle_key(event: InputEventKey) -> void:
 			_cycle_match_difficulty(-1)
 		elif key == KEY_D or key == KEY_RIGHT:
 			_cycle_match_difficulty(1)
+		elif key == KEY_ESCAPE:
+			## v3.48（P0-4）：Esc 只「卸膛」，不退出 —— 二次确认需要一条明确的取消路径，
+			## 否则玩家一旦上膛就只能真的退出（或跑去点别的项）。
+			_exit_armed = false
 		queue_redraw()
 		return
 	if _screen == SCREEN_SETTINGS:
 		if key == KEY_UP or key == KEY_W:
 			_settings_index = maxi(_settings_index - 1, 0)
 		elif key == KEY_DOWN or key == KEY_S:
-			_settings_index = mini(_settings_index + 1, 2)
+			_settings_index = mini(_settings_index + 1, SETTINGS_ROW_COUNT - 1)
 		elif key == KEY_ENTER or key == KEY_KP_ENTER or key == KEY_SPACE:
 			_toggle_setting()
 		elif key == KEY_ESCAPE:
@@ -495,7 +532,7 @@ func _menu_index_at(position: Vector2) -> int:
 	return -1
 
 func _settings_index_at(position: Vector2) -> int:
-	for index in range(3):
+	for index in range(SETTINGS_ROW_COUNT):
 		if _settings_row_rect(index).has_point(position):
 			return index
 	return -1
@@ -512,7 +549,7 @@ func _menu_row_rect(index: int) -> Rect2:
 	return Rect2(MENU_ROW_X, MENU_ROW_Y + float(index) * MENU_ROW_STEP, MENU_ROW_WIDTH, MENU_ROW_HEIGHT)
 
 func _settings_row_rect(index: int) -> Rect2:
-	return Rect2(220.0, 360.0 + float(index) * MENU_ROW_STEP, 620.0, MENU_ROW_HEIGHT)
+	return Rect2(220.0, SETTINGS_ROW_Y + float(index) * MENU_ROW_STEP, 620.0, MENU_ROW_HEIGHT)
 
 func _build_layer_rect(index: int) -> Rect2:
 	## 面板标题行占 y=210–232、分隔线在 y=248（`_draw_panel` 的 +58）。
@@ -541,10 +578,21 @@ func _focus_target_y() -> float:
 	if _screen == SCREEN_MAIN:
 		return MENU_ROW_Y + float(_menu_index) * MENU_ROW_STEP
 	if _screen == SCREEN_SETTINGS:
-		return MENU_ROW_Y + float(_settings_index) * MENU_ROW_STEP
+		## v3.48：改用 `SETTINGS_ROW_Y`，与 `_settings_row_rect()` **同源**。
+		## 旧版写的是 `MENU_ROW_Y`，两者数值恰好都是 360.0，所以历史上没有可见偏差，
+		## 但那是巧合：任一常量单独变动都会让焦点条与行矩形错开。
+		return SETTINGS_ROW_Y + float(_settings_index) * MENU_ROW_STEP
 	return MENU_ROW_Y
 
 func _activate_main_menu() -> void:
+	## v3.48（P0-4）：退出需要**两次**激活。旧版 `else` 分支直接 `get_tree().quit()`，
+	## 误触即退出、进度全丢。这里改成「上膛 → 确认」两步：
+	##   第一次：把该行文案换成「确认退出？」（见 `_main_menu_label()`）并置 `_exit_armed`；
+	##   第二次：真的退出。
+	## 选这个做法而不是弹窗：本项目 UI 全部是 `_draw` 手绘、没有通用弹窗组件，
+	## 新建一个弹窗层级（遮罩 / 按钮 / 焦点 / 鼠标命中）的成本远高于一个布尔标志。
+	if _menu_index != MENU_ITEM_COUNT - 1:
+		_exit_armed = false
 	if _menu_index == 0:
 		_enter_survival()
 	elif _menu_index == 1:
@@ -563,21 +611,87 @@ func _activate_main_menu() -> void:
 	elif _menu_index == 4:
 		_settings_index = 0
 		_set_screen(SCREEN_SETTINGS)
+	elif not _exit_armed:
+		_exit_armed = true
 	else:
 		get_tree().quit()
 	queue_redraw()
 
+## 主菜单最后一行的显示文案。未上膛时是「退出」，上膛后变成「确认退出？」。
+## 单独抽出来是因为 `_draw_main_menu()` 的 `labels` 是局部数组 —— 直接在数组里改字
+## 会让「显示」与「实际状态」两处各写一份判断，迟早不同步。
+func _main_menu_label(index: int, label: String) -> String:
+	if index == MENU_ITEM_COUNT - 1 and _exit_armed:
+		return "确认退出？（再按一次）"
+	return label
+
 func _toggle_setting() -> void:
+	## v3.48（P0-1/P0-3）：0 辉光 / 1 动效 / 2 窗口模式 / 3 调试读数 / 4 返回。
+	## **每次切换都写盘**：设置项的语义就是「设一次就好」，攒到退出再写会在崩溃 /
+	## 强制关闭时丢掉。写入量只有 4 个键，代价可以忽略。
 	if _settings_index == 0:
 		_glow_enabled = not _glow_enabled
-		var environment_node: WorldEnvironment = get_node_or_null("WorldEnvironment") as WorldEnvironment
-		if environment_node != null and environment_node.environment != null:
-			environment_node.environment.glow_enabled = _glow_enabled
+		_apply_glow()
 	elif _settings_index == 1:
 		_motion_enabled = not _motion_enabled
+	elif _settings_index == 2:
+		_window_mode = _settings.cycle_window_mode()
+		_apply_window_mode()
+	elif _settings_index == 3:
+		_debug_readout = not _debug_readout
 	else:
 		_set_screen(SCREEN_MAIN)
+		queue_redraw()
+		return
+	_persist_settings()
 	queue_redraw()
+
+## 把 `_glow_enabled` 写进引擎环境。**唯一消费点**：`_ready()` 读设置后与切换时都走这里，
+## 避免「启动时读回的值没被应用」这类「文件对了但画面没变」的问题。
+func _apply_glow() -> void:
+	var environment_node: WorldEnvironment = get_node_or_null("WorldEnvironment") as WorldEnvironment
+	if environment_node != null and environment_node.environment != null:
+		environment_node.environment.glow_enabled = _glow_enabled
+
+## 把窗口模式档位应用到真实窗口。
+## 注意：`WINDOW_MODE_FULLSCREEN` 与 `project.godot` 的 `mode=2`（最大化）**不是**同一件事 ——
+## 全屏是独占显示，最大化是带标题栏的最大窗口。玩家要求过「启动即最大化」，所以默认档仍是最大化。
+func _apply_window_mode() -> void:
+	if DisplayServer.get_name() == "headless":
+		## headless 下 `window_set_mode()` 是空操作，但显式早退能让截图 / 测试路径的行为可预期。
+		return
+	if _window_mode == UserSettings.WINDOW_MODE_FULLSCREEN:
+		DisplayServer.window_set_mode(DisplayServer.WINDOW_MODE_FULLSCREEN)
+	elif _window_mode == UserSettings.WINDOW_MODE_WINDOWED:
+		DisplayServer.window_set_mode(DisplayServer.WINDOW_MODE_WINDOWED)
+	else:
+		DisplayServer.window_set_mode(DisplayServer.WINDOW_MODE_MAXIMIZED)
+
+## 把当前四个设置项写回 `user://settings.cfg`。失败只打一行日志，不弹窗、不改状态 ——
+## 设置写不进去不应该阻断游戏。
+func _persist_settings() -> void:
+	if _settings == null:
+		return
+	_settings.glow_enabled = _glow_enabled
+	_settings.motion_enabled = _motion_enabled
+	_settings.window_mode = _window_mode
+	_settings.debug_readout = _debug_readout
+	if not _settings.save_settings():
+		printerr("SETTINGS_SAVE_FAILED %s" % _settings.path)
+
+## 启动时读回设置并应用。文件不存在时保留默认值（不打印错误）——
+## 首次运行本来就没有文件，那不是异常。
+func _load_settings() -> void:
+	if _settings == null:
+		return
+	var loaded := _settings.load_settings()
+	_glow_enabled = _settings.glow_enabled
+	_motion_enabled = _settings.motion_enabled
+	_window_mode = _settings.window_mode
+	_debug_readout = _settings.debug_readout
+	_apply_glow()
+	if loaded:
+		_apply_window_mode()
 
 func _handle_build_key(event: InputEventKey) -> void:
 	var key: Key = event.keycode
@@ -830,12 +944,6 @@ func _handle_mouse(event: InputEventMouseButton) -> void:
 		queue_redraw()
 		return
 	_handle_build_panel_click(position)
-
-func _remove_part_under_mouse() -> String:
-	var existing: Dictionary = _editor_model().part_at(_build_layer, _cursor)
-	if existing.is_empty():
-		return "当前层此格没有部件。"
-	return _editor_model().remove_at(_build_layer, _cursor)
 
 func _handle_build_panel_click(position: Vector2) -> void:
 	for index in range(3):
@@ -1735,6 +1843,45 @@ func _draw() -> void:
 		_draw_build()
 	if _screen_opacity < 1.0:
 		draw_rect(Rect2(Vector2.ZERO, get_viewport_rect().size), Color(Palette.BG_BASE, 1.0 - _screen_opacity), true)
+	## v3.48（P0-3）：调试读数叠加层。**画在淡入遮罩之后**，所以它是全页面最顶层 ——
+	## 一个「被其他 UI 盖住的调试信息」等于没有。
+	if _debug_readout:
+		_draw_debug_readout()
+
+## 调试读数（设置页第 4 项）。内容全部是可观测的运行时事实，不含任何玩法状态：
+## 帧率 / 当前页 / 相机读数 / 玩家坦克模块数。
+## 为什么不用 `Performance` 单例的全部指标：那是给 profiler 看的，玩家要的只是
+## 「现在卡不卡、我在哪一页」。
+func _draw_debug_readout() -> void:
+	var lines: Array[String] = [
+		"FPS %d" % Engine.get_frames_per_second(),
+		"SCREEN %s" % _screen,
+	]
+	var arena: Rect2 = _battle_arena_now()
+	if arena.size.y > 0.0:
+		lines.append("CAMERA %s" % _camera_readout(arena))
+	var hull: TankBody = _debug_player_hull()
+	if hull != null:
+		lines.append("PARTS %d" % hull.parts.size())
+	## 右上角贴着 `DRIVE_HUD_RIGHT` 的外侧：不压任何既有面板（菜单在左、预览车在右下），
+	## 也不会被战场视图的 blit 盖住（它画在最后）。
+	var origin := Vector2(1600.0, 56.0)
+	var box := Rect2(origin - Vector2(8.0, 22.0), Vector2(300.0, 22.0 * float(lines.size()) + 16.0))
+	draw_rect(box, Color(Palette.BG_BASE, 0.72), true)
+	draw_rect(box, Color(Palette.WIRE, 0.55), false, 1.0)
+	for index in range(lines.size()):
+		_draw_text(lines[index], origin + Vector2(0.0, 22.0 * float(index)), 15, Palette.ACCENT_LIME, true)
+
+## 当前页面的玩家坦克（无则 null）。试驾页读 `tank`，另两个战斗页读 `duel.tank_of()`。
+## 单独抽出来是因为三个页面的「玩家车从哪取」本来就不同，调试层不应该各自判一遍。
+func _debug_player_hull() -> TankBody:
+	if _screen == SCREEN_DRIVE:
+		return tank
+	if _screen == SCREEN_SURVIVAL and survival != null and survival.duel != null:
+		return survival.duel.tank_of(Duel.TAG_PLAYER)
+	if _screen == SCREEN_MATCH and match_session != null and match_session.duel != null:
+		return match_session.duel.tank_of(Duel.TAG_PLAYER)
+	return null
 
 func _draw_background() -> void:
 	var view := get_viewport_rect().size
@@ -1762,7 +1909,15 @@ func _draw_main_menu() -> void:
 	for index in range(labels.size()):
 		var rect := _menu_row_rect(index)
 		_draw_focus_row(rect, index == _menu_index)
-		_draw_text(labels[index], rect.position + Vector2(22, 33), 24, Palette.TEXT_HI if index == _menu_index else Palette.TEXT_LO, false)
+		## v3.48（P0-4）：最后一行的文案由 `_main_menu_label()` 统一决定 ——
+		## 上膛后显示「确认退出？」，而不是在这一行里再写一遍状态判断。
+		var label: String = _main_menu_label(index, labels[index])
+		var label_colour: Color = Palette.TEXT_HI if index == _menu_index else Palette.TEXT_LO
+		if index == MENU_ITEM_COUNT - 1 and _exit_armed:
+			## 上膛状态用红字：它与其他五项的行为不同（再按一次会真的退出），
+			## 只改文字不改颜色的话，在霓虹配色下很容易被当成普通选中项。
+			label_colour = Palette.ACCENT_RED
+		_draw_text(label, rect.position + Vector2(22, 33), 24, label_colour, false)
 	## 难度按钮放在菜单**下方**：菜单最后一行结束于 MENU_ROW_Y + 5×STEP + HEIGHT = 688，
 	## 旧代码把难度写在 y=654 且提示写在 y=700，两者都压在「退出」行上（用户报告的菜单重叠）。
 	var difficulty := _menu_difficulty_rect()
@@ -1791,16 +1946,25 @@ func _cycle_match_difficulty(step: int) -> void:
 func _draw_settings() -> void:
 	_draw_text("设置", Vector2(220, 190), 48, Palette.TEXT_HI, false)
 	_draw_text("SETTINGS", Vector2(224, 230), 16, Palette.TEXT_LO, true)
-	var labels := ["辉光", "动效", "返回"]
-	var values := ["开启" if _glow_enabled else "关闭", "开启" if _motion_enabled else "关闭", ""]
-	for index in range(labels.size()):
+	## v3.48（P0-3）：从 3 行扩到 5 行 —— 辉光 / 动效 / 窗口模式 / 调试读数 / 返回。
+	## 行数由 `SETTINGS_ROW_COUNT` 单一来源决定（键盘上下界与鼠标命中都读它）。
+	var labels := ["辉光", "动效", "窗口模式", "调试读数", "返回"]
+	var values := [
+		"开启" if _glow_enabled else "关闭",
+		"开启" if _motion_enabled else "关闭",
+		_settings.window_mode_label(),
+		"开启" if _debug_readout else "关闭",
+		"",
+	]
+	for index in range(SETTINGS_ROW_COUNT):
 		var rect := _settings_row_rect(index)
 		_draw_focus_row(rect, index == _settings_index)
 		_draw_text(labels[index], rect.position + Vector2(22, 32), 22, Palette.TEXT_HI if index == _settings_index else Palette.TEXT_LO, false)
 		if not values[index].is_empty():
 			_draw_text(values[index], rect.position + Vector2(480, 32), 18, Palette.ACCENT_CYAN, true)
-	_draw_text("辉光与动效是独立的可读性开关。", Vector2(220, 620), 17, Palette.TEXT_LO, false)
-	_draw_text("Esc 返回", Vector2(220, 950), 16, Palette.TEXT_LO, true)
+	_draw_text("辉光与动效是独立的可读性开关；窗口模式与调试读数会随游戏保存。", Vector2(220, 700), 17, Palette.TEXT_LO, false)
+	_draw_text("以上设置会写入 user://settings.cfg，下次启动自动恢复。", Vector2(220, 728), 16, Palette.ACCENT_LIME, false)
+	_draw_text("Enter / 点击切换 · Esc 返回", Vector2(220, 950), 16, Palette.TEXT_LO, true)
 
 func _draw_build() -> void:
 	## 同一套编辑器服务两页：建造页与生存改装页。只换标题与目录标题，布局完全一致。
@@ -2221,9 +2385,6 @@ func _match_scale() -> float:
 	if match_session == null:
 		return 1.0
 	return CombatView.fit_scale(DRIVE_VIEW, _battle_camera(match_session.duel.arena))
-
-func _match_to_screen(world: Vector2, scale_factor: float) -> Vector2:
-	return CombatView.to_screen(DRIVE_VIEW, _battle_camera(match_session.duel.arena), world, scale_factor)
 
 ## 对局页战斗视图：竞技场 / 障碍 / 车体 / 动效 / 弹道 / 命中闪光 / 伤害数字全部走
 ## `CombatView`，与生存页同一份实现。页面只负责组装参数与画自己的 HUD。
@@ -2906,11 +3067,7 @@ func _battle_focus_target(arena: Rect2) -> Vector2:
 func _drive_scale() -> float:
 	return CombatView.fit_scale(DRIVE_VIEW, _battle_camera(_drive_arena))
 
-func _drive_to_screen(world: Vector2) -> Vector2:
-	var camera := _battle_camera(_drive_arena)
-	return CombatView.to_screen(DRIVE_VIEW, camera, world, CombatView.fit_scale(DRIVE_VIEW, camera))
-
-## 屏幕坐标 → 世界坐标。三个战斗页共用同一条逆变换公式（`to_world`）。
+## 屏幕坐标 → 世界坐标。
 ## 为什么不能三页各写一份：正向变换在 `CombatView` 里只写了一份，逆变换如果每页自己拼，
 ## 一旦相机不一致，三处就会同时错——而且错的是「看得见的炮管」与「真的弹道」之间的关系。
 ## `camera` 与同一个页面的 `to_screen()` 用的必须是**同一个** `_battle_camera()` 结果。
@@ -2941,15 +3098,20 @@ func _player_bank() -> CannonBank:
 		return bank
 	return null
 
-## 当前屏幕是否处于**可瞄准 / 可开火**的战斗页。战斗期以外（升级页 / 商店页 / 改装页）
+## 当前屏幕是否处于**可矄准 / 可开火**的战斗页。战斗期以外（升级页 / 商店页 / 改装页）
 ## 一律返回 false：那里左键是「选卡片 / 买商品 / 落格」，不能同时当开火键。
+##
+## v3.48（P0-2）：生存页暂停时也返回 false。**这是暂停在 UI 侧的单一拦截点** ——
+## 左键开火、鼠标矄准、空格开火都经它判一次，所以在这一处加条件就能把三条路径全部挡住，
+## 不需要在三个地方各写一遍（写三遍就一定会漏一处，v3.23 的教训）。
+## 对局页早就这么做了（`not match_session.paused`），生存页只是补上同样的那一条。
 func _is_battle_screen() -> bool:
 	if _screen == SCREEN_DRIVE:
 		return _drive_ready
 	if _screen == SCREEN_MATCH:
 		return _match_ready and match_session != null and not match_session.is_over() and not match_session.paused
 	if _screen == SCREEN_SURVIVAL:
-		return _survival_ready and survival != null and survival.stage == SurvivalRun.STAGE_BATTLE
+		return _survival_ready and survival != null and survival.stage == SurvivalRun.STAGE_BATTLE and not survival.paused
 	return false
 
 ## 战斗页当前的鼠标位置（设计坐标）。
@@ -3348,11 +3510,6 @@ func _mouse_to_cell(position: Vector2) -> Vector2i:
 	var local := (position - GRID_ORIGIN) / GRID_CELL
 	return Vector2i(clampi(floori(local.x), 0, grid.x - 1), clampi(floori(local.y), 0, grid.y - 1))
 
-func _option_window_start(option_count: int) -> int:
-	if option_count <= BUILD_OPTION_VISIBLE:
-		return 0
-	return _option_scroll
-
 func _module_glyph(name: String) -> String:
 	return name.substr(0, 1) if not name.is_empty() else "?"
 
@@ -3591,9 +3748,6 @@ func _survival_scale() -> float:
 		return 1.0
 	return CombatView.fit_scale(DRIVE_VIEW, _battle_camera(survival.duel.arena))
 
-func _survival_to_screen(world: Vector2, scale_factor: float) -> Vector2:
-	return CombatView.to_screen(DRIVE_VIEW, _battle_camera(survival.duel.arena), world, scale_factor)
-
 ## 摆放起始坦克：直接转调唯一来源，不在页面层重复一份布局。
 func _build_survival_starter(model: GridBuilder) -> String:
 	return SurvivalRun.build_starter(model)
@@ -3689,6 +3843,22 @@ func _handle_survival_key(event: InputEventKey) -> void:
 			_enter_survival()
 
 func _survival_battle_key(key: Key, event: InputEventKey) -> void:
+	## v3.48（P0-2）：P 切换暂停。与对局页 `_handle_match_key()` 的 `KEY_P` **同键同语义** ——
+	## 两个模式里「暂停」应该是同一个按键，否则玩家要记两套。
+	## 放在 `KEY_R` 之前判：暂停中按 R 仍会重开（这是有意的 —— 重开是「放弃这一局」，
+	## 与暂停正交，不应该被暂停挡住）。
+	if key == KEY_P:
+		if event.pressed and not event.echo:
+			var now_paused: bool = survival.toggle_pause()
+			if survival.stage == SurvivalRun.STAGE_BATTLE:
+				_survival_event = "已暂停（P 继续）" if now_paused else "继续"
+				## 暂停 / 恢复都要清按键集：暂停期间按下的 W/A/S/D 不会被消费，
+				## 恢复后若不清理，坦克会带着「玩家早已松开的键」跑出去。
+				_survival_held.clear()
+				_survival_apply_input()
+				_survival_accumulator = 0.0
+			queue_redraw()
+		return
 	if key == KEY_R:
 		if event.pressed and not event.echo:
 			_enter_survival()
@@ -3700,6 +3870,12 @@ func _survival_battle_key(key: Key, event: InputEventKey) -> void:
 		return
 	if key == KEY_SPACE:
 		if event.pressed and not event.echo:
+			## v3.48：暂停中不允许开火。`step_battle()` 已经不推进，但 `duel.fire()` 是**直接调用**，
+			## 不拦的话玩家可以在暂停里把弹药全部打出去，而炮弹要等恢复才飞 —— 那不是暂停。
+			if survival.paused:
+				_survival_event = "已暂停（P 继续）"
+				queue_redraw()
+				return
 			var fired := 0
 			if survival.duel != null:
 				fired = survival.duel.fire(Duel.TAG_PLAYER)
@@ -3804,6 +3980,14 @@ func _survival_simulate(delta: float) -> void:
 		_survival_accumulator = 0.0
 		return
 	if survival.stage != SurvivalRun.STAGE_BATTLE:
+		_survival_accumulator = 0.0
+		return
+	## v3.48（P0-2）：暂停。**复用上面已有的「清零累加器 + return」模式**，
+	## 而不是新开一条路径 —— 为什么累加器必须清零：不清零的话，暂停 3 分钟再恢复，
+	## 下一帧累加器里躺着 180 秒，会一次跑满 `DRIVE_MAX_STEPS` 步，坦克瞬移。
+	## 注意这里**不调 `survival.toggle_pause()` 也不累加 `paused_time`** ——
+	## 那是 `SurvivalRun.step_battle()` 的职责（它自己也有 `paused` 早退），两层各管一半。
+	if survival.paused:
 		_survival_accumulator = 0.0
 		return
 	var step_time := 1.0 / float(maxi(definitions.global_int("physics_hz", 60), 1))
@@ -4081,16 +4265,33 @@ func _draw_survival_hud() -> void:
 	_draw_text(_survival_event, Vector2(left, 576), 15, Palette.ACCENT_LIME, false)
 	_draw_text("W / S    油门", Vector2(right, 240), 16, Palette.TEXT_HI, false)
 	_draw_text("A / D    转向", Vector2(right, 270), 16, Palette.TEXT_HI, false)
-	_draw_text("鼠标瞄准 · 左键开火", Vector2(right, 300), 16, Palette.TEXT_HI, false)
-	## v3.38：滚轮缩放读数。右 HUD 原键位块是 300 / 330 / 360，
-	## 缩放行接到 390，「战斗期禁止改装」从 410 下推到 430 ——
-	## 430 + 14 px 字高仍在镜像面板（`SURVIVAL_MIRROR_RECT` 从 y=436 开始）之上，不重叠。
-	_draw_text("R        重开 run", Vector2(right, 330), 16, Palette.TEXT_HI, false)
-	_draw_text("Esc      返回主菜单", Vector2(right, 360), 16, Palette.TEXT_HI, false)
-	_draw_text("滚轮推拉 · Z 整图  相机 %s" % _camera_readout(_battle_arena_now()), Vector2(right, 390), 14, Palette.ACCENT_CYAN, false)
-	_draw_text("战斗期禁止改装", Vector2(right, 428), 14, Palette.ACCENT_AMBER, false)
+	_draw_text("鼠标矄准 · 左键开火", Vector2(right, 300), 16, Palette.TEXT_HI, false)
+	## v3.48（P0-2）：右 HUD 键位块重排。加入「P 暂停」后共 5 行文字 + 1 行相机读数，
+	## 而行距必须从 30 缩到 26 才能全部装在镜像面板上方。
+	## **几何依据**：`SURVIVAL_MIRROR_RECT` 从 y=436 开始；本块从 330 起 5 行 × 26 =
+	## 330/356/382/408/434，最后一行的**字顶**在 434 − 14 = 420，仍低于 436。
+	## 若继续用 30 px 行距，第 5 行会到 450 —— 直接压在镜像面板上。
+	_draw_text("P        暂停 / 继续", Vector2(right, 330), 16, Palette.TEXT_HI, false)
+	_draw_text("R        重开 run", Vector2(right, 356), 16, Palette.TEXT_HI, false)
+	_draw_text("Esc      返回主菜单", Vector2(right, 382), 16, Palette.TEXT_HI, false)
+	_draw_text("战斗期禁止改装", Vector2(right, 408), 14, Palette.ACCENT_AMBER, false)
+	_draw_text("滚轮推拉 · Z 整图  相机 %s" % _camera_readout(_battle_arena_now()), Vector2(right, 430), 13, Palette.ACCENT_CYAN, false)
 	_draw_survival_mirror()
 	_draw_battle_status(_status_message)
+	## v3.48（P0-2）：暂停遮罩**最后画**，盖住战场与 HUD ——
+	## 它是「现在什么都不该发生」的唯一视觉信号，被任何东西盖住都等于没有。
+	if survival.paused:
+		_draw_survival_pause_overlay()
+
+## 暂停遮罩：压暗战场并给出醒目的「已暂停」与恢复方式。
+## 只用一层半透明黑 + 两行字，不加按钮 —— 恢复只需要按 P，
+## 加一个可点按钮会多一条需要单独测的鼠标路径（本项目 UI 测试对菜单层零覆盖）。
+func _draw_survival_pause_overlay() -> void:
+	draw_rect(DRIVE_VIEW, Color(Palette.BG_BASE, 0.72), true)
+	draw_rect(DRIVE_VIEW, Color(Palette.ACCENT_AMBER, 0.85), false, 2.0)
+	var centre := DRIVE_VIEW.get_center()
+	_draw_text("已暂停", centre + Vector2(-54.0, -6.0), 44, Palette.ACCENT_AMBER, true)
+	_draw_text("按 P 继续 · 暂停期间计时与敌人全部停止", centre + Vector2(-158.0, 44.0), 17, Palette.TEXT_HI, false)
 
 ## 坦克镜像面板（用户 2026-10-17 要求：「要有一个小窗口显示一个坦克的镜像，展示坦克每个模块的状态」）。
 ##
