@@ -43,6 +43,11 @@ const DAMAGE_POPUP_LIFE := 0.85
 const DAMAGE_POPUP_PER_SIDE := 6
 ## 同帧多条数字的垂直错开步长（像素）。
 const DAMAGE_POPUP_STACK_STEP := 14.0
+## 数字错开只对「靠得够近」的数字生效：v3.49 之前这个 step 是全局累加的，
+## 于是第 6 条数字被抬高 70 px，**哪怕它和第一条隔了半个战场**。
+## 现在按位置分桶：只有与已画数字距离 < 本值的才往上错开。
+## 取 1.6 倍 `DAMAGE_POPUP_STACK_STEP` 的两倍左右，正好能容下 3 条不重叠的数字。
+const DAMAGE_POPUP_STACK_RADIUS := 48.0
 ## 炮口闪光 / 消散特效的时长与尺寸（v3.23）。
 ## 两者都比命中闪光（0.14 s）长，因为它们要表达「发生了什么」而不只是「打到了」。
 const MUZZLE_FLASH_TIME := 0.18
@@ -51,7 +56,35 @@ const MUZZLE_FLASH_MIN_LEN := 10.0
 const EXPIRE_FLASH_TIME := 0.26
 const EXPIRE_FLASH_RADIUS := 16.0
 
+## ===== 炮弹外观分档（v3.49） =====
+## 拖尾的参考时长（秒）：拖尾长度 = 速度 × 本值。
+## 不用「上一帧位移」是因为那样长度同时受帧率与速度影响，同一发弹在 30 fps 与 144 fps 下拖尾长短不同。
+const SHOT_TRAIL_TIME := 0.045
+const SHOT_TRAIL_MIN := 10.0
+const SHOT_TRAIL_MAX := 46.0
+## 拖尾长度直接取 `shot["speed"]`（`projectile_field` 生成炮弹时写入的 px/s）乘以本时长。
+## v3.49 首次实现时用「上一帧位移 ÷ 1.0」反推速度，得到的是「每帧多少像素」而不是 px/s，
+## 60 Hz 下一发 `cal_76` 每帧只走约 16.7 px，乘完被夹到 `SHOT_TRAIL_MIN`——**所有口径的拖尾都塌到最短**。
+## 现在不反推，也不读引擎全局步频：步长来自 `data/globals.json` 的 `physics_hz`，组件不应去猜它。
+## 弹头半径（屏幕像素）：最轻口径 → 最重口径。
+const SHOT_RADIUS_MIN := 1.8
+const SHOT_RADIUS_MAX := 5.4
+## 拖尾宽度（屏幕像素）：同上。
+const SHOT_TRAIL_WIDTH_MIN := 1.0
+const SHOT_TRAIL_WIDTH_MAX := 3.2
+## 拖尾分成几段做亮度渐变。3 段在 10–46 px 的长度上已经足够平滑，再多就只是增加绘制调用。
+const SHOT_TRAIL_BANDS := 3
+## 口径分档的对数分母：`cal_155` 的 `base_damage` = 240。
+## 取对数而非线性，否则 8/20/55 三个轻口径会全挤在区间最左端，看上去还是一样细。
+const SHOT_GAUGE_REFERENCE := 240.0
+
 ## 动效圆环的默认风格：生存页这一套（半径随剩余寿命线性收，带半透明填充）。
+##
+## v3.49：三套风格现在**全部开启** `special` 与 `centre_dot`。
+## v3.33 抽取时刻意把另两页关着，理由是「抽取的目的是消除分叉，不是重做另两页的观感」——
+## 那个约束在当轮是对的，但代价是 `detach` / `core` / `debris` / `shield_hit` 在
+## 对局页与生存页一直长得和普通命中一模一样，玩家分不清「打中一格」与「整块被撕下」。
+## 本轮就是美化的轮次，所以统一打开；**三页的历史像素基线因此全部失效**，必须重拍。
 const FX_STYLE_SURVIVAL := {
 	"radius_base": 0.6,
 	"radius_grow": 0.4,
@@ -60,6 +93,10 @@ const FX_STYLE_SURVIVAL := {
 	"arc_width": 1.5,
 	"fill_scale": 0.5,
 	"alpha_scale": 0.75,
+	"special": true,
+	"centre_dot": 0.22,
+	"centre_alpha": 0.55,
+	"burst": true,
 }
 
 ## 对局页这一套：半径从满尺寸向外扩张（`1.0 - 0.8t`），不画填充，描边更粗。
@@ -71,13 +108,13 @@ const FX_STYLE_MATCH := {
 	"arc_width": 2.0,
 	"fill_scale": 0.0,
 	"alpha_scale": 0.8,
+	"special": true,
+	"centre_dot": 0.18,
+	"centre_alpha": 0.5,
+	"burst": true,
 }
 
-## 试驾页这一套：与 `FX_STYLE_MATCH` 同形（向外收缩 + 无填充），另加两个开关：
-##   `special`        画出 `debris` / `shield_hit` / `detach` / `core` 四种专用形状
-##                    （默认 `false`，这四种在另两页依旧画成通用圆环）
-##   `centre_dot` / `centre_alpha`  通用圆环中心补一个亮点（试驾页从 M5 起就有的观感）
-## 两个开关缺省关闭，所以另两页的像素不受影响。
+## 试驾页这一套：与 `FX_STYLE_MATCH` 同形（向外收缩 + 无填充）。
 const FX_STYLE_DRIVE := {
 	"radius_base": 1.0,
 	"radius_grow": -0.8,
@@ -89,6 +126,7 @@ const FX_STYLE_DRIVE := {
 	"special": true,
 	"centre_dot": 0.18,
 	"centre_alpha": 0.5,
+	"burst": true,
 }
 
 ## 世界坐标 → 屏幕坐标。
@@ -230,6 +268,15 @@ static func scale_obstacles(raw_obstacles: Array, cell_px: float) -> Array:
 ## 因此它们的像素不受网格分支影响；试驾页传「4 格宽」的间距，每第 4 根线加亮。
 static func draw_arena(canvas: CanvasItem, arena: Rect2, obstacles: Array, border_colour: Color, pixel: float = 1.0, grid_step: float = 0.0) -> void:
 	canvas.draw_rect(arena, Color(Palette.BG_BASE, 0.94), true)
+	## v3.49 美化：**内发光**。四道由内向外递减的细线，给战场一个「光源在场地中心」的层次，
+	## 而不是一块完全均匀的暗板。用 4 道而不是渐变纹理：`draw_*` 没有渐变图元，
+	## 而引入 `Gradient` + `TextureRect` 会多一个节点与一条绘制路径（单场景架构下不值得）。
+	for glow_index in range(4):
+		var inset := (float(glow_index) + 0.5) * 3.0 * pixel
+		var glow_rect := Rect2(arena.position + Vector2(inset, inset), arena.size - Vector2(inset, inset) * 2.0)
+		if glow_rect.size.x <= 0.0 or glow_rect.size.y <= 0.0:
+			break
+		canvas.draw_rect(glow_rect, Color(border_colour, 0.055 - 0.012 * float(glow_index)), false, 2.0 * pixel)
 	if grid_step > 0.0:
 		var x := arena.position.x
 		var column := 0
@@ -244,6 +291,17 @@ static func draw_arena(canvas: CanvasItem, arena: Rect2, obstacles: Array, borde
 			y += grid_step
 			row += 1
 	canvas.draw_rect(arena, border_colour, false, 2.0 * pixel)
+	## v3.49 美化：**四角 L 形标记**。边框本身在 4.0× 下会被视窗剪到只剩一段直线，
+	## 看不出「这里是地图边界」；角标是固定尺寸的，无论缩放到多少都认得出来。
+	var corner := 26.0 * pixel
+	for corner_index in range(4):
+		var corner_x := arena.position.x if corner_index % 2 == 0 else arena.end.x
+		var corner_y := arena.position.y if corner_index < 2 else arena.end.y
+		var dir_x := 1.0 if corner_index % 2 == 0 else -1.0
+		var dir_y := 1.0 if corner_index < 2 else -1.0
+		var corner_at := Vector2(corner_x, corner_y)
+		canvas.draw_line(corner_at, corner_at + Vector2(corner * dir_x, 0.0), border_colour, 3.0 * pixel)
+		canvas.draw_line(corner_at, corner_at + Vector2(0.0, corner * dir_y), border_colour, 3.0 * pixel)
 	for raw_obstacle in obstacles:
 		var obstacle: Dictionary = raw_obstacle
 		if String(obstacle.get("shape", "rect")) == "rect":
@@ -271,12 +329,32 @@ static func draw_neutrals(canvas: CanvasItem, houses: Array, debris: Array, cell
 			continue
 		var house_rect: Rect2 = house["rect"]
 		canvas.draw_rect(house_rect, Color(Palette.ACCENT_AMBER, 0.14), true)
+		## v3.49 美化：**房屋与障碍分家**。两者旧版都是「填充 + 单线边框 + 血条」，
+		## 而固定障碍用的是红色（`draw_arena()` 里画），房屋用琥珀 —— 只靠颜色区分在混战里很难认。
+		## 现在房屋多两道语义：**双线边框**（可拆）与**四角内向短刻线**（目标标记），
+		## 障碍保持单线不变，于是「双线 = 能打掉拿钱」成为一个可学的视觉规则。
 		canvas.draw_rect(house_rect, Palette.ACCENT_AMBER, false, 1.5 * pixel)
+		var inner := house_rect.grow(-3.0 * pixel)
+		if inner.size.x > 0.0 and inner.size.y > 0.0:
+			canvas.draw_rect(inner, Color(Palette.ACCENT_AMBER, 0.55), false, 1.0 * pixel)
+		var tick := minf(8.0 * pixel, minf(house_rect.size.x, house_rect.size.y) * 0.22)
+		for corner_index in range(4):
+			var corner_x := house_rect.position.x if corner_index % 2 == 0 else house_rect.end.x
+			var corner_y := house_rect.position.y if corner_index < 2 else house_rect.end.y
+			var dir_x := 1.0 if corner_index % 2 == 0 else -1.0
+			var dir_y := 1.0 if corner_index < 2 else -1.0
+			var corner_at := Vector2(corner_x, corner_y)
+			canvas.draw_line(corner_at, corner_at + Vector2(tick * dir_x, 0.0), Palette.ACCENT_AMBER, 2.0 * pixel)
+			canvas.draw_line(corner_at, corner_at + Vector2(0.0, tick * dir_y), Palette.ACCENT_AMBER, 2.0 * pixel)
 		var ratio := clampf(float(house["hp"]) / maxf(float(house["hp_max"]), 0.001), 0.0, 1.0)
 		## 血条同样用世界坐标：`draw_rect` 的粗细也是世界单位，所以高度要乘 `pixel`。
+		## 两段式（底槽 + 前景）而不是单条：空槽给出了「还剩多少」的参照，
+		## 否则 3 px 高的短条在混战里看不出是满的还是快没了。
+		## 低于 30% 转红：这是「这一栋快倒了」的唯一预告。
 		var bar := Rect2(house_rect.position + Vector2(0.0, -6.0 * pixel), Vector2(house_rect.size.x, 3.0 * pixel))
 		canvas.draw_rect(bar, Color(Palette.WIRE, 0.4), true)
-		canvas.draw_rect(Rect2(bar.position, Vector2(bar.size.x * ratio, bar.size.y)), Palette.ACCENT_AMBER, true)
+		var fill_colour := Palette.ACCENT_RED if ratio < 0.30 else Palette.ACCENT_AMBER
+		canvas.draw_rect(Rect2(bar.position, Vector2(bar.size.x * ratio, bar.size.y)), fill_colour, true)
 	for raw_debris in debris:
 		var item: Dictionary = raw_debris
 		if bool(item.get("taken", false)):
@@ -288,19 +366,101 @@ static func draw_neutrals(canvas: CanvasItem, houses: Array, debris: Array, cell
 		canvas.draw_rect(box, Palette.ACCENT_LIME, false, 1.0 * pixel)
 
 
-## 在途炮弹：拖尾线段 + 弹头圆点（纯世界坐标，v3.42）。
+## 在途炮弹：拖尾 + 弹头（纯世界坐标，v3.42）。
 ##
 ## 颜色按射手分：玩家弹药琥珀、其余品红——这是「谁在打我」的唯一即时线索。
 ## `player_tag` 由调用方给出，因为多阵营模式下「玩家」不是一个全局常量。
-## `pixel` 只用于「弹头半径不小于 2 屏幕像素」这一个下限。
-static func draw_shots(canvas: CanvasItem, shots: Array, player_tag: String, pixel: float = 1.0) -> void:
+##
+## v3.49 美化两处：
+##
+## ① **拖尾长度不再用「上一帧位移」。** 旧版画 `prev → pos` 这一段，长度 = `速度 × dt`，
+##    所以它随帧率与速度双变（60 Hz 下 `cal_20` 约 6 px、`cal_155` 约 15 px，都短得不像拖尾）。
+##    现在按**速度 × `SHOT_TRAIL_TIME`** 算长度并夹在 `[SHOT_TRAIL_MIN, SHOT_TRAIL_MAX]`：
+##    同样的速度在任何帧率下画出同样长的拖尾，而且慢弹也有可见的尾。
+##
+## ② **弹头按口径分档。** 旧版所有口径都画成同一个半径，玩家分不清飞过来的是 20 mm 还是 155 mm。
+##    现在用 `ammo_lookup(ammo_id) -> Dictionary` 注入数据层的弹药定义，按 `base_damage` 在
+##    `[SHOT_RADIUS_MIN, SHOT_RADIUS_MAX]` 之间插值；同时把拖尾宽度也按同一比例加粗。
+##    **组件不直接依赖 `data_registry`**（与 `colour_fn` / `text_fn` 同一惯例），
+##    `Callable()` 缺省时退回旧行为——这样任何未注入的调用点像素不变。
+##
+## `pixel` 只用于「弹头半径不小于 2 屏幕像素」这个下限。
+static func draw_shots(canvas: CanvasItem, shots: Array, player_tag: String, pixel: float = 1.0, ammo_lookup: Callable = Callable()) -> void:
 	for raw_shot in shots:
 		var shot: Dictionary = raw_shot
 		var head := Vector2(shot["pos"])
 		var tail := Vector2(shot["prev"])
 		var colour := Palette.ACCENT_AMBER if String(shot["shooter"]) == player_tag else Palette.ACCENT_MAGENTA
-		canvas.draw_line(tail, head, Color(colour, 0.7), 1.5 * pixel)
-		canvas.draw_circle(head, maxf(float(shot["radius"]), 2.0 * pixel), colour)
+		## 口径分档：0 = 最轻口径，1 = 最重口径。查不到时用 0.5（中间档），不会因缺数据而消失。
+		var gauge := 0.5
+		if ammo_lookup.is_valid():
+			var ammo: Dictionary = ammo_lookup.call(String(shot["ammo_id"]))
+			if not ammo.is_empty():
+				gauge = _shot_gauge(float(ammo.get("base_damage", 0.0)))
+		var head_radius := shot_head_radius(gauge, pixel)
+		var trail_width := shot_trail_width(gauge, pixel)
+		## 拖尾：从 `head` 沿反向铺 `SHOT_TRAIL_TIME` 秒的行程，再夹到上下限。
+		## 速度直接读 `shot["speed"]`（`projectile_field` 生成时写入的 px/s），**不反推**：
+		## 反推需要知道一个固定步长是多少秒，而那个值来自 `data/globals.json` 的 `physics_hz`，
+		## 组件不应去猜它。取不到时退回「上一帧位移」，即旧版行为。
+		var forward := head - tail
+		var speed := float(shot.get("speed", 0.0))
+		var trail_length := shot_trail_length(speed, forward.length())
+		if forward.length_squared() > 0.000001:
+			forward = forward.normalized()
+		else:
+			forward = Vector2.RIGHT
+		var trail_from := head - forward * trail_length
+		## 三段拖尾：越靠头越亮越粗，给「运动方向」一个渐变的形状而不只是均匀线段。
+		for band in range(SHOT_TRAIL_BANDS):
+			var t0 := float(band) / float(SHOT_TRAIL_BANDS)
+			var t1 := float(band + 1) / float(SHOT_TRAIL_BANDS)
+			var band_from := trail_from + (head - trail_from) * t0
+			var band_to := trail_from + (head - trail_from) * t1
+			var band_alpha := 0.18 + 0.62 * t1
+			var band_width := trail_width * (0.45 + 0.55 * t1)
+			canvas.draw_line(band_from, band_to, Color(colour, band_alpha), band_width)
+		## 弹头：外壳 + 亮芯，重口径多一圈描边，轻口径只有亮芯。
+		canvas.draw_circle(head, maxf(head_radius, 2.0 * pixel), colour)
+		canvas.draw_circle(head, maxf(head_radius * 0.45, 1.0 * pixel), Color(Palette.TEXT_HI, 0.9))
+		if gauge > 0.6:
+			canvas.draw_arc(head, maxf(head_radius * 1.7, 3.0 * pixel), 0.0, TAU, 14, Color(colour, 0.55), maxf(pixel, 1.0))
+
+
+## 弹药 `base_damage` → 口径档位 `[0, 1]`。
+##
+## 用对数刻度而不是线性：`cal_20`=8 与 `cal_40`=20 差 12，而 `cal_120`=130 与 `cal_155`=240
+## 差 110——线性会把前三个口径全挤到最左端，看上去还是「一样细」。
+## 分母用 `SHOT_GAUGE_REFERENCE`（= `cal_155` 的 240），口径再大也不会越界。
+static func _shot_gauge(base_damage: float) -> float:
+	if base_damage <= 0.0:
+		return 0.0
+	var normalized := log(maxf(base_damage, 1.0)) / log(SHOT_GAUGE_REFERENCE)
+	return clampf(normalized, 0.0, 1.0)
+
+
+## 口径档位 `[0,1]` → 弹头半径（世界单位）。
+##
+## 抽成公开静态函数是为了**可测**：`draw_*` 不能在 `_draw()` 之外调用（v3.49 实测），
+## 但「重口径必须比轻口径粗」这条要求本身是纯数值关系，不需要真实画布。
+static func shot_head_radius(gauge: float, pixel: float = 1.0) -> float:
+	return lerpf(SHOT_RADIUS_MIN, SHOT_RADIUS_MAX, clampf(gauge, 0.0, 1.0)) * pixel
+
+
+## 口径档位 `[0,1]` → 拖尾宽度（世界单位）。
+static func shot_trail_width(gauge: float, pixel: float = 1.0) -> float:
+	return lerpf(SHOT_TRAIL_WIDTH_MIN, SHOT_TRAIL_WIDTH_MAX, clampf(gauge, 0.0, 1.0)) * pixel
+
+
+## 炮弹速度（px/s）→ 拖尾长度（世界单位）。
+##
+## `fallback_length` 是「取不到速度」时的退路（= 上一帧位移，即旧版行为）。
+## 用**速度 × 时长**而不是直接拿上一帧位移：后者同时受帧率与速度影响，
+## 同一发弹在 30 fps 与 144 fps 下会画出不同长度的尾。
+static func shot_trail_length(speed: float, fallback_length: float) -> float:
+	if speed <= 0.0:
+		return fallback_length
+	return clampf(speed * SHOT_TRAIL_TIME, SHOT_TRAIL_MIN, SHOT_TRAIL_MAX)
 
 
 ## 瞬时动效圆环。
@@ -313,7 +473,7 @@ static func draw_shots(canvas: CanvasItem, shots: Array, player_tag: String, pix
 ##   `alpha_scale`                  描边 alpha 倍率
 ##   `special`                      是否画 `debris` / `shield_hit` / `detach` / `core` 专用形状
 ##   `centre_dot` / `centre_alpha`  通用圆环中心的亮点半径系数与 alpha（0 = 不画）
-##   `centre_dot` / `centre_alpha`  通用圆环中心的亮点半径系数与 alpha（0 = 不画）
+##   `burst`                        是否画 `explosion_burst` 多层爆炸（v3.49）
 ## 缺省用 `FX_STYLE_SURVIVAL`，对局页传 `FX_STYLE_MATCH`，试驾页传 `FX_STYLE_DRIVE`。
 ##
 ## v3.42：纯世界坐标、不裁剪。半径与线宽都是**世界单位**，`pixel` 只用来把
@@ -329,12 +489,18 @@ static func draw_fx(canvas: CanvasItem, entries: Array, style: Dictionary = FX_S
 	var special := bool(style.get("special", false))
 	var centre_dot := float(style.get("centre_dot", 0.0))
 	var centre_alpha := float(style.get("centre_alpha", 0.0))
+	var burst := bool(style.get("burst", true))
 	for raw_entry in entries:
 		var entry: Dictionary = raw_entry
 		var kind := String(entry.get("kind", ""))
-		## `shield` 是纯状态事件、`damage` 由 `draw_damage_popups()` 单独画文字。
-		## 若在这里画，会为每一个伤害数字多画一个零半径小圆。
-		if kind == "shield" or kind == "damage":
+		## `damage` 由 `draw_damage_popups()` 单独画文字，这里跳过以免多画一个零半径小圆。
+		##
+		## **v3.49 修掉一个真实缺陷**：旧版这里还跳过 `kind == "shield"`，而生存页唯一会推的护盾事件
+		## 正是 `kind = "shield"`（且位置与半径都是 0）。两处叠加的结果是——**护盾挡下伤害时
+		## 屏幕上什么都不发生**，玩家只能从「血量没掉」反推护盾在工作。现在护盾受击统一用
+		## `shield_hit`（带位置与半径），本函数照常画它；旧的无坐标 `shield` 条目仍然跳过，
+		## 因为零半径的东西画了也看不见。
+		if kind == "damage" or kind == "shield":
 			continue
 		var life := float(entry["life"])
 		if life <= 0.0:
@@ -344,6 +510,10 @@ static func draw_fx(canvas: CanvasItem, entries: Array, style: Dictionary = FX_S
 		var at := Vector2(entry["pos"])
 		## 全尺寸半径（未乘收缩系数）：中心亮点与专用形状用它，通用圆环再乘 `base + grow·t`。
 		var full_radius := float(entry["radius"])
+		## v3.49：多层爆炸优先于 `special` 分支——它是「一整个效果」而不是「圆环的一种形状」。
+		if burst and kind == "explosion_burst":
+			draw_explosion_burst(canvas, at, full_radius, float(entry["left"]), life, colour, pixel)
+			continue
 		if special and _draw_impact_shape(canvas, at, full_radius, colour, kind, t, pixel):
 			continue
 		var radius := maxf(full_radius * (radius_base + radius_grow * t), min_radius)
@@ -355,11 +525,13 @@ static func draw_fx(canvas: CanvasItem, entries: Array, style: Dictionary = FX_S
 			canvas.draw_circle(at, maxf(full_radius * centre_dot * t, pixel), Color(colour, centre_alpha * t))
 
 
-## `special` 打开时才走的四种专用形状（v3.33 从试驾页 `_draw_drive_fx()` 搬进来）。
+## `special` 打开时才走的专用形状（v3.33 从试驾页 `_draw_drive_fx()` 搬进来）。
 ##
-## **为什么不是默认行为**：对局页也会推 `detach` 动效，若把它改成专用形状，对局页的像素
-## 就会变——而抽取的目的是「消除分叉」而不是「重做另两页」。所以这四种形状必须由风格开关
-## 显式启用，缺省时它们与抽取前一样走通用圆环分支。
+## **v3.49：三套风格全部打开了 `special`**。v3.33 刚抽取时刻意只给试驾页开，理由是「抽取的
+## 目的是消除分叉，不是重做另两页的观感」——那个约束在当时是对的，但它留下了一个真实的
+## 可读性问题：`detach`（整块脱落）与 `core`（驾驶舱被毁）在另两页与「打中一格」长得一模一样。
+## 本轮就是美化轮次，所以统一打开。
+##
 ## 返回是否已画出，`false` 表示调用方继续走通用分支。
 ## `pixel` 只用于「屏幕上的最小尺寸」换算（v3.42 改为世界坐标）。
 static func _draw_impact_shape(canvas: CanvasItem, at: Vector2, radius: float, colour: Color, kind: String, t: float, pixel: float = 1.0) -> bool:
@@ -370,8 +542,21 @@ static func _draw_impact_shape(canvas: CanvasItem, at: Vector2, radius: float, c
 			canvas.draw_circle(at, maxf(radius * t, pixel), Color(colour, 0.7 * t))
 			return true
 		"shield_hit":
-			## 护盾受击：固定半径的短促圆环，不收缩——护盾不会「散掉」，只会闪一下。
-			canvas.draw_arc(at, maxf(radius, 2.0 * pixel), 0.0, TAU, 12, Color(colour, t), 2.0 * pixel)
+			## 护盾受击：六边形硬边闪光，**不收缩**——护盾不会「散掉」，只会闪一下。
+			##
+			## v3.49 从「一圈圆环」改成「六边形 + 六道径向刻线」：圆环与普通命中闪光的形状太接近，
+			## 玩家在混战里分不出「打穿装甲」与「被护盾挡住了」。六边形是能量屏的语言，一眼可辨。
+			var shield_radius := maxf(radius, 3.0 * pixel)
+			var hex := PackedVector2Array()
+			for corner in range(6):
+				var angle := TAU * float(corner) / 6.0 + PI / 6.0
+				hex.append(at + Vector2(cos(angle), sin(angle)) * shield_radius)
+			canvas.draw_polyline(hex + PackedVector2Array([hex[0]]), Color(colour, 0.95 * t), 2.0 * pixel)
+			for spike in range(6):
+				var spike_angle := TAU * float(spike) / 6.0 + PI / 6.0
+				var spike_dir := Vector2(cos(spike_angle), sin(spike_angle))
+				canvas.draw_line(at + spike_dir * shield_radius, at + spike_dir * shield_radius * 1.45, Color(colour, 0.65 * t), 1.5 * pixel)
+			canvas.draw_circle(at, maxf(shield_radius * 0.25, pixel), Color(colour, 0.35 * t))
 			return true
 		"detach", "core":
 			## 整块脱落 / 驾驶舱被毁：双同心圆向外扩散，比通用圆环更「重」。
@@ -380,17 +565,76 @@ static func _draw_impact_shape(canvas: CanvasItem, at: Vector2, radius: float, c
 			return true
 	return false
 
-## 状态（命中点与剩余时间）留在页面层——组件只负责按当前剩余时间画出来，因此两个战斗
-## 模式各自持有自己的闪光，不会互相覆盖。
+
+## 多层爆炸（v3.49）：殉爆 / 引擎爆炸 / 溅射共用的「大事件」表现。
+##
+## **为什么不直接用通用圆环**：一个圆环无法表达「多大范围」与「多重」，而殉爆是玩家最需要
+## 一眼看出严重程度的时刻。本函数用四层叠加：
+##   ① 三层同心环，扩张速率递增（0.30 / 0.55 / 0.85）——外环跑得最快，形成冲击波先后感；
+##   ② 中心实心核，随进度快速缩小并转白（高温）；
+##   ③ 八根固定角度射线（每 45°），长度随进度先伸后收；
+##   ④ 一圈缓慢外溢的淡色充能底。
+##
+## **全程无随机**：角度是常量表 `TAU / 8` 的倍数，扩张曲线是 `sin(π·progress)`，
+## 所以同一模拟两次跑出同一像素（截图逐字节比对仍然成立）。
+##
+## `radius` 是世界单位的「爆炸名义半径」，由调用方按 `radius_cells × cell_size` 算好传入。
+static func draw_explosion_burst(canvas: CanvasItem, at: Vector2, radius: float, left: float, life: float, colour: Color, pixel: float = 1.0) -> void:
+	if left <= 0.0 or radius <= 0.0:
+		return
+	var t := clampf(left / maxf(life, 0.001), 0.0, 1.0)
+	var progress := 1.0 - t
+	## 冲击波：`sin(π·progress)` 在 progress=0.5 达到峰值，两端为 0——先胀后收，不是一直变大。
+	var wave := sin(PI * progress)
+	## ① 三层同心环。外环先跑出去并先淡，内环滞后——这是「冲击波」与「持续燃烧」的区别。
+	for ring_index in range(3):
+		var ring_t := clampf(progress * (1.6 - 0.3 * float(ring_index)), 0.0, 1.0)
+		var ring_radius := radius * (0.30 + 0.85 * float(ring_index)) * (0.35 + 0.65 * ring_t)
+		var ring_alpha := (1.0 - ring_t) * (0.85 - 0.18 * float(ring_index))
+		if ring_alpha <= 0.0:
+			continue
+		canvas.draw_arc(at, ring_radius, 0.0, TAU, 28, Color(colour, ring_alpha), (3.0 - float(ring_index) * 0.6) * pixel)
+	## ② 中心核：快速缩小、转白。`lerp` 到 TEXT_HI 让最中心看上去比外环更「热」。
+	var core_radius := maxf(radius * 0.55 * (1.0 - progress * 1.3), 1.0 * pixel)
+	canvas.draw_circle(at, core_radius, Color(colour.lerp(Palette.TEXT_HI, 0.55), 0.9 * t))
+	## ③ 八根固定角度射线。`wave` 让它们先伸后收，与环形成两种不同节奏。
+	var spoke_length := radius * (0.55 + 0.75 * wave)
+	for spoke in range(8):
+		var angle := TAU * float(spoke) / 8.0
+		var dir := Vector2(cos(angle), sin(angle))
+		canvas.draw_line(at + dir * radius * 0.28, at + dir * spoke_length, Color(colour, 0.55 * t), 1.5 * pixel)
+	## ④ 淡色外溢底：给出「范围」的直观大小，而不是只有几条线。
+	canvas.draw_circle(at, radius * (0.30 + 0.70 * progress), Color(colour, 0.10 * t))
+
+## 命中闪光：实心亮圆 + 描边，半径向外扩张。
+##
+## v3.49 新增**方向性溅射**：传入 `normal` 时，沿该方向额外画出三道长短不一的短刻线
+## 与一段半圆冲击弧。旧版是对称圆，玩家看不出「从哪个方向打过来的」——
+## 而炮口闪光已经用锥形表达了「往哪打」，命中侧没有对应信息是不对称的。
+## `normal` 缺省 `Vector2.ZERO` 时不画溅射，与旧版逐字节相同。
 ##
 ## v3.42：纯世界坐标、不裁剪。半径与线宽乘 `pixel` 保持屏幕上的观感恒定。
-static func draw_hit_flash(canvas: CanvasItem, at_world: Vector2, left: float, life: float = HIT_FLASH_TIME, pixel: float = 1.0) -> void:
+static func draw_hit_flash(canvas: CanvasItem, at_world: Vector2, left: float, life: float = HIT_FLASH_TIME, pixel: float = 1.0, normal: Vector2 = Vector2.ZERO) -> void:
 	if left <= 0.0:
 		return
 	var t := clampf(left / maxf(life, 0.001), 0.0, 1.0)
 	var radius := (6.0 + 10.0 * (1.0 - t)) * pixel
 	canvas.draw_circle(at_world, radius, Color(Palette.ACCENT_AMBER, 0.30 * t))
 	canvas.draw_arc(at_world, radius, 0.0, TAU, 24, Color(Palette.TEXT_HI, 0.9 * t), 2.0 * pixel)
+	if normal.length_squared() <= 0.000001:
+		return
+	## 溅射方向取**法线反向**：`normal` 是命中面的法线（指向外侧），而火花应该向「来向」飞。
+	var away := -normal.normalized()
+	var side := away.orthogonal()
+	## 三道长短不一的刻线，偏移量是常量表（-0.5 / 0 / +0.5），无随机。
+	for index in range(3):
+		var spread := (float(index) - 1.0) * 0.5
+		var dir := (away + side * spread).normalized()
+		var length := radius * (1.5 + 0.35 * (1.0 - absf(spread) * 2.0)) * (0.4 + 0.6 * t)
+		canvas.draw_line(at_world + dir * radius * 0.7, at_world + dir * length, Color(Palette.TEXT_HI, 0.75 * t), 1.5 * pixel)
+	## 半圆冲击弧：朝向命中面，让「打在哪一面」在静态图里也能读出来。
+	var facing := away.angle()
+	canvas.draw_arc(at_world, radius * 1.35, facing - PI * 0.4, facing + PI * 0.4, 14, Color(Palette.ACCENT_AMBER, 0.6 * t), 1.5 * pixel)
 
 
 ## 炮口闪光（v3.23）：发射瞬间从炮口沿炮管方向射出的一道锥形光 + 一圈冲击环。
@@ -458,8 +702,9 @@ static func draw_expire_flash(canvas: CanvasItem, at_world: Vector2, left: float
 		var inner := at + Vector2(cos(angle), sin(angle)) * radius
 		canvas.draw_line(inner, outer, Color(colour, 0.6 * t), 1.5 * pixel)
 	## ③ 中心一点微光：只在最初 40% 寿命里存在，避免结束时留下一个亮点。
+	## v3.49：`maxf(2.0 * pixel, 1.5 * pixel)` 是死逻辑（前者恒大于后者），已简化为 `2.0 * pixel`。
 	if t > 0.6:
-		canvas.draw_circle(at, maxf(2.0 * pixel, 1.5 * pixel), Color(colour, 0.35 * t))
+		canvas.draw_circle(at, 2.0 * pixel, Color(colour, 0.35 * t))
 
 
 ## **不用随机偏移**：否则同一模拟两次跑出不同像素，截图逐字节比对就失效了。
@@ -470,7 +715,7 @@ static func draw_expire_flash(canvas: CanvasItem, at_world: Vector2, left: float
 ## 字号本身就是「世界单位」：引擎相机缩放会把它按比例放大，所以这里**不**再乘 `pixel`
 ## 之外的额外缩放——`pixel` 只是把 `20 px` 字号还原成它在屏幕上应有的视觉大小。
 static func draw_damage_popups(canvas: CanvasItem, entries: Array, text_fn: Callable, pixel: float = 1.0) -> void:
-	var stack := 0
+	var placed: Array = []
 	for raw_entry in entries:
 		var entry: Dictionary = raw_entry
 		if String(entry.get("kind", "")) != "damage":
@@ -481,10 +726,12 @@ static func draw_damage_popups(canvas: CanvasItem, entries: Array, text_fn: Call
 		var life := float(entry["life"])
 		if life <= 0.0:
 			continue
+		var origin := Vector2(entry["pos"])
+		var stack := _popup_stack_at(placed, origin)
 		var progress := clampf(1.0 - float(entry["left"]) / life, 0.0, 1.0)
 		var rise := DAMAGE_POPUP_RISE * sqrt(progress) * pixel
 		var offset := Vector2(0.0, -rise - float(stack) * DAMAGE_POPUP_STACK_STEP * pixel)
-		var at := Vector2(entry["pos"]) + offset
+		var at := origin + offset
 		var size := int(roundf((20.0 - 4.0 * progress) * pixel))
 		var colour: Color = entry["colour"]
 		## 前 70% 保持不透明，后 30% 才淡出：数字要看得清，不能一出来就开始糊。
@@ -492,7 +739,30 @@ static func draw_damage_popups(canvas: CanvasItem, entries: Array, text_fn: Call
 		## 先画一层暗色底再画本体：霓虹背景下纯色小字容易被地形线淹掉。
 		text_fn.call(text, at + Vector2(1.0, 1.0) * pixel, size, Color(0.0, 0.0, 0.0, 0.55 * alpha), true)
 		text_fn.call(text, at, size, Color(colour, alpha), true)
-		stack += 1
+
+
+## 在「已占用的数字簇」里为 `origin` 找下一个可用的层号，并把结果记回 `placed`。
+##
+## **v3.49 修掉一个真实缺陷**：旧版 `stack` 是**全局累加**的——循环外一个计数器，每画一条就 +1，
+## 于是第 6 条数字被抬高 `5 × 14 = 70 px`，**哪怕它和第一条隔了半个战场**。
+## 生存页一次击毁 12 格部件会推 12 条 `break`、金钱数字又共用同一 kind，触发概率很高。
+##
+## 现在按**位置分桶**：只与「距离 < `DAMAGE_POPUP_STACK_RADIUS`」的已画数字比较，
+## 取它们用过的最大层号 +1。近的才错开，远的不互相干扰。
+##
+## 单独抽成函数（而不是留在 `draw_damage_popups()` 循环里）是为了**可测**：
+## `draw_*` 不能在 `_draw()` 之外调用（v3.49 实测：headless 下会报
+## "Drawing is only allowed inside this node's `_draw()`"），所以绘制函数本身无法被
+## 单元测试驱动；而这段错开逻辑是纯数据变换，可以。
+static func _popup_stack_at(placed: Array, origin: Vector2) -> int:
+	var stack := 0
+	for raw_placed in placed:
+		var record: Dictionary = raw_placed
+		if origin.distance_to(Vector2(record["pos"])) >= DAMAGE_POPUP_STACK_RADIUS:
+			continue
+		stack = maxi(stack, int(record["stack"]) + 1)
+	placed.append({"pos": origin, "stack": stack})
+	return stack
 
 
 ## 把一次真实结算的数值推入动效层（`kind = "damage"`，带 `text`）。

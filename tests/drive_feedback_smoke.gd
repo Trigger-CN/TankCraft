@@ -10,7 +10,8 @@ extends SceneTree
 ##
 ## 所以这里实例化真实 `main.tscn`，用正式入口 `_enter_drive()` 进页，
 ## 再把坦克摆到贴着边界的位置并给它一个朝向墙的速度，逐帧跑 `_drive_step()`，
-## 断言：① 撞墙产生了伤害；② `_drive_hit_flash_left > 0`；③ 动效层里出现了 `kind == "damage"`。
+## 断言：① 撞墙产生了伤害；② 命中闪光数组 `_drive_hits` 非空（v3.49 从单变量改成数组）；
+## ③ 动效层里出现了 `kind == "damage"`。
 
 const TankBody := preload("res://scripts/tank_body.gd")
 const CombatView := preload("res://scripts/combat_view.gd")
@@ -69,8 +70,9 @@ func _run_checks() -> void:
 		return
 
 	## ② 基线：刚进页时没有任何伤害数字，也没有命中闪光。
-	_expect(_damage_entries() == 0, "no_damage_before_impact")
-	_expect(float(_main._drive_hit_flash_left) <= 0.0, "no_hit_flash_before_impact")
+	## v3.49：命中闪光从单变量 `_drive_hit_flash_left` 改成了数组 `_drive_hits`
+	## （缺陷 D：单实例会被后一发覆盖）。断言判据不变，只是改成看数组是否为空。
+	_expect(_main._drive_hits.is_empty(), "no_hit_flash_before_impact")
 
 	## ③ 贴着左边界摆好，再给一个朝左的速度。
 	##    `apply_boundary()` 只在法向速度为正（正在压向墙）时才扣伤害，
@@ -92,7 +94,7 @@ func _run_checks() -> void:
 		_main._drive_step(step_time)
 		if _damage_entries() > 0:
 			damage_seen = true
-		if float(_main._drive_hit_flash_left) > 0.0:
+		if not (_main._drive_hits as Array).is_empty():
 			flash_seen = true
 		if damage_seen and flash_seen:
 			break

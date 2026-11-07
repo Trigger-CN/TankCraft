@@ -582,9 +582,25 @@ func _flood(anchors: Array) -> Dictionary:
 	return visited
 
 ## AOE：目标集合先按 part_key 排序再结算，不依赖 Dictionary 迭代顺序。
+##
+## v3.49：**额外产出一条爆炸中心事件** `{kind: <tag> + "_burst", cells: source_cells, radius, damage}`。
+## 为什么必需：本函数原本只在循环里逐受波及部件发一条 `<tag>`（每条带一个 `cell`），
+## 页面层因此**拿不到爆炸中心**——按逐部件事件画会画出十几个小爆炸，而不是一次殉爆。
+## 三个页面（试驾 / 对局 / 生存）都靠这条事件才知道「哪一点、多大范围」炸了。
+##
+## **只在 `depth == 0` 时发**：递归殉爆（弹药库炸死旁边的弹药库）会自己再发一条自己的，
+## 若这里也层层转发，一次连锁会产出指数级的 burst 事件。
+## `source_cells` 为空时也不发——没有中心就没有可画的位置。
 func _area_damage(tank: TankBody, source_cells: Array, radius: float, damage: float, depth: int, tag: String, pierce: float, exclude_key: String) -> void:
 	if damage <= 0.0:
 		return
+	if depth == 0 and not source_cells.is_empty():
+		events.append({
+			"kind": tag + "_burst",
+			"cells": source_cells.duplicate(),
+			"radius": radius,
+			"damage": damage,
+		})
 	var keys: Array[String] = []
 	for part in tank.parts:
 		var key := String(part.get("key", ""))

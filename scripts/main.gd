@@ -237,10 +237,12 @@ var _drive_cannon_loaded: Array = []
 ## v3.23：试驾页的炮口闪光与消散（多实例；与另两页共用同一套推进/绘制）。
 var _drive_muzzles: Array = []
 var _drive_expires: Array = []
-## v3.33：命中闪光。与对局页 / 生存页同一套（`CombatView.draw_hit_flash`），
-## 之前试驾页完全没有这一层——打中了屏幕上除了弹坑什么都没有。
-var _drive_hit_flash_at := Vector2.ZERO
-var _drive_hit_flash_left := 0.0
+## v3.49：命中闪光改成**多实例数组**。v3.33 时它是单变量（`_drive_hit_flash_at` +
+## `_drive_hit_flash_left`），多炮齐射或同帧多处命中时后一发直接覆盖前一发，
+## 玩家只看到最后一个命中点闪 —— 而炮口闪光与消散早就是数组了，这纯粹是
+## 「命中闪光先写、另两个后加」留下的不一致。
+## 数组元素：`{pos: Vector2, left: float, normal: Vector2}`。
+var _drive_hits: Array = []
 ## v3.40：相机状态 = **当前距离**（世界高，px）+ **目标距离**（滚轮写它，每帧插值过去）。
 ## 三个页共用一份 —— 同一时刻只在一个战斗页上，但切页必须复位，
 ## 否则上一页的推拉程度会带到下一页（也会让截图基线不可复现）。
@@ -271,10 +273,10 @@ var _match_accumulator := 0.0
 var _match_held: Dictionary = {}
 var _match_event := ""
 var _match_fx := FxLayer.new()
-var _match_hit_flash_at := Vector2.ZERO
-var _match_hit_flash_left := 0.0
+## v3.49：命中闪光改成多实例数组（理由见 `_drive_hits` 上方注释）。
+var _match_hits: Array = []
 ## v3.23：炮口闪光与射程耗尽消散。都是**多实例**的（一次齐射会有多门炮、一轮弹幕会有
-## 多发弹同时消散），所以用「数组 + 逐项倒计时」而不是像命中闪光那样只存最新一个。
+## 多发弹同时消散），所以用「数组 + 逐项倒计时」。
 ## 为什么不用 FxLayer：这两个特效需要「方向」与「所属队伍」两个额外字段，
 ## 而 FxLayer 的公共字段集是给通用圆环用的；把方向塞进去会弄脏所有旧调用点。
 var _match_muzzles: Array = []
@@ -1333,9 +1335,16 @@ func _match_step(step_time: float) -> void:
 			var dealt := float(battle_event.get("damage", 0.0))
 			var absorbed := float(battle_event.get("shield", 0.0))
 			var victim := String(battle_event.get("tag", ""))
-			## 命中闪光也在页面层置位，与生存页一样画在自己那张图的坐标系里。
-			_match_hit_flash_at = at
-			_match_hit_flash_left = CombatView.HIT_FLASH_TIME
+			## v3.49：命中闪光改成**逐条存**。旧版只存最新一个位置，多炮齐射时
+			## 后一发直接覆盖前一发，玩家只看到最后一个命中点闪。
+			## `normal` 也一并传下去：沿命中面反向画出溅射刻线（`draw_hit_flash` 的第 5 参）。
+			_match_hits.append({
+				"pos": at,
+				"left": CombatView.HIT_FLASH_TIME,
+				"normal": Vector2(battle_event.get("normal", Vector2.ZERO)),
+			})
+			while _match_hits.size() > CombatView.DAMAGE_POPUP_PER_SIDE:
+				_match_hits.remove_at(0)
 			if victim == Duel.TAG_PLAYER:
 				if dealt > 0.0:
 					_push_match_damage(at, dealt, Palette.ACCENT_RED, "received")
@@ -1355,7 +1364,21 @@ func _match_step(step_time: float) -> void:
 			_push_match_fx("detach", Vector2(battle_event.get("pos", Vector2.ZERO)), 130.0, Palette.ACCENT_MAGENTA, 1.0)
 		elif kind == "destroyed":
 			_match_event = "击毁 %s" % String(battle_event.get("module_id", ""))
-		elif kind == "depot_explosion" or kind == "engine_explosion" or kind == "explosion":
+		elif kind == "explosion_burst" or kind == "depot_explosion_burst" or kind == "engine_explosion_burst":
+			## v3.49：殉爆 / 爆炸终于有动效了。旧版这里只写一行 `_match_event` 文字，
+			## 屏幕上什么都不发生——而爆炸是玩家最需要「看见了」的事件之一。
+			## 事件来自 `damage_system._area_damage()` 的**中心事件**（每场爆炸只一条），
+			## 带 `cells`（爆炸源格，可为多格）与 `radius`（**格**单位），所以这里换算成世界像素。
+			var burst_cells: Array = battle_event.get("cells", [])
+			if not burst_cells.is_empty():
+				var burst_cell_px := float(definitions.global_number("cell_size", 16.0))
+				var burst_centre := Vector2.ZERO
+				for raw_cell in burst_cells:
+					burst_centre += (Vector2(raw_cell) + Vector2(0.5, 0.5)) * burst_cell_px
+				burst_centre /= float(burst_cells.size())
+				## 半径夹下限：1.5 格的引擎爆炸在 4× 缩放下只有 24 px，不加下限几乎看不到。
+				var burst_radius := maxf(float(battle_event.get("radius", 2.0)) * burst_cell_px, 56.0)
+				_match_fx.push("explosion_burst", burst_centre, burst_radius, Palette.ACCENT_AMBER, 0.6)
 			_match_event = "殉爆 / 爆炸"
 		elif kind == "muzzle":
 			## 炮口闪光：位置/方向取自 `Duel.fire()` 的真实发射结果，不重新算炮口。
@@ -1407,9 +1430,8 @@ func _push_match_damage(at: Vector2, amount: float, colour: Color, mode: String)
 ## 递减逻辑已收归 `FxLayer.step()`（v3.11）——三页共用一份，不会再出现「调错 tick 对象」。
 ## 命中闪光、炮口闪光与消散同样在固定步长内倒计时，绝不放 `_process`。
 func _match_tick_fx(step_time: float) -> void:
-	if _match_hit_flash_left > 0.0:
-		_match_hit_flash_left = maxf(_match_hit_flash_left - step_time, 0.0)
 	_match_fx.step(step_time)
+	_advance_timed(_match_hits, step_time)
 	_advance_timed(_match_muzzles, step_time)
 	_advance_timed(_match_expires, step_time)
 
@@ -1466,8 +1488,7 @@ func _enter_drive() -> void:
 	_drive_accumulator = 0.0
 	_drive_track_phase = 0.0
 	_drive_last_event = ""
-	_drive_hit_flash_at = Vector2.ZERO
-	_drive_hit_flash_left = 0.0
+	_drive_hits.clear()
 	_drive_ready = true
 	_set_screen(SCREEN_DRIVE)
 	_status_error = false
@@ -1602,8 +1623,11 @@ func _drive_step(step_time: float) -> void:
 			if reach > furthest:
 				furthest = reach
 				impact_at = part_at
-		_drive_hit_flash_at = impact_at
-		_drive_hit_flash_left = CombatView.HIT_FLASH_TIME
+		## v3.49：命中闪光改成逐条存（理由见 `_drive_hits` 上方注释）。
+		## 墙体撞击没有命中面法线，所以 `normal` 缺省为零 —— 画出来是对称的圆形闪光。
+		_drive_hits.append({"pos": impact_at, "left": CombatView.HIT_FLASH_TIME, "normal": Vector2.ZERO})
+		while _drive_hits.size() > CombatView.DAMAGE_POPUP_PER_SIDE:
+			_drive_hits.remove_at(0)
 		_drive_push_damage(impact_at, wall_damage, Palette.ACCENT_RED, "received")
 	bank.step(step_time)
 	## 20 Hz 独立累加器推进网络；fill_cannons 只把已送达的弹药压入膛室。
@@ -1744,14 +1768,33 @@ func _drive_consume_damage_events(list: Array) -> void:
 			"shield_restored":
 				_push_drive_fx("shield_restored", tank.position, 96.0, Palette.ACCENT_LIME, 0.7)
 				_drive_last_event = "护盾充能完成"
+			"explosion_burst", "depot_explosion_burst", "engine_explosion_burst":
+				## v3.49：爆炸改成多层爆发（三层同心环 + 中心核 + 8 根固定角度射线）。
+				## 事件带 `cells`（爆炸源格，可为多格）与 `radius`（**格**单位），中心取平均值。
+				## 半径夹下限 56 px：1.5 格的引擎爆炸在 4× 缩放下只有 24 px，不加下限几乎看不到。
+				var burst_cells: Array = event.get("cells", [])
+				if not burst_cells.is_empty():
+					var burst_centre := Vector2.ZERO
+					for raw_cell in burst_cells:
+						burst_centre += tank.world_position_of_cell(Vector2i(raw_cell))
+					burst_centre /= float(burst_cells.size())
+					var burst_radius := maxf(float(event.get("radius", 2.0)) * tank.cell_size(), 56.0)
+					_push_drive_fx("explosion_burst", burst_centre, burst_radius, Palette.ACCENT_AMBER, 0.6)
+				if kind == "depot_explosion_burst":
+					_drive_last_event = "弹药库殉爆"
+				elif kind == "engine_explosion_burst":
+					_drive_last_event = "引擎爆炸"
+				else:
+					_drive_last_event = "爆炸溣射"
 			"explosion", "depot_explosion", "engine_explosion":
-				_push_drive_fx("explosion", tank.world_position_of_cell(Vector2i(event.get("cell", Vector2i.ZERO))), 72.0, Palette.ACCENT_AMBER, 0.6)
+				## 逐受波及部件的旧事件：**只更新文案**。
+				## 爆炸本体已经由上面的 `*_burst` 画过了，这里再画一遍会变成十几个小圆环。
 				if kind == "depot_explosion":
 					_drive_last_event = "弹药库殉爆"
 				elif kind == "engine_explosion":
 					_drive_last_event = "引擎爆炸"
 				else:
-					_drive_last_event = "爆炸溅射"
+					_drive_last_event = "爆炸溣射"
 			"destroyed":
 				_drive_last_event = "击毁 %s" % String(event.get("module_id", ""))
 			"core_destroyed":
@@ -1800,9 +1843,8 @@ func _push_drive_fx(kind: String, at: Vector2, radius: float, colour: Color, lif
 
 ## 动效倒计时在固定步长里累减，保持确定性（绝不放 _process，绝不用 randf）。
 func _drive_tick_fx(step_time: float) -> void:
-	if _drive_hit_flash_left > 0.0:
-		_drive_hit_flash_left = maxf(_drive_hit_flash_left - step_time, 0.0)
 	_drive_fx.step(step_time)
+	_advance_timed(_drive_hits, step_time)
 	_advance_timed(_drive_muzzles, step_time)
 	_advance_timed(_drive_expires, step_time)
 
@@ -2438,10 +2480,10 @@ func _draw_battle_world(canvas: CanvasItem) -> void:
 		CombatView.draw_fx(canvas, _match_fx.entries, CombatView.FX_STYLE_MATCH, pixel)
 		## 消散画在弹道**之下**：残余弹道残影不应该被遮住，而且消散本身没有实体。
 		_draw_timed_expires(canvas, _match_expires, pixel)
-		CombatView.draw_shots(canvas, duel.field.shots, Duel.TAG_PLAYER, pixel)
+		CombatView.draw_shots(canvas, duel.field.shots, Duel.TAG_PLAYER, pixel, _ammo_lookup)
 		## 炮口闪光画在弹道**之上**：它是「刚刚发出这一发」的因果提示，必须盖在拖尾上。
 		_draw_timed_muzzles(canvas, _match_muzzles, pixel)
-		CombatView.draw_hit_flash(canvas, _match_hit_flash_at, _match_hit_flash_left, CombatView.HIT_FLASH_TIME, pixel)
+		_draw_timed_hits(canvas, _match_hits, pixel)
 		CombatView.draw_damage_popups(canvas, _match_fx.entries, _world_text(canvas), pixel)
 		return
 	if _screen == SCREEN_SURVIVAL and survival != null and survival.duel != null:
@@ -2458,10 +2500,10 @@ func _draw_battle_world(canvas: CanvasItem) -> void:
 		CombatView.draw_fx(canvas, _survival_fx.entries, CombatView.FX_STYLE_SURVIVAL, pixel)
 		## 消散画在弹道之下（与对局页同一层级）；炮口闪光画在弹道之上。
 		_draw_timed_expires(canvas, _survival_expires, pixel)
-		CombatView.draw_shots(canvas, run_duel.field.shots, Duel.TAG_PLAYER, pixel)
+		CombatView.draw_shots(canvas, run_duel.field.shots, Duel.TAG_PLAYER, pixel, _ammo_lookup)
 		_draw_timed_muzzles(canvas, _survival_muzzles, pixel)
 		## 命中闪光画在炮弹之上，确保不会被格线淹掉。
-		CombatView.draw_hit_flash(canvas, _hit_flash_at, _hit_flash_left, CombatView.HIT_FLASH_TIME, pixel)
+		_draw_timed_hits(canvas, _survival_hits, pixel)
 		## 伤害数字画在最后：必须盖在炮弹、命中闪光与所有地形之上。
 		CombatView.draw_damage_popups(canvas, _survival_fx.entries, _world_text(canvas), pixel)
 		return
@@ -2474,7 +2516,7 @@ func _draw_battle_world(canvas: CanvasItem) -> void:
 		_draw_drive_shots(canvas, pixel)
 		_draw_timed_muzzles(canvas, _drive_muzzles, pixel)
 		## 命中闪光画在炮弹之上，确保不会被格线淹掉。
-		CombatView.draw_hit_flash(canvas, _drive_hit_flash_at, _drive_hit_flash_left, CombatView.HIT_FLASH_TIME, pixel)
+		_draw_timed_hits(canvas, _drive_hits, pixel)
 		## 伤害数字画在最后：必须盖在炮弹、命中闪光与所有地形之上。
 		CombatView.draw_damage_popups(canvas, _drive_fx.entries, _world_text(canvas), pixel)
 
@@ -2506,6 +2548,23 @@ func _draw_timed_expires(canvas: CanvasItem, entries: Array, pixel: float) -> vo
 	for raw_entry in entries:
 		var entry: Dictionary = raw_entry
 		CombatView.draw_expire_flash(canvas, Vector2(entry["pos"]), float(entry["left"]), Color(entry["colour"]), CombatView.EXPIRE_FLASH_TIME, pixel)
+
+## 命中闪光的多实例绘制包装（v3.49）。
+##
+## 旧版三页各存一个 `_*_hit_flash_at` + `_*_hit_flash_left`，所以齐射时只有最后一发闪。
+## 改成数组后需要这个循环；`CombatView.draw_hit_flash` 本身无状态，逐条调即可。
+## `normal` 可选：非零时沿命中面反向画出溣射刻线，让「从哪边打过来」有方向感。
+func _draw_timed_hits(canvas: CanvasItem, entries: Array, pixel: float) -> void:
+	for raw_entry in entries:
+		var entry: Dictionary = raw_entry
+		CombatView.draw_hit_flash(canvas, Vector2(entry["pos"]), float(entry["left"]), CombatView.HIT_FLASH_TIME, pixel, Vector2(entry.get("normal", Vector2.ZERO)))
+
+## 弹药定义查询回调，注入给 `CombatView.draw_shots()` 做口径分档（v3.49）。
+##
+## 组件不直接依赖 `data_registry`（与 `colour_fn` / `text_fn` 同一惯例）；
+## 查不到时返回空字典，`draw_shots` 会退回中间档而不是报错。
+func _ammo_lookup(ammo_id: String) -> Dictionary:
+	return definitions.get_ammo(ammo_id)
 
 ## 坦克绘制的唯一实现：试驾 / 对局 / 生存三页原本各有一份逐行同构的副本，
 ## 差异只在「每部件颜色」「填充透明度」「部件格偏移」「额外的格装饰」。
@@ -3272,7 +3331,7 @@ func _drive_cell_hook(box: Rect2, colour: Color, part: Dictionary) -> void:
 func _draw_drive_shots(canvas: CanvasItem, pixel: float) -> void:
 	if field == null:
 		return
-	CombatView.draw_shots(canvas, field.shots, "player", pixel)
+	CombatView.draw_shots(canvas, field.shots, "player", pixel, _ammo_lookup)
 
 ## M5 战斗动效：残骸、爆炸环、护盾、脱落撕裂与驾驶舱被毁；全部由 left/life 倒数驱动。
 ## v3.33：形状与推进全部走 `CombatView.draw_fx` + `FX_STYLE_DRIVE`。
@@ -3729,9 +3788,8 @@ var _survival_sell_index := 0
 ## 生存页的瞬时动效（命中 / 击毁 / 脱落）。倒计时只在 `_survival_step` 里推进，
 ## 与试驾页同一纪律：绝不放 `_process`，绝不用 `randf`。
 var _survival_fx := FxLayer.new()
-## 最近一次命中的世界坐标与剩余闪光时间：让“打中了”这件事在画面上无法被忽略。
-var _hit_flash_at := Vector2.ZERO
-var _hit_flash_left := 0.0
+## v3.49：命中闪光改成多实例数组（理由见 `_drive_hits` 上方注释）。
+var _survival_hits: Array = []
 ## v3.23：炮口闪光与射程耗尽消散（多实例，与对局页同一套推进/绘制）。
 ## 生存页一次有多个敌人开火，所以必须逐条存，不能只存最新一个；
 ## 否则同一帧里第二个敌人的炮口会直接把第一个的抹掉。
@@ -4011,8 +4069,15 @@ func _survival_step(step_time: float) -> void:
 		if kind == "impact" and String(entry.get("target", "")) == "tank":
 			var at := Vector2(entry.get("pos", Vector2.ZERO))
 			_push_survival_fx("hit", at, 10.0, Palette.ACCENT_AMBER, 0.22)
-			_hit_flash_at = at
-			_hit_flash_left = CombatView.HIT_FLASH_TIME
+			## v3.49：命中闪光改成逐条存（理由见 `_drive_hits` 上方注释）。
+			## `normal` 一并传下去：沿命中面反向画溣射刻线。
+			_survival_hits.append({
+				"pos": at,
+				"left": CombatView.HIT_FLASH_TIME,
+				"normal": Vector2(entry.get("normal", Vector2.ZERO)),
+			})
+			while _survival_hits.size() > CombatView.DAMAGE_POPUP_PER_SIDE:
+				_survival_hits.remove_at(0)
 			var victim := String(entry.get("tag", ""))
 			## v3.20 悬浮数字：**造成伤害与被击伤害都显示**。
 			## 数值来自 `duel._resolve_impact()` 写回事件的真实结算值，不是弹药的 base_damage。
@@ -4032,7 +4097,17 @@ func _survival_step(step_time: float) -> void:
 					_push_damage_popup(at, absorbed, Palette.ACCENT_LIME, "shield")
 				_survival_event = "命中 %s" % victim
 		elif kind == "shield_hit":
-			_push_survival_fx("shield", Vector2.ZERO, 0.0, Palette.ACCENT_LIME, 0.25)
+			## v3.49 修缺陷：旧版这里写的是 `_push_survival_fx("shield", Vector2.ZERO, 0.0, ...)`
+			## —— **位置零、半径零**，而 `CombatView.draw_fx` 又对 `kind == "shield"` 直接跳过。
+			## 两个错叠在一起，结果是「护盾挡下伤害时屏幕上什么都不发生」，
+			## 玩家只能从「血量没掉」推断护盾在工作。这是 v3.20「打上去没反应」的同类事故。
+			## 事件本身**是带 `cell` 的**（`damage_system.apply_part_damage()` 写入），
+			## 而 `duel.gd` 又给每条 damage 事件补了 `side`（被打方 tag），所以能换出真实世界坐标。
+			var shield_side := String(entry.get("side", Duel.TAG_PLAYER))
+			var shield_at := _survival_cell_world(Vector2i(entry.get("cell", Vector2i.ZERO)), shield_side)
+			_push_survival_fx("shield_hit", shield_at, 14.0, Palette.ACCENT_LIME, 0.25)
+			if shield_side == Duel.TAG_PLAYER:
+				_survival_event = "护盾吸收 %.1f" % float(entry.get("damage", 0.0))
 		elif kind == "destroyed":
 			var side := String(entry.get("side", ""))
 			var module_id := String(entry.get("module_id", ""))
@@ -4096,6 +4171,24 @@ func _survival_step(step_time: float) -> void:
 			})
 			while _survival_expires.size() > CombatView.DAMAGE_POPUP_PER_SIDE:
 				_survival_expires.remove_at(0)
+		elif kind == "explosion_burst" or kind == "depot_explosion_burst" or kind == "engine_explosion_burst":
+			## v3.49 修缺陷：生存页旧版**根本没有这三个分支**，殉爆 / 引擎爆炸的事件
+			## 被静默丢弃 —— 屏幕上什么都不发生，玩家只看到自己的模块突然消失。
+			## 事件带 `side`（哪一侧炸的）、`cells`（爆炸源格）与 `radius`（**格**单位）。
+			var burst_side := String(entry.get("side", Duel.TAG_PLAYER))
+			var burst_cells: Array = entry.get("cells", [])
+			if not burst_cells.is_empty():
+				var burst_centre := Vector2.ZERO
+				for raw_cell in burst_cells:
+					burst_centre += _survival_cell_world(Vector2i(raw_cell), burst_side)
+				burst_centre /= float(burst_cells.size())
+				## 半径夹下限 56 px：1.5 格的引擎爆炸在 4× 缩放下只有 24 px，不加下限几乎看不到。
+				var burst_radius := maxf(float(entry.get("radius", 2.0)) * definitions.global_number("cell_size", 16.0), 56.0)
+				_push_survival_fx("explosion_burst", burst_centre, burst_radius, Palette.ACCENT_AMBER, 0.6)
+			if kind == "depot_explosion_burst":
+				_survival_event = "殉爆"
+			elif kind == "engine_explosion_burst":
+				_survival_event = "引擎爆炸"
 	_survival_tick_fx(step_time)
 	if survival.stage != SurvivalRun.STAGE_BATTLE:
 		_survival_held.clear()
@@ -4166,9 +4259,8 @@ func _push_damage_popup(at: Vector2, amount: float, colour: Color, mode: String)
 ## 动效倒计时在固定步长里累减，保持确定性（绝不放 `_process`，绝不用 `randf`）。
 ## 命中闪光、炮口闪光与消散都在固定步长里倒计时；后两者是多实例，走 `_advance_timed()`。
 func _survival_tick_fx(step_time: float) -> void:
-	if _hit_flash_left > 0.0:
-		_hit_flash_left = maxf(_hit_flash_left - step_time, 0.0)
 	_survival_fx.step(step_time)
+	_advance_timed(_survival_hits, step_time)
 	_advance_timed(_survival_muzzles, step_time)
 	_advance_timed(_survival_expires, step_time)
 
