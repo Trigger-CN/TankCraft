@@ -4748,6 +4748,78 @@ ERROR: Drawing is only allowed inside this node's `_draw()`, functions connected
 - 硬不变量：`_next_unit()` 调用计数 **21**、`data/globals.json` 的 `omega_max` **3.0**、`scripts/tank_body.gd` **零 diff**。
 - **本次改动尚未经过用户实机确认**；**没有做 profile**；**未在 Android 上验证，任何 APK 均不存在**。
 
+#### 11.4.2.29 部件摧毁后的功能失效与碎片掉落（v3.50）
+
+> 用户原话：「坦克的模块被打掉，要有掉落碎片效果，并且也失去对应的功能，目前炮管打掉之后还能发射」。这句话里有**两件事**：一件是缺陷（功能没失效），一件是新需求（碎片效果）。下面分开写。
+
+##### 一、缺陷：模块被摧毁后功能不失效（用户实机报告）
+
+**症状**：炮管被打掉之后还能开火。
+
+**根因**：`CannonBank.cannons` 与 `AmmoNetwork.parts` 是 `tank.parts` / `builder` 之外的**两份独立功能索引副本**，只在 `Duel.add_side()` 与 `Main._enter_drive()` 里构建一次。部件被摧毁时 `DamageSystem` 只更新 `tank` / `builder` / 护盾表，**从不重建这两份索引**，于是被打掉的炮管仍留在 `bank.cannons` 里（连 `loaded` / `reload_remaining` 状态都在），所以还能开火。
+
+`tank.parts` 与 `builder` 是**对的**（`damage_part()` 会 `parts.remove_at()` + `_remove_from_source()`；`_detach()` 会 `force_remove()`），所以车体绘制与碰撞立刻正确 —— **只有「功能索引」这一份副本没同步**。这是「同一事实存了多份」的典型缺陷，与 v3.10「对战页动效永不衰减」（漏调 tick）形态不同，但与 v3.23 `expire` 事件被丢弃同属「机制存在 ≠ 生效」。
+
+**影响面（同一根因）**：弹药制造装置被打掉 → 网络里仍保留 → 还能造弹；改进装置被打掉 → 还能加工；弹药库被打掉 → 存量不丢。
+
+**修法（三层，全部最小改动）**：
+
+| 层 | 改动 |
+| --- | --- |
+| 结算层 | `DamageSystem` 新增 `structure_changed: Callable`。`_on_destroyed()` 拆成外层包装 + `_on_destroyed_inner()`，**外层在 `depth == 0` 时调一次** `structure_changed.call()` |
+| 对局层 | `Duel._refresh_side_structure(tag)`：`bank.reload_from_body()` → `network.rebuild(builder)` → `network.bind_bank(bank)`；`add_side()` 里 `Callable(self, "_refresh_side_structure").bind(tag)` |
+| 试驾页 | `Main._drive_refresh_structure()` 同构，在 `_enter_drive()` 接线 |
+
+**为什么用回调而不是让 `DamageSystem` 直接持有 `CannonBank` / `AmmoNetwork`**：`DamageSystem` 目前只依赖 `ModuleDefs` / `TankBody` / `GridBuilder`，不认识功能索引层；直连会引入新的 preload 边并可能成环（`ammo_network` 已 preload `cannon_bank`）。回调与既有 `tank.damage_router = Callable(damage, "apply_part_damage")` 是同一惯例。
+
+**为什么只在 `depth == 0` 通知**：殉爆与引擎爆炸会递归进 `_on_destroyed()`。逐层重建虽然幂等，但一次连锁会白算十几次拓扑；而 `depth == 0` 的外层通知发生在**整条链跑完之后**，看到的已经是最终状态。
+
+**为什么重建整个网络而不是局部删除零件**：`AmmoNetwork` 有 `nodes` / `_nodes_by_cell` / `_links_out` / `_links_in` / `_levels` / `_rounds` / `_owner` / `_tee_counters` 八个互相引用的索引，局部删除需要同时维护全部；而 `rebuild()` 已经把这套逻辑写对并通过 23 条组合矩阵（`AMMO_COMBO_OK`），复用它比另写一条删除路径安全得多。代价是每次部件被毁重算一次拓扑（单侧约 40 部件），且**只在事件发生时触发，不是每帧**。
+
+**重建不会丢状态**（这是方案成立的前提）：`cannon_bank.reload_from_body()` 按 `module_id` + 首格匹配保留 `loaded` / `reload_remaining` / `shots_fired` / `upgrades` / `aim_override` / `aim_world`；`ammo_network.rebuild()` 走 `_snapshot_rounds()` → `_reattach_rounds()`，在途弹药按同一键重新挂接，宿主段消失的转孤儿。
+
+##### 二、新需求：模块被打掉时的碎片掉落
+
+修复前，三页对 `destroyed` 事件的处理差异极大：
+
+| 页 | 修复前 |
+| --- | --- |
+| 对局 | `_match_step()` 只写一行 `_match_event = "击毁 %s"`，**零动效** |
+| 试驾 | `_drive_consume_damage_events()` 同上，**只写文字** |
+| 生存 | 逐格推 `"break"` 小圆环（表示「打穿一格」），**不是碎片** |
+
+**修法**：新增独立 kind `"part_debris"` 与 `CombatView.draw_part_debris()`。
+
+- **为什么不复用现有的 `"debris"`**：这个名字在三处含义完全不同 —— `damage_system.debris` 是坦克残骸格字典（`cell → 剩余秒数`）、`survival_run.debris` 是地图上可碾过的残骸数组、`CombatView.draw_fx()` 的 `"debris"` 分支画的是「实心小点，随寿命缩小」。三者都与本需求无关。
+- **绘制**：淡色外溢底（`radius × (0.25 + 0.85 × progress)`，alpha `0.10 × t`）+ **8 片固定角度碎片**（`TAU × i / 8`），径向距离 `radius × (0.35 + 1.15 × progress)`、竖直额外下落 `0.55 × radius × progress²`、尺寸 `radius × 0.18 × t`、alpha `0.85 × t`；每片画成沿径向外指的**短线段**（长度 = 尺寸 × 1.6）。
+- **为什么是短线段而不是圆点**：圆点在 16 px 格尺度上读起来像「火花」，线段才像「碎块」。
+- **为什么竖直要额外加 `progress²`**：纯径向抛洒看起来像平面上的同心扩散；加一项随时间平方增长的下落偏移才有重力感，「掉了」而不是「涨了」。
+- **全程零随机**：角度是常量表，其余全部是 `progress` 的多项式，同一模拟两次跑出同一像素（§10.4）。
+- **零随机，但也不均匀**：第一版按 `TAU × i / 8` 均匀排 8 片，尺寸与抛洒距离全相同。4× 放大截图一看是**一颗辐射星芒**，不像碎块；而且下落量在 4× 下也只有约 25 px，读不出「掉」。修正为四张**常量表**：`PART_DEBRIS_ANGLE`（不等距角度）/ `PART_DEBRIS_REACH`（0.75…1.15 倍抛洒距离）/ `PART_DEBRIS_SIZE`（0.62…1.22 倍尺寸）/ `PART_DEBRIS_FALL`（0.70…1.35 倍下落，重块落得快），下落基准从 0.55 提到 0.85。仍然是常量表 + `progress` 多项式，同一模拟两次跑出同一像素（§10.4）。
+- **这条是靠人眼看图发现的**，不是靠断言 —— 断言只能证明「画了线」，证明不了「看起来像碎块」。
+- 新常量：`PART_DEBRIS_TIME := 0.55`（远长于命中闪光 0.14 s，因为它表达的是「这一件彻底没了」）、`PART_DEBRIS_RADIUS_PER_CELL := 1.35`。
+- 三页入队坐标各按自己的坐标系换算：对局页用**竞技场格** `(cell + 0.5) × cell_px`（它不走建造格空间）、生存页用 `_survival_cell_world()`、试驾页用 `tank.world_position_of_cell()`。生存页**保留**原有的 `"break"` 小环并追加碎片 —— 前者描述「打穿一格」，后者描述「模块消失」，职责不同。
+
+##### 三、测试与证据
+
+`tests/part_destroy_smoke.gd`（新增，310 行）输出 `PART_DESTROY_OK`，断言全部走**领域层可驱动状态**（§11.4.2.28 第五节确立的三条路线之二）：
+
+| 断言 | 内容 |
+| --- | --- |
+| `bank_dropped_destroyed_cannon` | 打掉炮管后 `bank.cannons` 不再含该格 |
+| `fire_cannot_fire_after` / `fire_emits_nothing_after` | 最后一个炮管被打掉后 `Duel.can_fire()` 为 false、`Duel.fire()` 返回 0（**玩家按左键的可见结果**） |
+| `keep_reload_preserved` / `keep_shots_preserved` | 幸存炮管的 `reload_remaining` / `shots_fired` / `loaded` 与摧毁前相等（证明重建不丢状态） |
+| `net_factory_gone_after` / `net_cannon_still_there` | 制造装置被打掉后网络里没有它，**同网络的炮管仍在**（正向对照，排除「整份清空」的假通过） |
+| `detach_bank_refreshed` | 脖颈被打断导致远端整块脱落时，`bank` 与 `network` 同样刷新 |
+| `drive_refresh_wired` | 试驾页接线与函数体存在（源码扫描，剔除注释行） |
+| `debris_*` 7 项 | 三页各推 `part_debris`、绘制层有分支与常量、且**没有引入 `randf` / `randi`** |
+
+断言必须走 `damage.apply_part_damage()` 而不是 `tank.damage_part()` —— 后者会绕过 `_on_destroyed()` 的连锁与通知（v3.49 已因这个夹具缺陷吃过一次假红）。
+
+**6 组负向对照**（备份文件式，零 `git checkout` / `git restore`）：摘掉 `duel` 接线、让 `damage_system` 静默、只重建炮管不重建网络、摘掉试驾接线、摘掉对局页碎片、摘掉绘制分支 —— 每组都**精确变红**，还原后 SHA-256 全一致，最终重新转绿。
+
+**证据边界**：全部为 headless smoke + 负向对照 + 源码直读。**本次改动尚未经过用户实机确认**；**碎片特效的像素表现只有截图 + 我自己看，没有自动化像素覆盖**（`_draw` 在 headless 下不执行，`tests/` 对 UI 层零覆盖）；**没有做 profile**；**未在 Android 上验证，任何 APK 均不存在**。
+
 #### 11.4.3 两个 SETUP 界面
 
 **`EXPEDITION_SETUP`（单人远征）**
@@ -6119,4 +6191,5 @@ M3 的物理验收基准（`M 61.0 u` / `I 104 064 u·px²` / `T 9000` / `v_max 
 | 2026-11-05 | v3.47 | **待完善清单排查（只排查、不改码）**（用户原话：「检查那些地方还需要完善」）。**`scripts/` / `tests/` / `data/` 一行未动**；新增 §11.4.2.26 与 `docs/roadmap.md` §4.5。**8 个独立扫描脚本**（`.me/tmp/main/scan47_*.py`）实测：**数据** 125 个 JSON 键中真正零读取 **5 个**（`menu_item_height_px` / `menu_safe_margin_px` / `menu_preview_spin_deg_s` / `boot_logo_time_s` / `executive_hz`）；**升级** 9 条 `effect` 全被读取，但 `processing_multiplier` **零运行时读取**（只在 `data_validator.gd:144` 被校验）；**模块** 48 件全可售但 **17 件未出现在任何出厂蓝图**；**蓝图** 17 份（每档仅 3 种敌人、Boss 仅 1 种）；**竞技场** 3 个但代码只加载 `arena_standard`；**功能** 音频 API 0 / `tr(` 0 / 设置持久化 0 / **生存模式暂停 0** / 教程 0 / `KEY_*` 95 处 28 键 / `Input.is_action_*` 0；`project.godot` 无 `[input]` / `[audio]` / `[locale]` / `[autoload]` 段；`.wav`/`.ogg`/`.mp3`/`.png`/`.tres` **全 0**、`.tscn` 1；**规模** `main.gd` **193,936 B / 4,595 行**（占全部脚本约 **37%**，是第二名的 **4.1 倍**）；**死代码** 22 脚本无死脚本，但精确边界匹配后 **15 个函数零引用**（第一版报 28 个，**13 个是 `sort_custom` / `.bind()` / `Callable(self, "…")` 与短名子串的误报**）；**测试** 26 项 smoke 对主菜单 / 设置页 / 页面跳转 **零覆盖**（只命中 9 条注释）；**深拷贝** 查询 **155 处**（`get_module` 104）。**分级**：P0 ×4（设置不持久化 / 生存无暂停 / 设置页仅 3 行 / 退出无二次确认）、P1 ×6、P2 ×6。**§7.3 / §7.4 的结论全部仍有效，不重复不推翻**。详见 §11.4.2.26 与 roadmap §4.5。**如实声明**：全部为**静态扫描 + 源码直读**，**无实机试玩、无 profile、未在 Android 上验证**；本轮**未改任何代码，也未新增测试**。 | §11.4.2.26 §17 |
 | 2026-11-05 | v3.48 | **执行 v3.47 待完善清单的 P0/P1 六项**（用户原话：「按计划开始」，指 `docs/roadmap.md` §4.5.5 的建议执行顺序）。① **P0-1 设置持久化**：新增 `scripts/user_settings.gd`（`extends RefCounted`，`ConfigFile` → `user://settings.cfg`，段 `display`，四键 `glow_enabled` / `motion_enabled` / `window_mode` / `debug_readout`，**路径可注入**以便 headless 跑临时路径）。**四条设计决定**：只做「读 / 写一份键值」不碰引擎节点与 `data/*.json`；**不认识的值一律退回默认不报错**（设置文件损坏绝不能让游戏打不开，它不是玩法数据；`_read_bool` 接受 `bool` 与 `int/float` 但**不接受字符串 `"true"`**）；`WINDOW_MODES` 是**界面档位名**按既有惯例留在代码；`window_mode` 下标即存档值**只能追加不得重排**。`main.gd` 侧：`_ready()` **先 `_load_settings()` 再确认窗口模式**（顺序反了玩家选择会被覆盖一次）、**每次切换立即写盘**（不攒到退出，崩溃即丢）、**「启动即最大化」收窄为「只在没有设置文件时执行」**（对用户「默认最大化」要求的**有意识收窄**：首次仍最大化，显式选择后尊重选择，否则设置形同虚设）、`_apply_window_mode()` 在 headless 早退。② **P0-3 设置页 3 行 → 5 行**：引入 `SETTINGS_ROW_COUNT := 5` / `SETTINGS_ROW_Y := 360.0` 两个**单一来源常量**，消除硬编码在**两处**的上下界（键盘 `mini(_settings_index + 1, 2)` 与鼠标 `range(3)`）—— 加一行必须同时改两处、漏一处就「键盘跳不到新行 / 鼠标能点但键盘越不过去」，这是 §11.4.2.26「8 条 if/elif 链」的**可复现实例**。说明文字按几何从 y=620 移到 **700/728**（5 行占 360…632）。新增 `debug_readout`（默认关，**画在淡入遮罩之后**——被 UI 盖住的调试信息等于没有）。**事实更正**：`_focus_target_y()` 旧版读 `MENU_ROW_Y` 而 `_settings_row_rect()` 读 `360.0`，**两者数值恰好相同、历史上从来没有可见偏移**；我最初记成「焦点条会偏的既有瑕疵」，**那个判断是错的**，已如实写成「数值巧合而非约束」。③ **P0-2 生存模式暂停**：`SurvivalRun` 新增 `paused` / `paused_time` / `toggle_pause()`（镜像 `MatchState` 三件套，同签名同语义）。**核心决定：暂停不进入状态机，是 `STAGE_BATTLE` 上的正交标志** —— ① 暂停不是玩法阶段；② 做成 `STAGE_PAUSED` 要改所有 `stage == STAGE_BATTLE` 判据，「漏改一处」正是 v3.23 `expire` 事件被静默丢弃的同类事故；③ 正交标志让 `step_battle()` **时序结构一行未动**（保住确定性）。**两层拦截缺一不可**：`step_battle()` 入口 `if paused: paused_time += dt; return`（**`dt` 根本没被用掉 ⇒ `wave_time_left` 自然不走**）；`_survival_simulate()` 的 `if survival.paused: _survival_accumulator = 0.0; return`（**不清零则暂停 3 分钟恢复后累加器里躺着 180 秒，一次跑满 `DRIVE_MAX_STEPS` 步，坦克瞬移**）。**UI 单一拦截点** `_is_battle_screen()` 加 `and not survival.paused`（左键 / 鼠标瞄准 / 空格三条路径一处挡全）。另六个细节：`KEY_P` 与对局页**同键同语义**（暂停中按 R 仍重开）；**暂停 / 恢复都清按键集**（否则恢复后坦克带着早已松开的键跑出去）；**空格开火前显式判 `paused`**（`duel.fire()` 是直接调用，`step_battle()` 不推进拦不住）；`setup()` 与 `close_run()` **双归零**；遮罩最后画、**不加按钮**；右 HUD 行距 **30 → 26**（5 行文字 + 1 行相机读数，最后一行字顶 417 < `SURVIVAL_MIRROR_RECT` 的 436）。**自我纠正**：第一版重排为塞按键提示**删掉了「战斗期禁止改装」**，那是核心玩法规则（用户明确要求），**已改为压缩行距、全部保留**。④ **P0-4 退出二次确认**（§4.5.5 的建议顺序漏了它，本轮补进）：**改一行文案 + 一个布尔标志，不新建弹窗**（本项目 UI 全 `_draw` 手绘、无通用弹窗组件，新建弹窗层级成本远高于一个标志）。上膛 → 确认两步、**选中任何其它项自动卸膛**、**`KEY_ESCAPE` 卸膛**（取消路径）、上膛**红字**、文案由 `_main_menu_label()` 单独决定（不在绘制处再写一遍状态判断）。⑤ **P1-3 `processing_multiplier` 定性为实现**（不是删）：先区分两个同名字段 —— `processing_factor` 是**弹药口径**属性（`cal_20`=0.7 … `cal_155`=1.5），`processing_multiplier` 是**升级**属性，语义不同互不替代；hook 是 `AmmoNetwork._processing_factor()`（加工时间的**唯一乘数入口**），只是没接升级侧。`_processing_factor(ammo_id, upgrades := [])` = 口径因子 × `_upgrade_processing_multiplier(upgrades)`，后者按 `effect` 计 `stack_limit`（**与 `DamageSystem._upgrade_profile()` 同源**）逐条相乘并 `clampf(total, 0.1, 4.0)`（**安全界不是平衡旋钮**）。**两个调用点都传载荷**，**进度条分母与起跑值同源**（否则带升级的弹药在 100% 后继续等，看起来像卡住）。**一条决定测试写法的语义**：加工时间用「**进来那发**」的载荷，而槽配置只影响**输出**载荷 —— 所以**必须用两级改进器测**（第一级染色、第二级被测量）；单级布局下被测量者永远收到白弹药，三种 tick 数必然相同，**那不是实现失效是测错了对象**（我第一版就是这么写的）。实测 base=**5** / fast=**4** / slow=**7** tick（`net_hz=10` ⇒ 0.1 s/tick，mk1 `0.6 s` × `cal_20` `0.7` = 0.42 s）。**玩家可感知变化（本轮唯一改变玩法数值的修改）**：带升级的弹药过改进器变快 / 变慢；**白弹药时间完全不变**，开局体验与 v3.47 一致。⑥ **P1-4/5/6 清理**：删 **13 个**零引用函数（`fx_layer.ratio` / `module_defs.modules_for_layer` / `battle_viewport.set_painter` / `cannon_bank.ammo_for_caliber` / `grid_builder.validation_report_summary` / `runtime_builder.seed_from_blueprint`+`add_scrap`+`can_afford` / `expedition_run.take_from_inventory` / `main._drive_to_screen`+`_match_to_screen`+`_survival_to_screen`+`_option_window_start`+`_remove_part_under_mouse`），**保留 `duel.remove_side` / `damage_system.reset`**（将来要用的生命周期 API）；删 **4 个**零读取数据键（`menu_item_height_px` / `menu_safe_margin_px` / `menu_preview_spin_deg_s` / `boot_logo_time_s`），**保留 `executive_hz`**（§14.8 与 L1498 记载它是刻意的）；`arena_pit` / `arena_corridor` **本轮不删**（删掉等于放弃多地图素材，保留成本只有 2 个 JSON 的字节数，且删会让 `data_smoke arenas=3` 变化需额外解释）—— 改为标注「**纯数据、零加载**」。⑦ **验证（全部 headless）**：`run_smoke48.ps1` → **27 项全绿**（26 → 27，唯一新增 `user_settings_smoke`，`USERSET_OK checks=36 failures=0`），**零 `SCRIPT ERROR`**；与 v3.46 基线逐项对照，`files=26` / `arenas=3` / `mass=61.0` / `cells=43` / `scrap=751.0` / `errors=34` / `checks=57` / `checks=600` **全部逐字相同**；**三组负向对照**（备份文件式，**全程未用 `git checkout` / `git restore`**）各命中预期失败标签且三组 `RESTORED_IDENTICAL=True`；五项硬约束成立（`omega_max` 3.0 / `tank_body.gd` 零改动 / `_next_unit()` 21→21 / `max_speed()` 闭式 / 暂停不改 `stage`）；11 个被改脚本全部 `--check-only` 干净。⑧ **三处我自己造成的真实产品回归（全部被 `--check-only` / 全量 smoke 抓到并修好，无一流入提交）**：**（a）`runtime_builder.part_at_module()` 被误删** —— 它是 `runtime_build_smoke` 的**唯一观测手段**（6 处调用），缺失后 `_init()` 在 `SCRIPT ERROR` 处中断、`quit()` 永不执行、**进程永久挂起**（`Terminal` 只报 `output_idle`，看起来和「还在跑」一样）；根因是删除核实脚本**只扫 `scripts/` 没扫 `tests/`** —— 这正是 v3.46 已记过的教训，我违反了它；已补回 `part_at_module` / `part_at_mobility` / `pending_info`。**（b）`_battle_viewport.configure(...)` 被误删** —— 插入 `_load_settings()` 时 `File.Edit` 的 `replace` 吞掉紧邻的下一行，`viewport` / `camera` / `world` 全为 null ⇒ **整个战场完全不渲染**（本轮最严重的一处自伤）。**（c）`build_cost()` 被连带删除** —— 删 `can_afford()` 时选中范围过大，而它是 `request_build()` 的依赖。另有 **5 次 `File.Edit` 边界事故 + 1 处 preload 四行重复 + 3 处把测试文件改坏**（少一个格式化参数 / `TankBody` 未 preload / 转义引号），全部已修。⑨ **两个测试装置的真实弱点（须记入后续审核）**：**（a）运行时 `SCRIPT ERROR` 不等于断言失败，而且会让 `extends SceneTree` 进程永久挂起**（规则：跑 smoke 一律带 `--quit-after`，判断完成只看工件文件与提示符）；**（b）反向用例对「默认值为 `false` 的布尔字段」没有区分力**（`debug_readout` 缺键读回也是 `false`，`reverse_debug` 恒成立；**反向用例的期望值必须与缺键默认值不同**）—— 已知覆盖缺口，本轮不修。**如实声明**：全部证据为 **headless smoke + 负向对照 + 源码直读**；**本次改动尚未经过用户实机确认**；`main.gd::_survival_simulate()` 的累加器清零分支**在 headless 下测不到**（`--script` 模式下 `_process()` 不跑，只有代码审读证据）；**UI 改动（设置页 5 行 / 退出确认文案 / 暂停遮罩 / 调试叠加层）没有任何自动化测试覆盖**（`_draw` 在 headless 下不执行，`tests/` 对 UI 层零覆盖）；**没有做 profile**；**未在 Android 上验证，任何 APK 均不存在**。 | §11.4.2.27 §14.9 §17 |
 | 2026-11-05 | v3.49 | **特效渲染审核与美化**（用户原话：「再次检查审核特效渲染方面，美化效果」）。本轮是**实现轮**：先审计再改码。① **四个真实缺陷**：**A** 生存页护盾受击**零视觉反馈** —— 数据层发 `shield_hit`（带 `cell`）、页面层推 `kind="shield"` 且位置零半径零、绘制层对 `shield` 直接 `continue`，三重错误互相掩盖；**B** 殉爆 / 引擎爆炸在对局页只有一行文字、在生存页**完全没有分支**，而 `_area_damage()` 是逐受波及部件发事件，页面层拿不到爆炸中心；**C** `draw_damage_popups()` 的 `stack` 在循环外累加，第 6 条数字被抬高 70 px，**哪怕隔了半个战场**；**D** 命中闪光三页各是**单变量**，齐射只闪最后一发。② **修法**：A 用 `side` + `cell` 经 `_survival_cell_world()` 换世界坐标推 `shield_hit`（六边形 + 6 道径向刻线 + 中心小圆）；B 在 `_area_damage()` 里**只在 `depth == 0` 且 `source_cells` 非空**时补一条 `*_burst` 中心事件（防连锁殉爆指数级刷屏），三页消费并按 `maxf(radius × cell_size, 56.0)` 换算；C 抽出 `_popup_stack_at()` 按 `DAMAGE_POPUP_STACK_RADIUS = 48.0` 分桶；D 三页换成数组 + `_advance_timed()` + `_draw_timed_hits()`。③ **八项美化**：口径分档弹头（**对数刻度**，`SHOT_GAUGE_REFERENCE = 240.0`，线性会把三个轻口径全挤到最左端）、速度自适应拖尾（直接读 `shot["speed"]` px/s，**不反推上一帧位移**）、命中方向溅射（`normal` 来自 impact 事件）、`draw_explosion_burst()`（3 环 + 核心 + 8 固定角射线，**零随机**）、三页全部启用 `special` + `centre_dot`、竞技场 4 环内发光 + 四角 L 标、房屋双线 + 四角刻线 + 血量低于 30% 转红、`draw_expire_flash` 死逻辑清理。④ **测试**：新增 `tests/fx_render_smoke.gd`（436 行 / **51 项断言**）；**实测 `CanvasItem.draw_*` 不能在 `_draw()` 之外调用**（四种图元全报 `Drawing is only allowed inside this node's …`，且脚本不中止），故「统计 `draw_*` 调用次数」这条路不成立，改用纯数值函数 + `DamageSystem` 事件 + 源码扫描（剔除注释行）三条路线，**像素只靠截图 + 人眼**。⑤ **验证**：逐文件 `--check-only` 干净；`FX_OK checks=51`；**5 组负向对照全部精确变红且还原 SHA-256 一致**；全量 smoke **28 项零 `SCRIPT ERROR`**，与 v3.48 基线逐字相同（唯一差异是新增 `fx_render_smoke` 一行）；硬不变量 `_next_unit()` = 21 / `omega_max` = 3.0 / `tank_body.gd` 零 diff。⑥ **三页历史截图基线全部作废并重拍**：`v23c_*` 183,957 / 133,180 / 213,730 B → `v49_*` 193,693 / 145,011 / 200,829 B。⑦ **我自己引入又修掉的错误**（必须与产品缺陷分开记）：`SHOT_STEP_REFERENCE` 单位错误（「上一帧位移 ÷ 1.0」是 px/帧不是 px/s，所有口径拖尾塌到下限，**修法是改数据来源而非调常数**）、`drive_feedback_smoke` 漏改导致**假绿**（`SCRIPT ERROR` 让 `_expect()` 根本不执行、测试照样打印 OK）、两次 `File.Edit` 吞掉整行导致 `Parse Error`、`fx_render_smoke` 自身 5 个缺陷。**如实声明**：**本次改动尚未经过用户实机确认**；**UI / 特效改动除纯函数、事件、源码断言外无自动化覆盖，像素只靠截图 + 我自己的眼睛**；护盾受击与爆炸爆发两个特效的**像素表现未在截图中出现**，只有逻辑与源码断言证据；多实例命中闪光**未观察到同时闪光**（截图是单帧）；**没有做 profile**；**未在 Android 上验证，任何 APK 均不存在**。 | §11.4.2.28 §17 |
+| 2026-11-06 | v3.50 | **模块摧毁后的功能失效与碎片掉落**：修掉用户实机报告的「炮管打掉之后还能发射」——`CannonBank.cannons` 与 `AmmoNetwork.parts` 是 `tank.parts` / `builder` 之外的两份独立功能索引副本，只在 `add_side()` / `_enter_drive()` 构建一次，部件被摧毁后从不重建。新增 `DamageSystem.structure_changed: Callable`（`_on_destroyed()` 外层、`depth == 0` 通知一次）→ `Duel._refresh_side_structure()` / `Main._drive_refresh_structure()` 重建 bank + network。同根因的制造装置 / 改进器 / 弹药库被打掉后同样失效。另新增碎片掉落效果：`CombatView` 的 `PART_DEBRIS_TIME := 0.55` / `PART_DEBRIS_RADIUS_PER_CELL := 1.35` / `draw_part_debris()` 与独立 kind `part_debris`（8 片固定角短线段 + 径向抛洒 + 竖直下落，零随机），三页 `destroyed` 分支各自入队。新增 `tests/part_destroy_smoke.gd`（`PART_DESTROY_OK`），全量 smoke 28 → 29 项，6 组负向对照。三页 `v49_*` 截图基线作废（碎片特效必然改变像素），重拍为 `v50_*`。**本次改动尚未经过用户实机确认**。 |
 

@@ -120,6 +120,8 @@ func add_side(tag: String, builder: GridBuilder, spawn_pos: Vector2, spawn_headi
 	## v3.24：升级不再整台聚合。载荷由弹药网络逐发携带，见 damage_system 的说明段。
 	## design §8.5：撞墙伤害也走同一条连锁，殉爆 / detach / 判负才不会被跳过。
 	tank.damage_router = Callable(damage, "apply_part_damage")
+	## v3.50：部件真的消失之后重建该侧的功能索引副本，否则被打掉的炮管还能开火。
+	damage.structure_changed = Callable(self, "_refresh_side_structure").bind(tag)
 	tank.position = spawn_pos
 	tank.heading = spawn_heading
 	tank.velocity = Vector2.ZERO
@@ -139,7 +141,24 @@ func add_side(tag: String, builder: GridBuilder, spawn_pos: Vector2, spawn_headi
 		damage_dealt[tag] = 0.0
 	return true
 
-## 移除一个侧（波次结束时敌人撤离、或某侧被彻底清出局）。
+## 部件被摧毁 / 脱落之后重建该侧的两份**功能索引副本**。
+##
+## `CannonBank.cannons` 与 `AmmoNetwork.parts` 是 `tank.parts` / `builder` 之外的独立副本，
+## 只在 `add_side()` 里构建过一次；不同步就会出现「炮管被打掉还能开火」（v3.50 用户实机报告）。
+## 重建而非局部删除：`reload_from_body()` 按 module_id + 首格保留装填态，
+## `network.rebuild()` 会把在途弹药按同一键重新挂接，两者都是既有且已测的路径。
+func _refresh_side_structure(tag: String) -> void:
+	if not sides.has(tag):
+		return
+	var side: Dictionary = sides[tag]
+	var bank: CannonBank = side["bank"]
+	var network: AmmoNetwork = side["network"]
+	var builder: GridBuilder = side["builder"]
+	bank.reload_from_body()
+	network.rebuild(builder)
+	network.bind_bank(bank)
+
+## 移除一个侧（波次结束时敌人撒离、或某侧被彼底清出局）。
 func remove_side(tag: String) -> void:
 	sides.erase(tag)
 

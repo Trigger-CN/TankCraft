@@ -212,6 +212,7 @@ godot --headless --path . --script res://tests/ammo_combo_smoke.gd
 | `camera_zoom_smoke.gd` | `CAMERA_OK` |
 | `blueprint_roundtrip_smoke.gd` | `BPROUND_OK` |
 | `fx_render_smoke.gd` | `FX_OK` |
+| `part_destroy_smoke.gd` | `PART_DESTROY_OK` |
 | `selfcheck_smoke.gd` | `SELFCHECK_OK` |
 | `user_settings_smoke.gd` | `USERSET_OK` |
 
@@ -220,6 +221,7 @@ godot --headless --path . --script res://tests/ammo_combo_smoke.gd
 > `blueprint_roundtrip_smoke` 是**蓝图存盘圆程回归**：装两件改进装置并配好升级 → 序列化 → 反序列化 → 逐项断言读回值等于写入值、再次序列化**逐字节稳定**、存档**不含 `intrinsic`**、**旧存档（完全没有 `upgrades` 字段）照样能读且读成空配置**、未知 id 丢弃与超槽截断**不整条失败**。它守的是 v3.45 审核报告的唯一 **P0**：`_serialize_parts()` / `_parse_part()` 曾都不处理 `upgrades`，改装页配好的改进槽「存盘即静默丢失」。
 >
 > `fx_render_smoke` 是**特效渲染层唯一有自动化覆盖的地方，覆盖面本身很窄，必须看清楚它测的是什么**。它做 **51 项断言**，全部落在三条可驱动的路线上：① **从绘制代码里抽出的纯数值函数**（`_shot_gauge` 对数档位、`shot_head_radius` / `shot_trail_width` / `shot_trail_length`、`_popup_stack_at` 按位置分桶）；② **`DamageSystem` 的事件**（`apply_part_damage()` → 恰好一条 `*_burst`，带 `cells` 与正 `radius`，且**不递归**）；③ **源码文本扫描**（三页是否真的消费 `*_burst` / 是否真的推 `shield_hit` / 命中闪光是否已是数组且被 `_advance_timed()` 推进 / `combat_view.gd` 非注释行里是否出现 `randf` / `randi`），**扫描前剔除注释行**——不剔除的话，修复说明里写着旧写法就会被当成违规（本轮因此出现过 3 次假红）。**它刻意不统计 `draw_*` 调用次数，因为那条路走不通**：实测 `CanvasItem.draw_*` 只能在 `_draw()` 内调用，四种图元（circle / line / arc / rect）全部报 `Drawing is only allowed inside this node's \`_draw()\`…`，且脚本不会中止（`quit(0)` 仍执行）。**所以像素层面没有任何自动化覆盖，只有 `--capture` 截图 + 人眼。** 它守的四个缺陷：生存页护盾受击零反馈、殉爆事件被丢弃、伤害数字不分位置地逐层抬高、命中闪光单实例。详见 `docs/design.md` §11.4.2.28。
+> `part_destroy_smoke` 是**「模块被打掉之后功能必须失效」这条需求唯一的自动化判据**：它直接驱动 `DamageSystem.apply_part_damage()` → `Duel.bank_of()` / `network_of()` / `can_fire()` / `fire()`，断言被打掉的炮管离开索引、最后一个炮管没了就打不出炮弹、幸存炮管装填进度不丢、制造装置消失后网络里也没有它；另有 7 项源码扫描守住三页的 `part_debris` 接线与「碎片绘制不得引入随机源」。
 >
 > `selfcheck_smoke` 是**门禁而不是普通测试**：扫 `tests/*.gd` 的全部 `func _check_xxx(` 定义，逐行统计**调用点**（跳过空行、`#` 注释行、定义行），调用点为 0 即打 `SELFCHECK_UNCALLED <file>::<name>` 并计为失败；反向要求 `defs >= 120` 防止「一个都没扫到」假装全绿。**为什么需要它**：v3.44 一轮修了 9 个睡觉的验收、审核又查出 1 个、v3.46 门禁首跑又抓出 1 个 —— 两轮都靠「人手数一遍」才发现。当前 `defs=128 called=128`。
 >

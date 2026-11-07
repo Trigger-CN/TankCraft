@@ -23,6 +23,10 @@ var events: Array[Dictionary] = []
 var debris: Dictionary = {}
 ## 驾驶舱被摧毁即置位；main 侧同帧处理并停止后续连锁（design §8.5 第 6 步）。
 var defeated: bool = false
+## 结构变更通知（v3.50）：任何「部件真的消失了」的路径在最外层调用一次。
+## `CannonBank.cannons` 与 `AmmoNetwork.parts` 是 `tank.parts` / `builder` 之外的功能索引副本，
+## 结算层不直接持有它们（会引入 preload 环），改用与 `tank.damage_router` 同一惯例的回调。
+var structure_changed: Callable = Callable()
 
 var _tank: TankBody
 var _builder: GridBuilder
@@ -459,7 +463,15 @@ func _upgrade_profile(upgrades: Array) -> Dictionary:
 
 ## ===== 摧毁与连锁（design §8.5） =====
 
+## 最外层摧毁入口：整条殉爆 / 脱落连锁跑完之后，再让上层重建功能索引副本。
+## 只在 `depth == 0` 通知一次——深度 > 0 时 tank / builder 正处于链条中间，
+## 外层那一次通知会覆盖整条链的最终状态；逐层重建是纯浪费。
 func _on_destroyed(tank: TankBody, info: Dictionary, depth: int) -> void:
+	_on_destroyed_inner(tank, info, depth)
+	if depth == 0 and structure_changed.is_valid():
+		structure_changed.call()
+
+func _on_destroyed_inner(tank: TankBody, info: Dictionary, depth: int) -> void:
 	if defeated:
 		return
 	if bool(info.get("core", false)):

@@ -55,6 +55,10 @@ const MUZZLE_FLASH_LEN := 26.0
 const MUZZLE_FLASH_MIN_LEN := 10.0
 const EXPIRE_FLASH_TIME := 0.26
 const EXPIRE_FLASH_RADIUS := 16.0
+## 部件被摧毁时的碎片抛洒（v3.50）。比命中闪光（0.14 s）长得多——它要表达「这一件彻底没了」。
+const PART_DEBRIS_TIME := 0.55
+## 碎片抛洒半径 = 本值 × cell_size（格）→ 世界像素由调用方乘好传入。
+const PART_DEBRIS_RADIUS_PER_CELL := 1.35
 
 ## ===== 炮弹外观分档（v3.49） =====
 ## 拖尾的参考时长（秒）：拖尾长度 = 速度 × 本值。
@@ -514,6 +518,10 @@ static func draw_fx(canvas: CanvasItem, entries: Array, style: Dictionary = FX_S
 		if burst and kind == "explosion_burst":
 			draw_explosion_burst(canvas, at, full_radius, float(entry["left"]), life, colour, pixel)
 			continue
+		## v3.50：部件被摧毁时的碎片抛洒。比通用圆环更具体地表达「这一件碎了」。
+		if kind == "part_debris":
+			draw_part_debris(canvas, at, full_radius, float(entry["left"]), life, colour, pixel)
+			continue
 		if special and _draw_impact_shape(canvas, at, full_radius, colour, kind, t, pixel):
 			continue
 		var radius := maxf(full_radius * (radius_base + radius_grow * t), min_radius)
@@ -606,6 +614,49 @@ static func draw_explosion_burst(canvas: CanvasItem, at: Vector2, radius: float,
 	## ④ 淡色外溢底：给出「范围」的直观大小，而不是只有几条线。
 	canvas.draw_circle(at, radius * (0.30 + 0.70 * progress), Color(colour, 0.10 * t))
 
+## 部件被摧毁时的碎片抛洒（v3.50）。
+##
+## **为什么不用通用圆环**：圆环表达的是「发生了一个事件」，而这里要表达的是
+## 「这一件东西碎了、碎片飞出去了」——它们是**离散的**、**带重力的**、**不回到原处**的。
+## 所以画成八片沿径向抛洒并下落的小块，而不是一圈对称的环。
+##
+## `radius` 是抛洒半径（调用方按 `PART_DEBRIS_RADIUS_PER_CELL × cell_size` 算好）。
+##
+## **零随机但也不均匀**：角度、抛洒距离系数、尺寸系数全部取自下面四张**常量表**。
+## 均匀的 8 片 `TAU × i / 8` 在 4× 放大后看起来是一颗**辐射星芒**，不像碎块（v3.50
+## 自己看截图发现的）；打散成不等距、不等大、不等远，才读得出「碎块向四周飞出去」。
+## 全部是常量表 + `progress` 多项式，同一模拟两次跑出同一像素（design §10.4）。
+const PART_DEBRIS_ANGLE := [0.00, 0.85, 1.70, 2.55, 3.35, 4.20, 5.05, 5.75]
+## 抛洒距离系数：近的落在 `0.75 × reach`，远的到 `1.15 × reach`。
+const PART_DEBRIS_REACH := [1.12, 0.78, 1.06, 0.88, 1.15, 0.75, 1.02, 0.94]
+## 碎片尺寸系数（相对基础尺寸）。
+const PART_DEBRIS_SIZE := [1.00, 0.62, 0.86, 1.22, 0.70, 1.08, 0.78, 0.94]
+## 竖直下落系数：重的碎块落得快（与尺寸正相关）。
+const PART_DEBRIS_FALL := [1.35, 0.70, 1.05, 1.30, 0.75, 1.20, 0.80, 1.00]
+
+static func draw_part_debris(canvas: CanvasItem, at: Vector2, radius: float, left: float, life: float, colour: Color, pixel: float = 1.0) -> void:
+	if left <= 0.0 or radius <= 0.0:
+		return
+	var t := clampf(left / maxf(life, 0.001), 0.0, 1.0)
+	var progress := 1.0 - t
+	## ① 淡色外溢底：给出抛洒范围的直观大小，随进度扩散并淡出。
+	canvas.draw_circle(at, radius * (0.25 + 0.85 * progress), Color(colour, 0.10 * t))
+	## ② 八片碎片：径向外抛 + 竖直下落（`progress²` 让下落感在尾段才明显）。
+	## 下落基准从 0.55 提到 0.85：旧值在 4× 放大图里几乎看不出“掉”，只像“涨”。
+	var reach_base := radius * (0.35 + 1.15 * progress)
+	var fall_base := 0.85 * radius * progress * progress
+	var chunk_base := radius * 0.18 * t
+	for index in range(PART_DEBRIS_ANGLE.size()):
+		var angle: float = PART_DEBRIS_ANGLE[index]
+		var dir := Vector2(cos(angle), sin(angle))
+		var reach := reach_base * float(PART_DEBRIS_REACH[index])
+		var fall := fall_base * float(PART_DEBRIS_FALL[index])
+		## 尺寸与寿命同为 `t` 的函数：碎片在消失前会缩小，而不是突然断掉。
+		var chunk := chunk_base * float(PART_DEBRIS_SIZE[index])
+		var centre := at + dir * reach + Vector2(0.0, fall)
+		## 沿径向外指的小线段，长度 = 尺寸 × 1.6：线比点更像「碎块」。
+		var tail := centre - dir * chunk * 1.6
+		canvas.draw_line(tail, centre, Color(colour, 0.85 * t), maxf(chunk * 0.45, pixel))
 ## 命中闪光：实心亮圆 + 描边，半径向外扩张。
 ##
 ## v3.49 新增**方向性溅射**：传入 `normal` 时，沿该方向额外画出三道长短不一的短刻线

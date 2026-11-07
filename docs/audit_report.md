@@ -606,3 +606,29 @@ func _draw() -> void:
 > **⑤ 我自己的失误（与产品缺陷严格分开记）**：`SHOT_STEP_REFERENCE` 单位错误（「上一帧位移 ÷ 1.0」得到 px/帧不是 px/s，所有口径拖尾塌到 clamp 下限；**修法是改数据来源 `shot["speed"]` 而不是调常数**）；`drive_feedback_smoke` 漏改导致**假绿**（`SCRIPT ERROR` 让 `_expect()` 根本不执行、测试照样打印 `*_OK` —— 这是本报告 §1 纪律的又一次现实版）；两次 `File.Edit` 吞掉整行导致 `Parse Error`；`fx_render_smoke` 自身 5 个夹具缺陷（模块 id 猜错 / `place_module()` 签名猜错 / 断言期望值写错 / 绕过 `DamageSystem` 导致殉爆事件为 0 / 源码扫描命中注释）。
 >
 > **边界（不得弱化）**：本轮全部证据为 **headless `--check-only` + `fx_render_smoke` 51 项 + 5 组负向对照 + 28 项全量 smoke + 三张真实窗口截图（逐张 `Image_View` 亲自看过）**。**本次改动尚未经过用户实机确认**；**没有做 profile**；**未在 Android 上验证，任何 APK 均不存在**。
+
+> **v3.50 部件摧毁功能失效轮补充**：用户实机报告的「炮管打掉之后还能发射」已定位到确切根因 ——
+> `CannonBank.cannons` 与 `AmmoNetwork.parts` 是 `tank.parts` / `builder` 之外的**两份独立功能索引副本**，
+> 只在 `Duel.add_side()` / `Main._enter_drive()` 里构建一次；`DamageSystem.apply_part_damage()` 与 `_detach()`
+> 只更新 `tank` / `builder` / 护盾表，**从不重建这两份索引**，于是被打掉的炮管仍留在 `bank.cannons` 里，
+> 连 `loaded` / `reload_remaining` 状态都在。同根因使弹药制造装置 / 改进器 / 弹药库被打掉后功能同样不失效。
+>
+> **架构上这是一个「同一事实存了多份」的问题**，与本报告 §R17 系列记录的「机制存在 ≠ 生效」同类但形态不同：
+> 那里是漏调 tick 或丢弃事件，这里是**漏重建索引**。修法选择「结算层只发回调、由编排层重建」而不是让
+> `DamageSystem` 直接持有 `CannonBank` / `AmmoNetwork` —— 后者会给结算层引入 preload 环
+> （`ammo_network` 已 preload `cannon_bank`），而且会让一个纯结算组件开始依赖功能索引层。
+> 回调与既有的 `tank.damage_router = Callable(damage, "apply_part_damage")` 是同一惯例。
+>
+> **重建而非局部删除**是刻意的：`AmmoNetwork` 有八个互相引用的索引（`nodes` / `_nodes_by_cell` /
+> `_links_out` / `_links_in` / `_levels` / `_rounds` / `_owner` / `_tee_counters`），局部删除必须同时维护全部；
+> 而 `rebuild()` 已通过 23 条组合矩阵。重建不丢状态的前提是 `reload_from_body()` 按 `module_id` + 首格保留
+> 装填态、`rebuild()` 按同一键重挂在途弹药 —— 这两条都由新增断言的 `keep_reload_preserved` /
+> `keep_shots_preserved` 直接守住。
+>
+> **同轮补上碎片掉落效果**（用户同句提出的新需求）：新增独立 kind `part_debris` 与
+> `CombatView.draw_part_debris()`，8 片固定角短线段 + 径向抛洒 + `progress²` 竖直下落，**全程零随机**。
+> 三页原先只有生存页有一个 `break` 小圆环，对局与试驾的 `destroyed` 分支只写一行文字、零动效。
+>
+> **证据边界**：headless smoke（`PART_DESTROY_OK`）+ 6 组负向对照（全部精确变红并还原）+ 全量 smoke 29 项 +
+> 源码扫描。**像素表现只有 `--capture` 截图 + 人眼，没有自动化覆盖**（`_draw` 在 headless 下不执行）。
+> **本次改动尚未经过用户实机确认**；**没有做 profile**；**未在 Android 上验证，任何 APK 均不存在**。

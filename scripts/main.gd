@@ -1363,6 +1363,12 @@ func _match_step(step_time: float) -> void:
 			_match_event = "整块脱落：%d 格被撕下" % (battle_event.get("cells", []) as Array).size()
 			_push_match_fx("detach", Vector2(battle_event.get("pos", Vector2.ZERO)), 130.0, Palette.ACCENT_MAGENTA, 1.0)
 		elif kind == "destroyed":
+			## v3.50：逐格推「碎片掉落」。旧版这里只写一行文字，模块碎了屏幕上什么都不发生。
+			## `cells` 是**竞技场格**（对局页的命中判负链路不在建造格空间），所以按 `(cell + 0.5) × cell_px`
+			## 换算成与 `draw_neutrals` / `_match_fx` 一致的世界坐标。
+			var part_cell_px := float(definitions.global_number("cell_size", 16.0))
+			for raw_cell in battle_event.get("cells", []):
+				_match_fx.push("part_debris", (Vector2(raw_cell) + Vector2(0.5, 0.5)) * part_cell_px, CombatView.PART_DEBRIS_RADIUS_PER_CELL * part_cell_px, Palette.ACCENT_AMBER, CombatView.PART_DEBRIS_TIME)
 			_match_event = "击毁 %s" % String(battle_event.get("module_id", ""))
 		elif kind == "explosion_burst" or kind == "depot_explosion_burst" or kind == "engine_explosion_burst":
 			## v3.49：殉爆 / 爆炸终于有动效了。旧版这里只写一行 `_match_event` 文字，
@@ -1479,6 +1485,8 @@ func _enter_drive() -> void:
 	damage.rebuild(tank, builder)
 	## M6：撞墙 / 障碍撞击伤害也走 damage_system，殉爆 / detach / 判负才不会被静默跳过。
 	tank.damage_router = Callable(damage, "apply_part_damage")
+	## v3.50：部件真的消失之后重建炮管索引与管路网络，否则被打掉的炮管还能开火。
+	damage.structure_changed = Callable(self, "_drive_refresh_structure")
 	_drive_fx.clear()
 	_drive_cannon_pulse.clear()
 	_drive_cannon_loaded.clear()
@@ -1496,6 +1504,17 @@ func _enter_drive() -> void:
 	if tank.parts_of_kind(TankBody.KIND_MOBILITY).size() < 2:
 		_status_message += "　（行进机构少于 2 组，design §5.2 会持续偏转）"
 	queue_redraw()
+
+## 部件被摧毁 / 脱落之后重建试驾页的两份**功能索引副本**（v3.50）。
+##
+## 与 `Duel._refresh_side_structure()` 同构：`CannonBank.cannons` 与 `AmmoNetwork.parts` 是
+## `tank.parts` / `builder` 之外的独立副本，不重建就会出现「炮管被打掉还能开火」。
+func _drive_refresh_structure() -> void:
+	if bank == null or network == null or builder == null or tank == null:
+		return
+	bank.reload_from_body()
+	network.rebuild(builder)
+	network.bind_bank(bank)
 
 func _exit_drive() -> void:
 	_drive_held.clear()
@@ -1796,6 +1815,10 @@ func _drive_consume_damage_events(list: Array) -> void:
 				else:
 					_drive_last_event = "爆炸溣射"
 			"destroyed":
+				## v3.50：逐格推碎片掉落。旧版这里只写一行文字，炮管被打碎了屏幕上什么都不发生。
+				## `cells` 是**建造格**（damage_system 的部件格），经刚体换算到世界坐标。
+				for raw_cell in event.get("cells", []):
+					_push_drive_fx("part_debris", tank.world_position_of_cell(Vector2i(raw_cell)), CombatView.PART_DEBRIS_RADIUS_PER_CELL * tank.cell_size(), Palette.ACCENT_AMBER, CombatView.PART_DEBRIS_TIME)
 				_drive_last_event = "击毁 %s" % String(event.get("module_id", ""))
 			"core_destroyed":
 				_push_drive_fx("core", tank.position, 150.0, Palette.ACCENT_RED, 1.2)
@@ -4117,7 +4140,11 @@ func _survival_step(step_time: float) -> void:
 			else:
 				_survival_event = "击毁敌 %s" % module_id
 			for raw_cell in entry.get("cells", []):
-				_push_survival_fx("break", _survival_cell_world(Vector2i(raw_cell), side), 14.0, Palette.ACCENT_AMBER, 0.5)
+				## v3.50：`break` 是「打穿一格」的小环，`part_debris` 是「这一件碎了」的碎片抛洒。
+				## 两者职责不同，都保留：前者描述命中，后者描述模块消失。
+				var break_at := _survival_cell_world(Vector2i(raw_cell), side)
+				_push_survival_fx("break", break_at, 14.0, Palette.ACCENT_AMBER, 0.5)
+				_push_survival_fx("part_debris", break_at, CombatView.PART_DEBRIS_RADIUS_PER_CELL * float(definitions.global_number("cell_size", 16.0)), Palette.ACCENT_AMBER, CombatView.PART_DEBRIS_TIME)
 		elif kind == "house_destroyed":
 			## 事件自 v3.43 起带 `credit` / `xp` / `module`：页面必须把收益说出来。
 			## 旧版只有一句「房屋被摧毁」，而 `enemy_defeated` 连分支都没有——
