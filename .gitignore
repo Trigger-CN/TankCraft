@@ -12,5 +12,10 @@ __pycache__/
 # 构建产物：Android 导出包。工程当前不产出 APK，此规则只防将来误提交。
 *.apk
 
-# 构建产物：Windows 导出目录（build_release.bat 的输出，含 exe / pck / 日志）。
+# 构建产物：Windows 导出目录（build_release.bat 的输出，含 exe / zip / 日志）。
 build/
+
+# Godot 4.4+ 为每个 .gd 自动生成的 UID 附属文件。
+# 本项目没有任何 uid:// 引用（main.tscn 里 0 处），删掉也能正常运行；
+# 每次跑 godot 都会重新生成，不入库以免污染变更记录。
+*.uid

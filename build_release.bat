@@ -2,8 +2,8 @@
 rem ===========================================================================
 rem  TankCraft - Windows Release EXE build script
 rem
-rem  USAGE
-rem    build_release.bat                      build release exe
+rem    build_release.bat                      build release exe + zip package
+rem    build_release.bat --no-zip             build the exe only, skip the zip
 rem    build_release.bat --debug              build debug exe
 rem    build_release.bat --out <path>         custom output path (spaces OK)
 rem    build_release.bat --godot <path>       explicit Godot executable
@@ -13,6 +13,28 @@ rem
 rem  EXIT CODES
 rem    0 success / 1 usage error / 2 Godot not found / 3 templates missing
 rem    4 export failed / 5 artifact missing or empty / 6 template install failed
+rem    7 zip packaging failed
+rem
+rem  WHY THE ZIP IS PART OF THE DEFAULT PATH
+rem    The requirement is "one-click release packaging". A bare exe is not a
+rem    deliverable; a versioned zip is. So the packaging step is on by default,
+rem    --zip is accepted as an explicit (idempotent) spelling of the same thing,
+rem    and --no-zip is the escape hatch for "exe only".
+rem
+rem  WHY Compress-Archive WITH -LiteralPath
+rem    Compress-Archive ships with PowerShell 5.1 on Windows 10, so this adds no
+rem    dependency. -LiteralPath is mandatory, not cosmetic: -Path treats "[" and
+rem    "]" as wildcards, so a path like build\[wip]\TankCraft.exe would silently
+rem    match nothing. Single quotes wrap the arguments so cmd does not have to
+rem    escape the inner double quotes.
+rem
+rem  WHY THE VERSION COMES FROM project.godot AND THEN git
+rem    A package name without a version is not traceable. project.godot is
+rem    checked for config/version first: it is authoritative when present and
+rem    needs no external tool. When it is absent the script falls back to
+rem    'git describe --tags --always --dirty', then to the literal "dev".
+rem    Nothing is hard-coded, and the Android preset's version/name is NOT
+rem    reused -- that field belongs to the APK preset, not to this project.
 rem
 rem  WHY THIS FILE IS ASCII-ONLY
 rem    cmd.exe re-reads the .bat by byte offset while executing it. Calling
@@ -38,12 +60,14 @@ set "RC_NO_TEMPLATE=3"
 set "RC_EXPORT_FAIL=4"
 set "RC_NO_ARTIFACT=5"
 set "RC_TPL_FAIL=6"
+set "RC_ZIP_FAIL=7"
 
 set "PRESET=Windows Desktop"
 set "OUT_EXE=build\windows\TankCraft.exe"
 set "MODE=release"
 set "GODOT_BIN="
 set "DO_INSTALL_TPL=0"
+set "DO_ZIP=1"
 set "EXITCODE=%RC_OK%"
 
 set "SCRIPT_DIR=%~dp0"
@@ -73,6 +97,18 @@ if /i "%ARG%"=="--debug" (
 
 if /i "%ARG%"=="--install-templates" (
     set "DO_INSTALL_TPL=1"
+    shift
+    goto :parse_args
+)
+
+if /i "%ARG%"=="--zip" (
+    set "DO_ZIP=1"
+    shift
+    goto :parse_args
+)
+
+if /i "%ARG%"=="--no-zip" (
+    set "DO_ZIP=0"
     shift
     goto :parse_args
 )
@@ -267,12 +303,16 @@ if "%SIZE%"=="0" goto :no_artifact
 
 echo.
 echo ===========================================================================
-echo   [OK] Build succeeded
+echo   [OK] Export succeeded
 echo     Artifact : %OUT_EXE%
 echo     Size     : %SIZE% bytes
 echo     Log      : %BUILD_LOG%
 echo ===========================================================================
 certutil -hashfile "%OUT_EXE%" SHA256 2>nul
+
+if "%DO_ZIP%"=="1" goto :do_zip
+echo.
+echo [i] --no-zip: the exe above is the only output.
 set "EXITCODE=%RC_OK%"
 goto :finish
 
@@ -296,11 +336,89 @@ echo     Check "%BUILD_LOG%".
 set "EXITCODE=%RC_NO_ARTIFACT%"
 goto :finish
 
+rem --------------------------------------------------------------------------
+rem  Packaging step. Reached only after the export produced a non-empty exe, so
+rem  every failure below is a packaging failure, never an export failure.
+rem --------------------------------------------------------------------------
+:do_zip
+
+rem  Version chain: project.godot config/version -> git describe -> "dev".
+rem  project.godot has no config/version today and the repo carries no tags, so
+rem  in practice this resolves to the short commit hash.
+set "APP_VER="
+for /f "usebackq tokens=1,2 delims==" %%a in ("project.godot") do (
+    if not defined APP_VER if /i "%%a"=="config/version" set "APP_VER=%%~b"
+)
+if not defined APP_VER (
+    for /f "usebackq delims=" %%v in (`git describe --tags --always --dirty 2^>nul`) do (
+        if not defined APP_VER set "APP_VER=%%v"
+    )
+)
+if not defined APP_VER set "APP_VER=dev"
+
+rem  The package follows --out: it lands in <out dir>\release\, so the default
+rem  becomes build\windows\release and a custom --out keeps everything together.
+rem  %%~dpA is the exe's directory with a trailing backslash, so "release" joins
+rem  cleanly; the second pass normalises the result to an absolute path.
+for %%A in ("%OUT_EXE%") do set "OUT_EXE_ABS=%%~fA"
+for %%A in ("%OUT_EXE%") do set "REL_DIR_RAW=%%~dpArelease"
+for %%A in ("!REL_DIR_RAW!") do set "REL_DIR=%%~fA"
+if not exist "!REL_DIR!" mkdir "!REL_DIR!" >nul 2>&1
+
+set "ZIP_TAG="
+if /i "%MODE%"=="debug" set "ZIP_TAG=-debug"
+set "ZIP_OUT=!REL_DIR!\TankCraft-!APP_VER!-win64!ZIP_TAG!.zip"
+
+rem  Delete any previous package before compressing, for exactly the reason the
+rem  exe is deleted before exporting: a failed compression would otherwise leave
+rem  last build's zip in place and the non-empty check below would pass on it.
+if exist "!ZIP_OUT!" del /q "!ZIP_OUT!" >nul 2>&1
+if exist "!ZIP_OUT!" goto :zip_failed
+if not exist "!REL_DIR!" goto :zip_failed
+
+echo.
+echo [i] Packaging: !ZIP_OUT!
+powershell -NoProfile -ExecutionPolicy Bypass -Command "Compress-Archive -LiteralPath '%OUT_EXE_ABS%' -DestinationPath '!ZIP_OUT!' -Force"
+if errorlevel 1 goto :zip_failed
+if not exist "!ZIP_OUT!" goto :zip_failed
+for %%A in ("!ZIP_OUT!") do set "ZIP_SIZE=%%~zA"
+if "!ZIP_SIZE!"=="0" goto :zip_failed
+
+echo.
+echo ===========================================================================
+echo   [OK] Release package ready
+echo     Version  : !APP_VER!
+echo     Mode     : %MODE%
+echo     Artifact : %OUT_EXE%
+echo     Size     : %SIZE% bytes
+echo     Package  : !ZIP_OUT!
+echo     Packed   : !ZIP_SIZE! bytes
+echo     Log      : %BUILD_LOG%
+echo ===========================================================================
+certutil -hashfile "!ZIP_OUT!" SHA256 2>nul
+set "EXITCODE=%RC_OK%"
+goto :finish
+
+:zip_failed
+echo.
+echo [X] Packaging failed.
+echo     Exe    : %OUT_EXE%
+echo     Target : !ZIP_OUT!
+echo     The exe itself is valid; only the zip step failed.
+echo     Likely causes: the destination is locked by another process, the path
+echo     contains a single quote (it breaks the PowerShell -Command string), or
+echo     there is not enough free space.
+echo     Fix the cause and rerun, or pass --no-zip to keep only the exe.
+set "EXITCODE=%RC_ZIP_FAIL%"
+goto :finish
+
 :usage
 echo.
 echo   TankCraft Windows Release build script
 echo.
-echo     build_release.bat                      build release exe
+echo     build_release.bat                      build release exe + zip package
+echo     build_release.bat --no-zip             build the exe only, skip the zip
+echo     build_release.bat --zip                explicit form of the default (no-op)
 echo     build_release.bat --debug              build debug exe
 echo     build_release.bat --out ^<path^>        custom output path (default build\windows\TankCraft.exe)
 echo     build_release.bat --godot ^<path^>      explicit Godot (prefer *_console.exe)
@@ -309,6 +427,11 @@ echo     build_release.bat --help               show this help
 echo.
 echo   Exit codes: 0 ok / 1 usage / 2 no Godot / 3 no templates
 echo               4 export failed / 5 no artifact / 6 template install failed
+echo               7 packaging failed
+echo.
+echo   The zip lands in build\release\ as TankCraft-^<version^>-win64.zip.
+echo   ^<version^> comes from project.godot config/version, then git describe,
+echo   then "dev". Debug builds get a -debug suffix.
 echo.
 echo   Templates must match the engine version exactly.
 echo   Nothing is downloaded unless you pass --install-templates.

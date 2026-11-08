@@ -632,3 +632,9 @@ func _draw() -> void:
 > **证据边界**：headless smoke（`PART_DESTROY_OK`）+ 6 组负向对照（全部精确变红并还原）+ 全量 smoke 29 项 +
 > 源码扫描。**像素表现只有 `--capture` 截图 + 人眼，没有自动化覆盖**（`_draw` 在 headless 下不执行）。
 > **本次改动尚未经过用户实机确认**；**没有做 profile**；**未在 Android 上验证，任何 APK 均不存在**。
+
+> **v3.51 打包脚本轮补充**：「一键打包 release」这条需求落地时，先核实再动手 —— `build_release.bat`**本来就有**（321 行）且实测能产出 109,969,936 B 的 exe、在真实窗口能启动，所以本轮不是新建，而是补上「打包」二字缺失的那一半（原先只产出裸 exe，没有可交付压缩包）。新增 `:do_zip` 段到 444 行：默认产出 `build/windows/release/TankCraft-<ver>-win64[-debug].zip`，`--no-zip` 关闭，版本号三级回退（`project.godot` `config/version` → `git describe` → `dev`），包目录跟随 `--out`，压缩前先删旧 zip 并复核，`Compress-Archive -LiteralPath`（零新依赖），新退出码 `7`。
+>
+> **两条过程性更正值得记下来。** 第一，上一轮报的「`--out` 带空格解析失败」**是我的测试写法错误**，不是脚本缺陷：`cmd /c "build_release.bat --out build\windows\x y.exe"` 会剥掉内层引号，按正确引号在真实 cmd 中执行则 `Output` 行完整、导出成功，`:parse_args` 无需改动。第二，cmd 里 `&` 链中的 `%ERRORLEVEL%` 在**解析期**展开，读到的是上一条命令的值，据此我把「缺模板」读成 `1`、把「打包失败」读成 `0`，两个都是假的（实际 `3` 与 `7`）；**脚本必须单独跑一条命令、下一条命令再读退出码**。
+>
+> **证据边界**：11 个用例（默认 / `--debug` / `--no-zip` / `--out` 带空格 / `--out` 深目录 / `--help` / `--bogus` / 缺模板 / 打包失败，以及 zip 内容核验与解压后启动）全部由我在本机真实 `cmd.exe` 中执行，包内 exe 确在真实窗口启动（`WINDOW_MODE mode=2`）。但**本次脚本改动尚未经用户实机使用确认**；无代码签名、无安装器、无自动上传；**未在 Android 上验证，任何 APK 均不存在**。
