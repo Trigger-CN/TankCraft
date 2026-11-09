@@ -4869,6 +4869,42 @@ ERROR: Drawing is only allowed inside this node's `_draw()`, functions connected
 **边界**：脚本改动**尚未经用户实机使用确认**；打包与启动验证都是我在本机跑的；
 没有代码签名、没有安装器、没有自动上传；Android preset 未触碰，**无 APK**。
 
+#### 11.4.2.31 生存模式 Esc 暂停（v3.52）
+
+**需求**：用户原话「生存模式加入esc中途暂停」。核实后要如实说明一件事：**暂停机制本身在 v3.48 就有了**（见 §11.4.2.27）—— 领域层 `paused` / `paused_time` / `toggle_pause()`、页面层 `_survival_simulate()` 与 `_is_battle_screen()` 两层拦截、暂停遮罩、`survival_smoke` 的 10+ 条断言全都在。**唯一缺口是 `_handle_survival_key()` 的 `KEY_ESCAPE` 分支**：它在战斗阶段直接 `_exit_survival()`，一按就丢掉整局。
+
+**这本来就是设计文档自己要求的**：`docs/design.md:1605` 写着「**`Esc` 逐层返回，不跳级。`BATTLE_PHASE` 里的 `Esc` 打开暂停面板，而不是退出对局。**」；`:1628` 写「战斗中：`Esc` → `PAUSE_PANEL`」；`:1637` 写 `PAUSE_PANEL` 冻结「含本波计时器」；`:5062` 写「暂停冻结 `BATTLE_PHASE` 内的一切逻辑**与对局计时器**（暂停即停表）」。所以这是**实现没遵守自己的设计**，不是新功能。
+
+**暂停不进入状态机**（沿用 v3.48 的决定，本轮不改）：它是 `STAGE_BATTLE` 上的正交标志。若做成 `STAGE_PAUSED`，所有 `stage == STAGE_BATTLE` 的判据都要改，而「漏改一处」正是 v3.23 `expire` 事件被静默丢弃的同类事故。正交标志让「暂停中仍是战斗阶段」保持为真，所以「战斗期禁止改装」这条核心规则在暂停时**仍然成立**。
+
+**修法一：抽出 `_survival_toggle_pause()`，作为暂停开关的唯一实现。** `P` 与 `Esc` 都调它。三件副作用都不能省：① `_survival_held.clear()` + `_survival_apply_input()` —— 暂停期间按下的 W/A/S/D 不会被消费，恢复后若不清理，坦克会带着「玩家早已松开的键」跑出去；② `_survival_accumulator = 0.0` —— 暂停那一帧可能已经攒了余量；③ 文案读 `survival.paused` 而**不是** `toggle_pause()` 的返回值 —— 返回 `false` 既可能是「当前阶段不允许暂停」，也可能是「刚恢复」，两种含义不能混。
+
+**修法二：`_handle_survival_key()` 的 ESC 分支改为逐层返回。**
+
+| 当前阶段 | `Esc` 行为 |
+| --- | --- |
+| `STAGE_BATTLE` | 切换暂停（与 `P` 同一条路径） |
+| `STAGE_MODIFY` | `_survival_leave_modify()`（不变，本来就是逐层返回） |
+| `STAGE_LEVEL_UP` / `STAGE_SHOP` / `STAGE_SUMMARY` | `_exit_survival()`（不变；这三者本身就是弹出菜单） |
+
+**刻意不写的一行**：`_survival_battle_key()` 里**只认 `KEY_P`**，没有 `or key == KEY_ESCAPE`。走到该函数时 `Esc` 已在上层 `return`，写在那里是**永远不执行的死代码**，还会让后来人误以为「两处都处理了」。我一度写上又删掉，原因已写进代码注释。
+
+**修法三：三处文案同步**（不改会给玩家错误信息）：暂停遮罩 → 「按 P 或 Esc 继续 · 暂停期间计时与敌人全部停止」；`_enter_survival()` 的状态栏 → 「… · P/Esc 暂停」；右 HUD 键位块 → 「P / Esc  暂停 / 继续」。**旧版那一行写的是「Esc 返回主菜单」，它本身已经是错的。**
+
+**截图钩子 `--screen=survival_paused`**：在 `_capture_setup()` 里构造**真实的 `InputEventKey`（`keycode = KEY_ESCAPE`、`pressed = true`、`echo = false`）**喂给 `_handle_survival_key()`。**必须走真实按键路径** —— 直接给 `survival.paused = true` 只能证明字段能被写，证明不了「`Esc` 能暂停」。
+
+**测试**：新增 `tests/esc_pause_smoke.gd`（197 行，打印 `ESC_PAUSE_OK`），7 组用例：战斗里 `Esc` → 仍在生存页 + `paused == true` + `stage` 仍是 `STAGE_BATTLE`；再按恢复；**`P` 与 `Esc` 效果逐项相等**；改装页 `Esc` 只退改装、不暂停；商店页 `Esc` 仍退出生存（防止把「逐层返回」扩大成「到处暂停」）；暂停时左键与空格都不开火且 `_is_battle_screen() == false`；**正对照**恢复后同一入口确实能开火。`survival_smoke` 的既有暂停语义（计时冻结 / 敌人不动 / 恢复续走 / `setup()` 与 `close_run()` 归零）全部未回归。
+
+**验证**：`ESC_PAUSE_OK`；`SURVIVAL_OK`；负向对照 `NEG52_OK`（注入旧「`Esc` 一律退出」行为精确变红，还原后 SHA-256 `b789d142` 一致，**全程未用 `git checkout`**）；全量 **30 项 smoke 全绿**（`BAD=0`、`SMOKE52_BATCH_DONE`）；截图 `v52_pause2.png`（1920×1080 / 188,027 B / sha256 `255ce0a3…`）经我本人看图确认：琥珀色「已暂停」大字、副标题、压暗战场、键位块无重复行。
+
+**我自己引入又修掉的错误**：第一版右 HUD 键位块出现**两行**「Esc 暂停 / 继续」（新加一行 + 又把旧行改成了同一句）。断言查不出来 —— `_draw` 在 headless 下不执行，`tests/` 对 UI 层零覆盖 —— **只有看截图才看到**，已删重复行。
+
+**我的测试脚本三处缺陷（不是产品问题）**：① `main._screen` 是 `String` 不是 `int`；② `CannonBank` **没有 `shots_fired` 字段**（Runtime 报 `Invalid access to property or key 'shots_fired'`），真实观测量是 `bank.cannons` / `ProjectileField.shots`；③ 正对照 `0 → 0` 没有分辨力 —— 刚进第一波弹药还没造出来、炮管本来就没装弹，「暂停挡住了」与「本来就没弹」无法区分，必须先逐门炮置 `loaded = true` / `reload_remaining = 0.0` 构造可分辨的起点。
+
+**顺带修正的既有错别字**：右 HUD 第三行原文是「鼠标矄准」（`U+77C4`，不是 `U+7784` 的「瞄」），**该错字在 v3.51 的 `HEAD` 里就已存在**，不是本轮引入；因为它就在本轮改动的同一段文案里，一并改正为「鼠标瞄准」。
+
+**边界**：**本次改动尚未经用户实机操作确认**；UI 改动（遮罩、键位块）**没有自动化像素覆盖**，只有脚本驱动截图 + 我本人看图；**没有做 profile**；**未在 Android 上验证，任何 APK 均不存在**。
+
 #### 11.4.3 两个 SETUP 界面
 
 **`EXPEDITION_SETUP`（单人远征）**
@@ -6242,4 +6278,5 @@ M3 的物理验收基准（`M 61.0 u` / `I 104 064 u·px²` / `T 9000` / `v_max 
 | 2026-11-05 | v3.49 | **特效渲染审核与美化**（用户原话：「再次检查审核特效渲染方面，美化效果」）。本轮是**实现轮**：先审计再改码。① **四个真实缺陷**：**A** 生存页护盾受击**零视觉反馈** —— 数据层发 `shield_hit`（带 `cell`）、页面层推 `kind="shield"` 且位置零半径零、绘制层对 `shield` 直接 `continue`，三重错误互相掩盖；**B** 殉爆 / 引擎爆炸在对局页只有一行文字、在生存页**完全没有分支**，而 `_area_damage()` 是逐受波及部件发事件，页面层拿不到爆炸中心；**C** `draw_damage_popups()` 的 `stack` 在循环外累加，第 6 条数字被抬高 70 px，**哪怕隔了半个战场**；**D** 命中闪光三页各是**单变量**，齐射只闪最后一发。② **修法**：A 用 `side` + `cell` 经 `_survival_cell_world()` 换世界坐标推 `shield_hit`（六边形 + 6 道径向刻线 + 中心小圆）；B 在 `_area_damage()` 里**只在 `depth == 0` 且 `source_cells` 非空**时补一条 `*_burst` 中心事件（防连锁殉爆指数级刷屏），三页消费并按 `maxf(radius × cell_size, 56.0)` 换算；C 抽出 `_popup_stack_at()` 按 `DAMAGE_POPUP_STACK_RADIUS = 48.0` 分桶；D 三页换成数组 + `_advance_timed()` + `_draw_timed_hits()`。③ **八项美化**：口径分档弹头（**对数刻度**，`SHOT_GAUGE_REFERENCE = 240.0`，线性会把三个轻口径全挤到最左端）、速度自适应拖尾（直接读 `shot["speed"]` px/s，**不反推上一帧位移**）、命中方向溅射（`normal` 来自 impact 事件）、`draw_explosion_burst()`（3 环 + 核心 + 8 固定角射线，**零随机**）、三页全部启用 `special` + `centre_dot`、竞技场 4 环内发光 + 四角 L 标、房屋双线 + 四角刻线 + 血量低于 30% 转红、`draw_expire_flash` 死逻辑清理。④ **测试**：新增 `tests/fx_render_smoke.gd`（436 行 / **51 项断言**）；**实测 `CanvasItem.draw_*` 不能在 `_draw()` 之外调用**（四种图元全报 `Drawing is only allowed inside this node's …`，且脚本不中止），故「统计 `draw_*` 调用次数」这条路不成立，改用纯数值函数 + `DamageSystem` 事件 + 源码扫描（剔除注释行）三条路线，**像素只靠截图 + 人眼**。⑤ **验证**：逐文件 `--check-only` 干净；`FX_OK checks=51`；**5 组负向对照全部精确变红且还原 SHA-256 一致**；全量 smoke **28 项零 `SCRIPT ERROR`**，与 v3.48 基线逐字相同（唯一差异是新增 `fx_render_smoke` 一行）；硬不变量 `_next_unit()` = 21 / `omega_max` = 3.0 / `tank_body.gd` 零 diff。⑥ **三页历史截图基线全部作废并重拍**：`v23c_*` 183,957 / 133,180 / 213,730 B → `v49_*` 193,693 / 145,011 / 200,829 B。⑦ **我自己引入又修掉的错误**（必须与产品缺陷分开记）：`SHOT_STEP_REFERENCE` 单位错误（「上一帧位移 ÷ 1.0」是 px/帧不是 px/s，所有口径拖尾塌到下限，**修法是改数据来源而非调常数**）、`drive_feedback_smoke` 漏改导致**假绿**（`SCRIPT ERROR` 让 `_expect()` 根本不执行、测试照样打印 OK）、两次 `File.Edit` 吞掉整行导致 `Parse Error`、`fx_render_smoke` 自身 5 个缺陷。**如实声明**：**本次改动尚未经过用户实机确认**；**UI / 特效改动除纯函数、事件、源码断言外无自动化覆盖，像素只靠截图 + 我自己的眼睛**；护盾受击与爆炸爆发两个特效的**像素表现未在截图中出现**，只有逻辑与源码断言证据；多实例命中闪光**未观察到同时闪光**（截图是单帧）；**没有做 profile**；**未在 Android 上验证，任何 APK 均不存在**。 | §11.4.2.28 §17 |
 | 2026-11-06 | v3.50 | **模块摧毁后的功能失效与碎片掉落**：修掉用户实机报告的「炮管打掉之后还能发射」——`CannonBank.cannons` 与 `AmmoNetwork.parts` 是 `tank.parts` / `builder` 之外的两份独立功能索引副本，只在 `add_side()` / `_enter_drive()` 构建一次，部件被摧毁后从不重建。新增 `DamageSystem.structure_changed: Callable`（`_on_destroyed()` 外层、`depth == 0` 通知一次）→ `Duel._refresh_side_structure()` / `Main._drive_refresh_structure()` 重建 bank + network。同根因的制造装置 / 改进器 / 弹药库被打掉后同样失效。另新增碎片掉落效果：`CombatView` 的 `PART_DEBRIS_TIME := 0.55` / `PART_DEBRIS_RADIUS_PER_CELL := 1.35` / `draw_part_debris()` 与独立 kind `part_debris`（8 片固定角短线段 + 径向抛洒 + 竖直下落，零随机），三页 `destroyed` 分支各自入队。新增 `tests/part_destroy_smoke.gd`（`PART_DESTROY_OK`），全量 smoke 28 → 29 项，6 组负向对照。三页 `v49_*` 截图基线作废（碎片特效必然改变像素），重拍为 `v50_*`。**本次改动尚未经过用户实机确认**。 |
 | 2026-11-07 | v3.51 | **一键打包 release 脚本**：`build_release.bat` 补上「打包」那半边 —— 原先只产出裸 exe，无可分发压缩包。新增 `:do_zip` 段（321 → 444 行）：默认产出 `build/windows/release/TankCraft-<ver>-win64[-debug].zip`，`--no-zip` 关闭、`--zip` 为幂等同义；版本号三级回退（`project.godot` `config/version` → `git describe --tags --always --dirty` → `dev`，当前实测落到 `ed3a943-dirty`）；包目录跟随 `--out`；压缩前删旧 zip 并复核；`Compress-Archive -LiteralPath`（零新依赖，`-Path` 会把 `[` `]` 当通配符）；新退出码 `7`；横幅拆成 `[OK] Export succeeded` + `[OK] Release package ready`。**纠正我自己的误判**：`--out` 带空格**不是**缺陷，上一轮 `[X] Unknown argument: y.exe` 是我的测试没加引号；真实 cmd 中 `--out "build\windows\x y.exe"` 正常。`.gitignore` 加 `*.uid`（godot 生成 52 个，`main.tscn` 的 `uid://` 引用为 0）。**实测**：默认 RC=0 / exe 109,969,936 B / zip 38,702,496 B / 包内单条目且字节数一致 / **解压后 exe 在真实窗口启动**（`WINDOW_MODE mode=2`）；`--debug`、`--no-zip`、`--out` 带空格、`--out` 深目录、`--help`、`--bogus`(RC=1)、缺模板(**exit 3**)、打包失败(**exit 7**) 全部通过。**如实声明**：本次脚本改动**尚未经用户实机使用确认**；无签名 / 无安装器 / 无自动上传；**未在 Android 上验证，任何 APK 均不存在**。 | §11.4.2.30 §17 |
+| 2026-11-08 | v3.52 | **生存模式 Esc 暂停**：用户原话「生存模式加入esc中途暂停」。核实后必须如实说清两件事：① **暂停机制 v3.48 就有了**（`paused` / `toggle_pause()` / `step_battle()` 入口早退 / `_survival_simulate()` 累加器清零 / `_is_battle_screen()` 单点拦截 / 遮罩 / `survival_smoke` 10+ 条断言），**唯一缺口是 `main.gd::_handle_survival_key()` 的 `KEY_ESCAPE` 分支在战斗阶段直接 `_exit_survival()`**，一按就丢掉整局；② 而 `docs/design.md:1605` 早已明文规定「`Esc` 逐层返回，不跳级。`BATTLE_PHASE` 里的 `Esc` 打开暂停面板，而不是退出对局。」（另见 `:1628` / `:1637` / `:5062`）⇒ **这是实现违背了自己的设计文档，不是新增功能**。修法：抽出 `_survival_toggle_pause()` 作为暂停开关的**唯一实现**（清按键集 + `_survival_apply_input()` / 累加器清零 / 文案读 `paused` 而非 `toggle_pause()` 返回值），`P` 与 `Esc` 共用；ESC 分支改为逐层返回（`STAGE_BATTLE` 切暂停、`STAGE_MODIFY` 仍退改装、`LEVEL_UP`/`SHOP`/`SUMMARY` 仍退生存）；`_survival_battle_key()` **只认 `KEY_P`**，不留 `or key == KEY_ESCAPE`（`Esc` 已在上层 return，那是永不执行的死代码）；三处文案同步（遮罩「按 P 或 Esc 继续 · 暂停期间计时与敌人全部停止」/ 状态栏 `P/Esc 暂停` / 右 HUD 键位块，旧行「Esc 返回主菜单」本身就是错的）；新增截图钩子 `--screen=survival_paused`，**内部构造真实 `InputEventKey(KEY_ESCAPE)` 喂给 `_handle_survival_key()`**（直接赋 `paused` 只能证明字段能写）；顺手改正右 HUD 的既有错别字「鼠标矄准」（`U+77C4`，`HEAD` 中已存在，非本轮引入）。新增 `tests/esc_pause_smoke.gd`（197 行 / 7 组用例，含 `P`↔`Esc` 等价性与「暂停中打不出去 / 恢复后打得出去」正反对照）。**我自己引入又修掉的错误**：右 HUD 常出现两行「Esc 暂停 / 继续」，断言查不出、**只有截图才看到**。**我的测试脚本三处缺陷**：`main._screen` 是 `String` 不是 `int`、`CannonBank` 没有 `shots_fired` 字段、正对照 `0 → 0` 无分辨力（必须先置 `loaded = true`）。**验证**：`ESC_PAUSE_OK` / `SURVIVAL_OK` / `NEG52_OK`（还原后 SHA-256 `b789d142` 一致，未用 `git checkout`）/ 全量 **30 项 smoke 全绿**（`BAD=0`）/ 截图 `v52_pause2.png`（1920×1080 / sha256 `255ce0a3…`）经我本人看图确认。**如实声明**：**本次改动尚未经用户实机操作确认**；UI 改动无自动化像素覆盖，只有截图 + 我本人看图；**没有做 profile**；**未在 Android 上验证，任何 APK 均不存在**。 | §11.4.2.31 |
 

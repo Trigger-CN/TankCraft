@@ -388,7 +388,7 @@ func _process(delta: float) -> void:
 	_camera_follow(delta)
 	## v3.26：战斗页每帧把准星与炮口同步到真实光标。
 	## 不能只依赖 `InputEventMouseMotion`——切页后不动鼠标、或坦克行驶而鼠标静止时，
-	## 矄准都会停在上一个状态（详见 `_sync_battle_pointer()`）。
+	## 瞄准都会停在上一个状态（详见 `_sync_battle_pointer()`）。
 	## v3.38：它现在必须在 `_camera_follow()` **之后**，因为缩放后同一个屏幕点
 	## 对应的世界点取决于相机焦点；先同步就会用上一帧的焦点瞄一次。
 	_sync_battle_pointer()
@@ -3180,11 +3180,11 @@ func _player_bank() -> CannonBank:
 		return bank
 	return null
 
-## 当前屏幕是否处于**可矄准 / 可开火**的战斗页。战斗期以外（升级页 / 商店页 / 改装页）
+## 当前屏幕是否处于**可瞄准 / 可开火**的战斗页。战斗期以外（升级页 / 商店页 / 改装页）
 ## 一律返回 false：那里左键是「选卡片 / 买商品 / 落格」，不能同时当开火键。
 ##
 ## v3.48（P0-2）：生存页暂停时也返回 false。**这是暂停在 UI 侧的单一拦截点** ——
-## 左键开火、鼠标矄准、空格开火都经它判一次，所以在这一处加条件就能把三条路径全部挡住，
+## 左键开火、鼠标瞄准、空格开火都经它判一次，所以在这一处加条件就能把三条路径全部挡住，
 ## 不需要在三个地方各写一遍（写三遍就一定会漏一处，v3.23 的教训）。
 ## 对局页早就这么做了（`not match_session.paused`），生存页只是补上同样的那一条。
 func _is_battle_screen() -> bool:
@@ -3267,7 +3267,7 @@ func _fire_battle_player(position: Vector2) -> void:
 ##
 ## **`camera` 与 `scale` 必须同时返回，且必须同步**：`scale` 是 `fit_scale(view, camera)`
 ## 的结果，`camera` 是 `_battle_camera(arena)` 的结果。只传其中一个（例如只传 arena
-## 而丢掉 zoom）会让矄准与绘制各自推一套几何。
+## 而丢掉 zoom）会让瞄准与绘制各自推一套几何。
 func _battle_view() -> Dictionary:
 	if _screen == SCREEN_SURVIVAL and survival != null and survival.duel != null:
 		var arena: Rect2 = survival.duel.arena
@@ -3711,6 +3711,17 @@ func _handle_capture_request() -> void:
 		elif argument == "--screen=survival_modify":
 			_enter_survival()
 			_survival_capture_modify()
+		elif argument == "--screen=survival_paused":
+			## v3.52：暂停遮罩的截图入口。**必须走真实按键路径**：
+			## 直接给 `survival.paused = true` 只能证明字段能被写，证明不了「Esc 能暂停」。
+			## 这里把真实的 `KEY_ESCAPE` 事件喂给键盘分派，与玩家按键完全同一条代码。
+			_enter_survival()
+			_survival_capture_warmup()
+			var pause_event := InputEventKey.new()
+			pause_event.keycode = KEY_ESCAPE
+			pause_event.pressed = true
+			pause_event.echo = false
+			_handle_survival_key(pause_event)
 	if _capture_target.is_empty():
 		return
 	## v3.40：`--zoom=` 在这里才应用 —— `--screen=` 已经全部处理完，竞技场已存在。
@@ -3725,7 +3736,7 @@ func _handle_capture_request() -> void:
 	## 它原本靠在 `_process` 里 `move_toward` 才涨到 1.0；一旦冻结，页面就停在
 	## 淡入起点，实测截图只有 8587 B（几乎全黑）。这里显式置终值。
 	## v3.25：如果传了 `--cursor=`，页面已经建好，现在才能真正应用鼠标位置。
-	## 顺带把炮口也指向该点：截图里矄准与炮口方向一致，才能一眼看出「鼠标瞄准」生效。
+	## 顺带把炮口也指向该点：截图里瞄准与炮口方向一致，才能一眼看出「鼠标瞄准」生效。
 	## v3.40：只有真正拉近之后才钉焦点 —— 整图时相机就是 `arena`，焦点对像素零影响。
 	## 这一条件也让「没传 `--zoom=`」的截图路径完全不经手相机状态，基线更稳。
 	var capture_arena := _battle_arena_now()
@@ -3871,7 +3882,7 @@ func _enter_survival() -> void:
 	_survival_ready = true
 	_set_screen(SCREEN_SURVIVAL)
 	_status_error = false
-	_status_message = "生存：W/S 油门 · A/D 转向 · 鼠标瞄准 · 左键开火（空格备选） · Esc 返回"
+	_status_message = "生存：W/S 油门 · A/D 转向 · 鼠标瞄准 · 左键开火（空格备选） · P/Esc 暂停"
 	queue_redraw()
 
 func _exit_survival() -> void:
@@ -3894,8 +3905,15 @@ func _handle_survival_key(event: InputEventKey) -> void:
 	var pressed := event.pressed and not event.echo
 	if key == KEY_ESCAPE:
 		if pressed:
-			## 改装页的 Esc 先退出改装、回到进入时的阶段；再按一次才离开生存页。
-			if survival.stage == SurvivalRun.STAGE_MODIFY:
+			## v3.52：Esc 是「逐层返回」，不是「退出」。`docs/design.md` §11.4 的三条硬规则第 2 条：
+			## 「`Esc` 逐层返回，不跳级。`BATTLE_PHASE` 里的 `Esc` 打开暂停面板，而不是退出对局。」
+			## v3.48 之前这里在战斗阶段直接 `_exit_survival()` —— 一按就丢掉几十分钟的一局，
+			## 且与设计文档相悖。现在战斗阶段改为切暂停（与 P 走同一条 `_survival_toggle_pause()`），
+			## 再按一次 Esc 恢复；改装页仍是「退出改装」（本来就是逐层返回）；
+			## 升级页 / 商店页 / 结算页本身就是弹出菜单，Esc 退出生存保持原样。
+			if survival.stage == SurvivalRun.STAGE_BATTLE:
+				_survival_toggle_pause()
+			elif survival.stage == SurvivalRun.STAGE_MODIFY:
 				_survival_leave_modify()
 			else:
 				_exit_survival()
@@ -3923,22 +3941,42 @@ func _handle_survival_key(event: InputEventKey) -> void:
 		if key == KEY_R:
 			_enter_survival()
 
+## v3.52：暂停开关的**唯一实现**。P 与 Esc 都调它，不在两处各写一遍。
+##
+## 为什么必须共用：v3.48 时 P 的这段逻辑直接写在 `_survival_battle_key()` 里，
+## 现在 Esc 也要触发同一件事。若复制一份，将来改按键集清理 / 累加器清零时必然漏一处
+## （v3.23「机制存在 ≠ 生效」的同类教训）。
+##
+## 三件副作用都不能省：
+## ① 清按键集 + 重新应用输入：暂停期间按下的 W/A/S/D 不会被消费，恢复后若不清理，
+##    坦克会带着「玩家早已松开的键」跑出去；
+## ② 累加器清零：`_survival_simulate()` 在暂停时会清，但暂停**那一帧**可能已经攒了余量；
+## ③ 文案读 `paused` 而不是返回值：`toggle_pause()` 返回 false 既可能是「本来就不允许暂停」，
+##    也可能是「刚恢复」，两者含义不同。
+func _survival_toggle_pause() -> void:
+	if survival == null:
+		return
+	survival.toggle_pause()
+	if survival.stage == SurvivalRun.STAGE_BATTLE:
+		_survival_event = "已暂停（P 或 Esc 继续）" if survival.paused else "继续"
+		_survival_held.clear()
+		_survival_apply_input()
+		_survival_accumulator = 0.0
+	queue_redraw()
+
 func _survival_battle_key(key: Key, event: InputEventKey) -> void:
 	## v3.48（P0-2）：P 切换暂停。与对局页 `_handle_match_key()` 的 `KEY_P` **同键同语义** ——
 	## 两个模式里「暂停」应该是同一个按键，否则玩家要记两套。
 	## 放在 `KEY_R` 之前判：暂停中按 R 仍会重开（这是有意的 —— 重开是「放弃这一局」，
 	## 与暂停正交，不应该被暂停挡住）。
+	## 与暂停正交，不应该被暂停挡住）。
+	## v3.52：Esc 的暂停由 `_handle_survival_key()` 的 KEY_ESCAPE 分支分派到
+	## `_survival_toggle_pause()`；这里**只认 P**。不留 `or key == KEY_ESCAPE` ——
+	## 走到本函数时 Esc 已经在上层 return 了，那将是一行永远不执行、却让人误以为
+	## 「两处都处理了」的死代码。
 	if key == KEY_P:
 		if event.pressed and not event.echo:
-			var now_paused: bool = survival.toggle_pause()
-			if survival.stage == SurvivalRun.STAGE_BATTLE:
-				_survival_event = "已暂停（P 继续）" if now_paused else "继续"
-				## 暂停 / 恢复都要清按键集：暂停期间按下的 W/A/S/D 不会被消费，
-				## 恢复后若不清理，坦克会带着「玩家早已松开的键」跑出去。
-				_survival_held.clear()
-				_survival_apply_input()
-				_survival_accumulator = 0.0
-			queue_redraw()
+			_survival_toggle_pause()
 		return
 	if key == KEY_R:
 		if event.pressed and not event.echo:
@@ -3954,7 +3992,7 @@ func _survival_battle_key(key: Key, event: InputEventKey) -> void:
 			## v3.48：暂停中不允许开火。`step_battle()` 已经不推进，但 `duel.fire()` 是**直接调用**，
 			## 不拦的话玩家可以在暂停里把弹药全部打出去，而炮弹要等恢复才飞 —— 那不是暂停。
 			if survival.paused:
-				_survival_event = "已暂停（P 继续）"
+				_survival_event = "已暂停（P 或 Esc 继续）"
 				queue_redraw()
 				return
 			var fired := 0
@@ -4384,16 +4422,18 @@ func _draw_survival_hud() -> void:
 	_draw_text(_survival_event, Vector2(left, 576), 15, Palette.ACCENT_LIME, false)
 	_draw_text("W / S    油门", Vector2(right, 240), 16, Palette.TEXT_HI, false)
 	_draw_text("A / D    转向", Vector2(right, 270), 16, Palette.TEXT_HI, false)
-	_draw_text("鼠标矄准 · 左键开火", Vector2(right, 300), 16, Palette.TEXT_HI, false)
-	## v3.48（P0-2）：右 HUD 键位块重排。加入「P 暂停」后共 5 行文字 + 1 行相机读数，
-	## 而行距必须从 30 缩到 26 才能全部装在镜像面板上方。
-	## **几何依据**：`SURVIVAL_MIRROR_RECT` 从 y=436 开始；本块从 330 起 5 行 × 26 =
-	## 330/356/382/408/434，最后一行的**字顶**在 434 − 14 = 420，仍低于 436。
-	## 若继续用 30 px 行距，第 5 行会到 450 —— 直接压在镜像面板上。
-	_draw_text("P        暂停 / 继续", Vector2(right, 330), 16, Palette.TEXT_HI, false)
+	_draw_text("鼠标瞄准 · 左键开火", Vector2(right, 300), 16, Palette.TEXT_HI, false)
+	## v3.52：右 HUD 键位块仍为 5 行 + 1 行相机读数（Esc 并入暂停行，不新增行）。
+	## **几何依据**：`SURVIVAL_MIRROR_RECT` 从 y=436 开始；本块从 330 起、行距 26，
+	## 字高 16 ⇒ 每行字顶到字底约 16 px。最后一条正文在 408（字底 ≈424），
+	## 相机读数在 430（字高 13，字底 ≈443）—— 它本来就与镜像面板顶端重叠，
+	## 所以这一行用的是 `ACCENT_CYAN` 小字号，v3.48 已如此，本轮**未改变行位**。
+	_draw_text("P / Esc  暂停 / 继续", Vector2(right, 330), 16, Palette.TEXT_HI, false)
 	_draw_text("R        重开 run", Vector2(right, 356), 16, Palette.TEXT_HI, false)
-	_draw_text("Esc      返回主菜单", Vector2(right, 382), 16, Palette.TEXT_HI, false)
-	_draw_text("战斗期禁止改装", Vector2(right, 408), 14, Palette.ACCENT_AMBER, false)
+	## v3.52：Esc 在战斗里是暂停，不再是「返回主菜单」。旧文案会直接误导玩家
+	## （他会以为一按就退出整局，因而根本不敢按）。第一版把这一行也与上面并列画了出来，
+	## 结果同一块里出现两条「Esc 暂停 / 继续」—— 截图里一眼就看到重复，已删除。
+	_draw_text("战斗期禁止改装", Vector2(right, 382), 14, Palette.ACCENT_AMBER, false)
 	_draw_text("滚轮推拉 · Z 整图  相机 %s" % _camera_readout(_battle_arena_now()), Vector2(right, 430), 13, Palette.ACCENT_CYAN, false)
 	_draw_survival_mirror()
 	_draw_battle_status(_status_message)
@@ -4403,14 +4443,14 @@ func _draw_survival_hud() -> void:
 		_draw_survival_pause_overlay()
 
 ## 暂停遮罩：压暗战场并给出醒目的「已暂停」与恢复方式。
-## 只用一层半透明黑 + 两行字，不加按钮 —— 恢复只需要按 P，
+## 只用一层半透明黑 + 两行字，不加按钮 —— 恢复只需要按 P 或 Esc，
 ## 加一个可点按钮会多一条需要单独测的鼠标路径（本项目 UI 测试对菜单层零覆盖）。
 func _draw_survival_pause_overlay() -> void:
 	draw_rect(DRIVE_VIEW, Color(Palette.BG_BASE, 0.72), true)
 	draw_rect(DRIVE_VIEW, Color(Palette.ACCENT_AMBER, 0.85), false, 2.0)
 	var centre := DRIVE_VIEW.get_center()
 	_draw_text("已暂停", centre + Vector2(-54.0, -6.0), 44, Palette.ACCENT_AMBER, true)
-	_draw_text("按 P 继续 · 暂停期间计时与敌人全部停止", centre + Vector2(-158.0, 44.0), 17, Palette.TEXT_HI, false)
+	_draw_text("按 P 或 Esc 继续 · 暂停期间计时与敌人全部停止", centre + Vector2(-208.0, 44.0), 17, Palette.TEXT_HI, false)
 
 ## 坦克镜像面板（用户 2026-10-17 要求：「要有一个小窗口显示一个坦克的镜像，展示坦克每个模块的状态」）。
 ##

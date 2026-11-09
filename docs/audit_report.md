@@ -638,3 +638,17 @@ func _draw() -> void:
 > **两条过程性更正值得记下来。** 第一，上一轮报的「`--out` 带空格解析失败」**是我的测试写法错误**，不是脚本缺陷：`cmd /c "build_release.bat --out build\windows\x y.exe"` 会剥掉内层引号，按正确引号在真实 cmd 中执行则 `Output` 行完整、导出成功，`:parse_args` 无需改动。第二，cmd 里 `&` 链中的 `%ERRORLEVEL%` 在**解析期**展开，读到的是上一条命令的值，据此我把「缺模板」读成 `1`、把「打包失败」读成 `0`，两个都是假的（实际 `3` 与 `7`）；**脚本必须单独跑一条命令、下一条命令再读退出码**。
 >
 > **证据边界**：11 个用例（默认 / `--debug` / `--no-zip` / `--out` 带空格 / `--out` 深目录 / `--help` / `--bogus` / 缺模板 / 打包失败，以及 zip 内容核验与解压后启动）全部由我在本机真实 `cmd.exe` 中执行，包内 exe 确在真实窗口启动（`WINDOW_MODE mode=2`）。但**本次脚本改动尚未经用户实机使用确认**；无代码签名、无安装器、无自动上传；**未在 Android 上验证，任何 APK 均不存在**。
+
+> **v3.52 生存模式 Esc 暂停轮补充**：用户原话「生存模式加入esc中途暂停」。核实后要如实说明：**暂停机制 v3.48 就已经做好**（`SurvivalRun.paused` / `paused_time` / `toggle_pause()`、`step_battle()` 入口 `if paused: return`、`_survival_simulate()` 清累加器、`_is_battle_screen()` 的 `and not survival.paused` 单点拦截、暂停遮罩、`survival_smoke` 的 10+ 条断言），**唯一缺口是 `main.gd::_handle_survival_key()` 的 `KEY_ESCAPE` 分支在战斗阶段直接 `_exit_survival()`** —— 一按就丢掉整局。而 `docs/design.md:1605` 早已明文规定「**`Esc` 逐层返回，不跳级。`BATTLE_PHASE` 里的 `Esc` 打开暂停面板，而不是退出对局。**」（`:1628` / `:1637` / `:5062` 三处印证），**所以这是实现没遵守自己的设计，不是新增功能**。
+>
+> **修法**：把 v3.48 内联在 `_survival_battle_key()` 里的 `P` 逻辑抽成 `_survival_toggle_pause()`，作为暂停开关的**唯一实现**，`P` 与 `Esc` 共用（清按键集 + `_survival_apply_input()` / `_survival_accumulator = 0.0` / 文案读 `survival.paused` 而非 `toggle_pause()` 返回值）；ESC 分支改为逐层返回（`STAGE_BATTLE` 切暂停、`STAGE_MODIFY` 仍退改装、`LEVEL_UP` / `SHOP` / `SUMMARY` 仍退生存）；`_survival_battle_key()` **只认 `KEY_P`**，不留 `or key == KEY_ESCAPE`（`Esc` 已在上层 return，那是永不执行的死代码）；三处文案同步；新增 `--screen=survival_paused` 截图钩子，**内部构造真实 `InputEventKey(KEY_ESCAPE)`** 而不是直接赋 `paused`。顺手改正右 HUD 的既有错别字「鼠标矄准」（`U+77C4`，`HEAD` 中已存在，非本轮引入）。
+>
+> **新增 `tests/esc_pause_smoke.gd`**（197 行 / 7 组用例）：战斗里 `Esc` 暂停且**仍留在生存页**、再按恢复、**`P` 与 `Esc` 效果逐项相等**、改装页 `Esc` 只退改装、商店页 `Esc` 仍退出生存、暂停时左键与空格都不开火、**正对照「恢复后同一入口能开火」**。为什么必须新增：`survival_smoke::_check_survival_pause()` 只验证领域层，**完全绕过键盘分派层**，而本轮改的正是分派层。
+>
+> **三处属于我自己的测试缺陷（不是产品问题）**：① `main._screen` 是 `String` 不是 `int`；② `CannonBank` **没有 `shots_fired` 字段**（`shots_fired` 只是 `bank.cannons[i]` 的字典键），真实观测量是 `bank.cannons` / `field.shots`；③ 正对照 `0 → 0` **没有分辨力** —— 刚进第一波炮管本来就没装弹，「暂停挡住了」与「本来就没弹」无法区分，必须先逐门炮置 `loaded = true` / `reload_remaining = 0.0`。**主断言不能自证，只有正反对照能证明它有分辨力**（v3.39 教训的又一次实例）。
+>
+> **一处我自己引入又修掉的产品侧失误**：第一版右 HUD 键位块出现**两行**「Esc 暂停 / 继续」，断言查不出来（`_draw` 在 headless 下不执行，`tests/` 对 UI 层零覆盖），**只有看截图才看到**，已删重复行。
+>
+> **证据**：`ESC_PAUSE_OK`；`SURVIVAL_OK`；负向对照 `NEG52_OK`（注入旧「`Esc` 一律退出」行为精确变红，还原后 SHA-256 `b789d142` 一致，**全程未用 `git checkout` / `git restore`**）；全量 **30 项 smoke 全绿**（`BAD=0`、`SMOKE52_BATCH_DONE`）；截图 `v52_pause2.png`（1920×1080 / 188,027 B / sha256 `255ce0a3761a2335b61f073477e372849d294fbf2265471fbc7669e57abc34a0`）经我本人看图确认。
+>
+> **边界**：**本次改动尚未经用户实机操作确认**；UI 改动（暂停遮罩、右 HUD 键位块）**没有自动化像素覆盖**，只有脚本驱动截图 + 我本人看图；真人交互试玩一直由用户执行，是本项目几乎所有缺陷与需求变更的来源；**没有做 profile**；**未在 Android 上验证，任何 APK 均不存在**。

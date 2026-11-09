@@ -80,11 +80,11 @@
 | `W` `A` `S` `D` / 方向键 | 油门与转向 |
 | 鼠标移动 | 瞄准（炮口跟随光标） |
 | **鼠标左键** | 开火（`空格` 为备选） |
-| `P` | 暂停 / 继续（**对战页与生存页**；v3.48 起生存页也能暂停） |
+| `P` / `Esc` | 暂停 / 继续（**对战页与生存页**；v3.48 起生存页也能暂停，v3.52 起生存页战斗中 `Esc` 与 `P` 完全等价） |
 | `R` | 重开 |
 | **鼠标滚轮** | 相机推拉（**1.00×（整图）– 4.00×**，步进 1.15；滚近放大、滚远缩小） |
 | `Z` | 相机拉回整图（1.00×） |
-| `Esc` | 逐层返回 |
+| `Esc` | 逐层返回：生存页**战斗中暂停 / 继续**（与 `P` 同一条路径）、**改装页退出改装**；升级页 / 商店页 / 结算页与其它页面按各自规则返回 |
 
 ### 建造 / 改装
 
@@ -182,7 +182,7 @@ build_release.bat
 
 ## 测试
 
-29 项 smoke，全部 headless、无外部依赖：
+30 项 smoke，全部 headless、无外部依赖：
 
 ```bash
 godot --headless --path . --script res://tests/ammo_combo_smoke.gd
@@ -206,6 +206,7 @@ godot --headless --path . --script res://tests/ammo_combo_smoke.gd
 | `match_smoke.gd` | `MATCH_OK` |
 | `expedition_smoke.gd` | `EXPEDITION_OK` |
 | `survival_smoke.gd` | `SURVIVAL_OK` |
+| `esc_pause_smoke.gd` | `ESC_PAUSE_OK` |
 | `mouse_input_smoke.gd` | `MOUSE_OK` |
 | `editor_bounds_smoke.gd` | `PREVIEW_OK` |
 | `perf_smoke.gd` | `PERF_OK` |
